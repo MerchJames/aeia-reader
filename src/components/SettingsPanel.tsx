@@ -2,7 +2,7 @@ import React, { useMemo, useRef, useState } from 'react';
 import {
   AlignLeft, Clapperboard, Download, FileText, Focus, ImageIcon, LayoutTemplate, Loader2, MessageSquareQuote,
   Music2, PauseCircle, Play, PlayCircle, Quote, RefreshCw, Save, Sparkles, Square, Terminal, Trash2, Type,
-  UserRound, Volume2, Wand2, X, ZoomIn,
+  UserRound, Volume2, Wand2, X, Zap, ZoomIn,
 } from 'lucide-react';
 import { useAppStore } from '../store';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
@@ -11,7 +11,7 @@ import { useFontStore } from '../stores/useFontStore';
 import { useSpriteStore } from '../stores/useSpriteStore';
 import { useBackdropStore } from '../stores/useBackdropStore';
 import { EMOTION_BUCKETS, EmotionBucket } from '../lib/spriteStorage';
-import { directorCoverage, enrichAll, stopEnrich } from '../utils/sceneDirectorRunner';
+import { directorCoverage, enrichAll, retryCurrentPage, stopEnrich } from '../utils/sceneDirectorRunner';
 import { ttsSupported, useVoices } from '../hooks/useTTS';
 import { KNOWN_KOKORO_VOICES, kokoroSpeak, listKokoroVoices } from '../utils/kokoro';
 import { AMBIENT_SOUNDS } from '../utils/ambient';
@@ -97,7 +97,10 @@ const ExportWithEditsButton = ({ story }: { story: import('../types').Story }) =
  * the matching backdrop on the Stage.
  */
 const BackdropSection = () => {
-  const backdrops = useBackdropStore(s => s.backdrops);
+  const storyId = useAppStore(s => s.currentStory?.id);
+  const allBackdrops = useBackdropStore(s => s.backdrops);
+  // Only this chat's backdrops — they never cross chats.
+  const backdrops = allBackdrops.filter(b => b.storyId === storyId);
   const urls = useBackdropStore(s => s.urls);
   const addBackdrop = useBackdropStore(s => s.addBackdrop);
   const removeBackdrop = useBackdropStore(s => s.removeBackdrop);
@@ -129,7 +132,7 @@ const BackdropSection = () => {
           className="hidden"
           onChange={(e) => {
             const f = e.target.files?.[0];
-            if (f && keyword.trim()) { void addBackdrop(keyword, f); setKeyword(''); }
+            if (f && keyword.trim() && storyId) { void addBackdrop(storyId, keyword, f); setKeyword(''); }
             e.target.value = '';
           }}
         />
@@ -166,6 +169,7 @@ const BackdropSection = () => {
  * read swaps the character to the matching expression.
  */
 const ExpressionStrip = ({ character, spriteKey }: { character: string; spriteKey?: string }) => {
+  const storyId = useAppStore(s => s.currentStory?.id);
   const sprites = useSpriteStore(s => s.sprites);
   const urls = useSpriteStore(s => s.urls);
   const addSprite = useSpriteStore(s => s.addSprite);
@@ -174,10 +178,11 @@ const ExpressionStrip = ({ character, spriteKey }: { character: string; spriteKe
   const [pending, setPending] = useState<EmotionBucket | null>(null);
 
   // The storage key can be namespaced (the reader's own sprites live under
-  // "user:<name>") so two rows can never share a set by accident.
+  // "user:<name>") so two rows can never share a set by accident. Scoped to this
+  // chat via storyId — a set uploaded here never appears in another chat.
   const storeAs = spriteKey ?? character;
   const key = storeAs.trim().toLowerCase();
-  const bySlot = new Map(sprites.filter(s => s.character === key).map(s => [s.emotion, s]));
+  const bySlot = new Map(sprites.filter(s => s.storyId === storyId && s.character === key).map(s => [s.emotion, s]));
 
   return (
     <div className="flex items-center gap-1.5 pl-[3.25rem] -mt-1">
@@ -222,7 +227,7 @@ const ExpressionStrip = ({ character, spriteKey }: { character: string; spriteKe
         className="hidden"
         onChange={(e) => {
           const f = e.target.files?.[0];
-          if (f && pending) void addSprite(storeAs, pending, f);
+          if (f && pending && storyId) void addSprite(storyId, storeAs, pending, f);
           setPending(null);
           e.target.value = '';
         }}
@@ -577,6 +582,15 @@ const SceneDirectorSection = () => {
                 <Square size={11} /> Stop
               </button>
             ) : (
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={() => void retryCurrentPage(storyId)}
+                  disabled={!enabled}
+                  title="Re-read the page you're on (drops its cached read and runs the Director again)"
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] bg-app-text/10 hover:bg-app-text/20 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <RefreshCw size={11} /> Retry page
+                </button>
               <button
                 onClick={() => void enrichAll(storyId)}
                 disabled={!enabled || complete || coverage.total === 0}
@@ -584,6 +598,7 @@ const SceneDirectorSection = () => {
               >
                 {complete ? 'All read' : 'Enrich all'}
               </button>
+              </div>
             )}
           </div>
           <Toggle
@@ -635,7 +650,7 @@ const SceneDirectorSection = () => {
   );
 };
 
-export const SettingsPanel = ({ onOpenAutoFormat }: { onOpenAutoFormat: () => void }) => {
+export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFormat: () => void; onOpenRefine: () => void }) => {
   const store = useAppStore();
   const [configName, setConfigName] = useState('');
   const voices = useVoices();
@@ -1053,6 +1068,31 @@ export const SettingsPanel = ({ onOpenAutoFormat }: { onOpenAutoFormat: () => vo
                   </p>
                 )}
                 {store.ttsEngine === 'kokoro' && <KokoroSettings />}
+                {store.ttsEngine === 'kokoro' && (
+                  <>
+                    <Toggle
+                      icon={<UserRound size={15} />}
+                      label="Multi-voice dialogue"
+                      value={store.ttsMultiVoice}
+                      onChange={store.setTtsMultiVoice}
+                    />
+                    <p className="text-[11px] text-muted leading-snug px-1">
+                      Reads narration in the speaker's voice and voices each character's
+                      quoted dialogue in their own cast voice.
+                    </p>
+                  </>
+                )}
+                <Toggle
+                  icon={<MessageSquareQuote size={15} />}
+                  label="Dialogue-only"
+                  value={store.ttsDialogueOnly}
+                  onChange={store.setTtsDialogueOnly}
+                />
+                <p className="text-[11px] text-muted leading-snug px-1">
+                  Voices only the quoted dialogue — in each speaker's voice — as the reveal
+                  reaches each line, leaving narration silent. A conversational read instead
+                  of a narrator reading everything.
+                </p>
                 <Toggle
                   icon={<Volume2 size={15} />}
                   label="Match reading speed"
@@ -1090,6 +1130,83 @@ export const SettingsPanel = ({ onOpenAutoFormat }: { onOpenAutoFormat: () => vo
               onChange={store.setAmbientEnabled}
             />
             {store.ambientEnabled && <AmbientSettings />}
+            <Toggle
+              icon={<Music2 size={16} />}
+              label="Scene audio (AI-generated SFX / music)"
+              value={store.audioCuesEnabled}
+              onChange={store.setAudioCuesEnabled}
+            />
+            {store.audioCuesEnabled && (
+              <div className="flex flex-col gap-1.5 pl-1">
+                <label className="text-xs text-muted">Audio service URL</label>
+                <input
+                  type="text"
+                  value={store.audioBaseUrl}
+                  onChange={(e) => store.setAudioBaseUrl(e.target.value)}
+                  placeholder="http://localhost:8899"
+                  className="bg-app-text/5 border border-app-border rounded-md px-2 py-1.5 text-sm outline-none focus:border-accent/50"
+                />
+                <p className="text-[11px] text-muted leading-snug">
+                  Runs the optional local <code>aura-audio</code> service (Stable Audio 3). When on, the
+                  Scene Director searches/generates SFX, ambience &amp; music and plays them in Sandbox
+                  scenes, and while reading the scene ambience bed is drawn from the generated library
+                  (reused when it fits). Off → scenes use built-in procedural sounds. The reader works either way.
+                </p>
+                <Toggle
+                  icon={<Sparkles size={16} />}
+                  label="Offer to generate scene audio"
+                  value={store.audioLiveGen}
+                  onChange={store.setAudioLiveGen}
+                />
+                <p className="text-[11px] text-muted leading-snug">
+                  When a scene has no matching clip yet, offer a one-tap prompt to “set the scene” by
+                  generating one (e.g. a tavern → crowd chatter). Off → the reader only ever REUSES clips
+                  that already exist; nothing is generated on its own.
+                </p>
+                <Toggle
+                  icon={<Music2 size={16} />}
+                  label="Scene music"
+                  value={store.sceneMusic}
+                  onChange={store.setSceneMusic}
+                />
+                <p className="text-[11px] text-muted leading-snug">
+                  Layer generated music over ambience on scenes that earn it — high tension, awe/action
+                  moods, or musical places (a bard, a festival). It ducks under narration and crossfades
+                  between scenes.
+                </p>
+                {store.sceneMusic && (
+                  <label className="flex items-center gap-2 text-xs text-muted pl-1">
+                    <span className="w-16 shrink-0">Music vol</span>
+                    <input
+                      type="range" min={0} max={1} step={0.05}
+                      value={store.musicVolume}
+                      onChange={(e) => store.setMusicVolume(parseFloat(e.target.value))}
+                      className="flex-1 accent-current"
+                    />
+                    <span className="w-8 text-right tabular-nums">{Math.round(store.musicVolume * 100)}</span>
+                  </label>
+                )}
+                <label className="flex items-center gap-2 text-xs text-muted pt-1">
+                  <Zap size={16} className="shrink-0" />
+                  <span className="flex-1">Sound effects</span>
+                  <select
+                    value={store.sfxPermissiveness}
+                    onChange={(e) => store.setSfxPermissiveness(e.target.value as any)}
+                    className="bg-app-text/5 border border-app-border rounded-md px-2 py-1 text-sm outline-none focus:border-accent/50"
+                  >
+                    <option value="off">Off</option>
+                    <option value="light">Light</option>
+                    <option value="medium">Medium</option>
+                    <option value="immersive">Immersive</option>
+                  </select>
+                </label>
+                <p className="text-[11px] text-muted leading-snug">
+                  Fires a one-shot at charged moments as you read (a crash, a scream, a fall).
+                  <b> Light</b> = 1–2, only if pivotal · <b>Medium</b> = up to 5 · <b>Immersive</b> = up to 20.
+                  Reuses library clips; only generates new ones when “Offer to generate” is on.
+                </p>
+              </div>
+            )}
           </Section>
 
           <Section title="Text Processing">
@@ -1165,6 +1282,21 @@ export const SettingsPanel = ({ onOpenAutoFormat }: { onOpenAutoFormat: () => vo
                   <span className="block">Formatting Studio</span>
                   <span className="block text-[10px] opacity-70 font-normal">
                     Force-format stats ([Health] 100 → panels) · regex rules · AI reformat
+                  </span>
+                </div>
+              </div>
+              <span>&rarr;</span>
+            </button>
+            <button
+              onClick={() => { close(); onOpenRefine(); }}
+              className="flex items-center justify-between p-2 rounded-lg hover:bg-app-text/5 transition-colors text-sm text-accent bg-accent/10"
+            >
+              <div className="flex items-center gap-2">
+                <Wand2 size={16} />
+                <div className="text-left">
+                  <span className="block">Narrative Refinery</span>
+                  <span className="block text-[10px] opacity-70 font-normal">
+                    Extract nouns/verbs · restyle to another author · grounded, saved to Lens
                   </span>
                 </div>
               </div>

@@ -186,9 +186,12 @@ export const BookView = () => {
 
     const run = () => {
       lastTailRun.current = Date.now();
-      const msg = useAppStore.getState().streamingMessage;
+      const st = useAppStore.getState();
+      const msg = st.streamingMessage;
       if (!msg) return;
-      const live = balanceEmphasis(truncateToWord(useAppStore.getState().streamedText));
+      // Show the whole passage once committed; hide the last word only while
+      // it's still being revealed, so a finished page never looks cut off.
+      const live = balanceEmphasis(st.revealComplete ? st.streamedText : truncateToWord(st.streamedText));
       const tail: BookBlock[] = [];
       const ch = chapterByStartId.get(msg.id);
       if (ch) tail.push({ html: ch.html, chapter: ch.label });
@@ -201,7 +204,7 @@ export const BookView = () => {
     if (since >= TAIL_THROTTLE) { run(); return; }
     const t = setTimeout(run, TAIL_THROTTLE - since);
     return () => clearTimeout(t);
-  }, [streamedText, store.streamingMessage, basePages, dims, chapterByStartId, maxParaChars]);
+  }, [streamedText, store.revealComplete, store.streamingMessage, basePages, dims, chapterByStartId, maxParaChars]);
 
   const pages = useMemo(() => (
     tailPages ? [...basePages.slice(0, -1), ...tailPages] : basePages
@@ -386,7 +389,7 @@ export const BookView = () => {
 
       {dims && (
         <div
-          className={cn('book', single && 'book-single', flip && 'book-flipping')}
+          className={cn('book', single && 'book-single', flip && 'book-flipping', store.isAutofocusMode && 'book-autofocus')}
           style={{
             width: single ? dims.pw : dims.pw * 2,
             height: dims.ph,

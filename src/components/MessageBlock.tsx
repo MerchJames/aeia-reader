@@ -25,6 +25,7 @@ import {
   truncateToWord,
 } from '../utils/textProcessor';
 import { isShoutWord, normalizeWord } from '../utils/expressive';
+import { attributeSpeaker, aiSpeakerFor, DialogueAttribution } from '../utils/dialogueSegments';
 import { buildStatPanel, isBarStat, StatEntry } from '../utils/statFormatter';
 
 /** Strip markdown markers for a plain-text context preview. */
@@ -36,7 +37,9 @@ const plainish = (t: string): string =>
  * paired with the narration surrounding it (from the previous line to the next)
  * so hovering a bubble can reveal the text around it.
  */
-const extractDialogueSegments = (text: string): { quote: string; context: string }[] => {
+const extractDialogueSegments = (
+  text: string, cast: string[] = [], dialogue?: DialogueAttribution[],
+): { quote: string; context: string; speaker?: string }[] => {
   const re = /["“]([^"”\n]{1,400})["”]/g;
   const matches: { inner: string; start: number; end: number }[] = [];
   let m: RegExpExecArray | null;
@@ -47,7 +50,11 @@ const extractDialogueSegments = (text: string): { quote: string; context: string
     const from = i > 0 ? matches[i - 1].end : 0;
     const to = i < matches.length - 1 ? matches[i + 1].start : text.length;
     const context = plainish(text.slice(from, to));
-    return { quote: mm.inner, context };
+    // Enrichment attribution first, then the narration heuristic — so a quote
+    // the author voices for someone else is labelled, not read as this message's.
+    const speaker = aiSpeakerFor(mm.inner, dialogue)
+      ?? attributeSpeaker(text.slice(from, mm.start).slice(-72), text.slice(mm.end, to).slice(0, 72), cast);
+    return { quote: mm.inner, context, speaker };
   });
 };
 
@@ -195,7 +202,7 @@ const wrapWords = (
   delays: Map<number, number>,
   expressive: boolean,
   readingWord: number | null,
-  emphasis: Map<string, 'whisper' | 'shout'> | null,
+  emphasis: Map<string, EmphKind> | null,
 ): React.ReactNode => {
   // Nothing to do unless we're animating the streaming tail, dressing shouts,
   // karaoke-highlighting the voice's word, or applying Director emphasis. When
@@ -214,9 +221,10 @@ const wrapWords = (
       const dir = emphasis ? emphasis.get(normalizeWord(word)) : undefined;
       const shout = dir === 'shout' || (expressive && isShoutWord(word));
       const whisper = dir === 'whisper';
+      const sfxMark = dir === 'sfx';
       const reading = readingWord != null && idx === readingWord;
       const inTail = !!style && idx >= settled && idx < settled + WORD_REVEAL_CAP;
-      if (!inTail && !shout && !whisper && !reading) {
+      if (!inTail && !shout && !whisper && !sfxMark && !reading) {
         // Ordinary settled/out-of-window word — emit as plain text.
         out.push(node.slice(cursor, m.index + word.length));
       } else {
@@ -231,6 +239,7 @@ const wrapWords = (
               inTail && `word-reveal word-reveal-${style}`,
               shout && 'expr-shout',
               whisper && 'expr-whisper',
+              sfxMark && 'sfx-mark',
               reading && 'tts-reading',
             )}
             style={inTail ? { animationDelay: `${delays.get(idx)}ms` } : undefined}
@@ -251,18 +260,21 @@ const wrapWords = (
 };
 
 /** Word → emphasis-kind map from the Director's spans (verbatim substrings).
- *  Beats are pacing, not visual, so only whisper/shout words are mapped. */
+ *  Beats are pacing, not visual. whisper/shout are gated on the expressive
+ *  toggle; 'sfx' marks are reader-authored so they always show. */
+type EmphKind = 'whisper' | 'shout' | 'sfx';
 const buildEmphasisMap = (
   spans: SceneEmphasis[] | undefined,
   on: boolean,
-): Map<string, 'whisper' | 'shout'> | null => {
-  if (!on || !spans || spans.length === 0) return null;
-  const map = new Map<string, 'whisper' | 'shout'>();
+): Map<string, EmphKind> | null => {
+  if (!spans || spans.length === 0) return null;
+  const map = new Map<string, EmphKind>();
   for (const s of spans) {
     if (s.kind === 'beat') continue;
+    if ((s.kind === 'whisper' || s.kind === 'shout') && !on) continue; // expressive-gated
     for (const w of s.text.split(/\s+/)) {
       const n = normalizeWord(w);
-      if (n.length >= 2 && !map.has(n)) map.set(n, s.kind);
+      if (n.length >= 2 && !map.has(n)) map.set(n, s.kind as EmphKind);
     }
   }
   return map.size ? map : null;
@@ -272,6 +284,11 @@ export interface MessageBlockProps {
   msg: Message;
   content: string;
   isStreamingMsg: boolean;
+  /** True once the streaming reveal has committed the whole passage — stops the
+   *  in-progress last word from staying hidden through the end-of-message hold. */
+  revealComplete?: boolean;
+  /** Enrichment per-quote speaker attribution (phone dialogue-only view). */
+  dialogue?: DialogueAttribution[];
   isMsgZoomed: boolean;
   avatar?: string;
   /** Raw message content, used for the per-block "view original" toggle. */
@@ -331,6 +348,7 @@ const MessageContent = React.memo(({
   msg,
   content,
   isStreamingMsg,
+  revealComplete,
   msgAnim,
   dialogueColor,
   dialogueStyle,
@@ -359,7 +377,7 @@ const MessageContent = React.memo(({
   settledCount,
   wordRevealStyle,
   wordDelays,
-}: Pick<MessageBlockProps, 'msg' | 'content' | 'isStreamingMsg' | 'msgAnim' | 'dialogueColor'
+}: Pick<MessageBlockProps, 'msg' | 'content' | 'isStreamingMsg' | 'revealComplete' | 'msgAnim' | 'dialogueColor'
   | 'dialogueStyle' | 'dialogueAnimation' | 'hideMetadata' | 'oocHandling' | 'autoFormat'
   | 'autoFormatRules' | 'statRules' | 'paragraphSpacing' | 'dialogueOwnLine' | 'smartTypography'
   | 'styleQuotes' | 'substituteNames' | 'characterName' | 'userName' | 'showImages'
@@ -371,7 +389,9 @@ const MessageContent = React.memo(({
   }) => {
   const { entries: statEntries, prose: statProse } = buildStatPanel(content, statRules);
   const processedText = isStreamingMsg
-    ? balanceEmphasis(truncateToWord(statProse))
+    // Hide the in-progress last word only while still revealing; show the whole
+    // passage once committed so the end-of-message hold never looks cut off.
+    ? balanceEmphasis(revealComplete ? statProse : truncateToWord(statProse))
     : processText(statProse, {
         // Hidden SillyTavern messages (/hide, narrator, system notes) are
         // meant to be readable in the reader; stripping their metadata tags
@@ -619,6 +639,7 @@ const MessageContent = React.memo(({
     && prev.expressiveText === next.expressiveText
     && prev.ttsReading === next.ttsReading
     && prev.emphasis === next.emphasis
+    && prev.revealComplete === next.revealComplete
     && prev.settledCount === next.settledCount
     && prev.wordRevealStyle === next.wordRevealStyle
     && prev.wordDelays === next.wordDelays;
@@ -675,9 +696,12 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
   // Hidden SillyTavern messages (/hide, narrator, system notes) are still
   // part of the story, so they render as a single bubble even without quotes.
   if (theme === 'phone' && phoneDialogueOnly && viewMode !== 'storybook') {
-    let segments = extractDialogueSegments(displayContent);
+    const { characterName, userName } = props;
+    const cast = [characterName, userName, msg.name].filter(Boolean) as string[];
+    let segments = extractDialogueSegments(displayContent, cast, props.dialogue);
     if (!segments.length && !msg.hidden) return null;
     if (!segments.length && msg.hidden) segments = [{ quote: displayContent, context: '' }];
+    const ownerName = (msg.name ?? '').trim().toLowerCase();
     return (
       <div
         key={msg.id}
@@ -696,20 +720,32 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
         <div className="flex flex-col gap-1.5 max-w-[78%]">
           {segments.map((seg, i) => {
             const hasContext = seg.context && seg.context !== seg.quote;
+            // A line the author voices for someone else (an NPC, or the reader
+            // being quoted): tag it and float it the other way so it never
+            // reads as this character's own speech.
+            const other = !!seg.speaker && seg.speaker.trim().toLowerCase() !== ownerName;
+            const asUser = other && !!userName && seg.speaker!.trim().toLowerCase() === userName.trim().toLowerCase();
+            const alignRight = isUser ? !other : asUser;
             return (
-              <div
-                key={i}
-                onMouseEnter={hasContext ? (e) => onShowDialogueTip(e, seg.context) : undefined}
-                onMouseLeave={onHideDialogueTip}
-                className={cn(
-                  'px-4 py-2 rounded-2xl shadow-sm text-[0.95em] leading-snug',
-                  hasContext && 'cursor-help',
-                  isUser
-                    ? 'bg-bubble-user text-bubble-user-text rounded-br-md self-end'
-                    : 'bg-bubble-ai border border-app-border/60 rounded-bl-md self-start',
+              <div key={i} className={cn('flex flex-col gap-0.5', alignRight ? 'self-end items-end' : 'self-start items-start')}>
+                {other && !asUser && (
+                  <span className="text-[0.7em] font-semibold uppercase tracking-wide opacity-55 px-1">{seg.speaker}</span>
                 )}
-              >
-                {seg.quote}
+                <div
+                  onMouseEnter={hasContext ? (e) => onShowDialogueTip(e, seg.context) : undefined}
+                  onMouseLeave={onHideDialogueTip}
+                  className={cn(
+                    'px-4 py-2 rounded-2xl shadow-sm text-[0.95em] leading-snug',
+                    hasContext && 'cursor-help',
+                    alignRight
+                      ? 'bg-bubble-user text-bubble-user-text rounded-br-md'
+                      : other
+                        ? 'bg-bubble-ai border border-app-accent/50 rounded-bl-md'
+                        : 'bg-bubble-ai border border-app-border/60 rounded-bl-md',
+                  )}
+                >
+                  {seg.quote}
+                </div>
               </div>
             );
           })}

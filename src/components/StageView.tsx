@@ -13,7 +13,10 @@ import { bucketFor } from '../lib/spriteStorage';
 import { spriteFor, useSpriteStore } from '../stores/useSpriteStore';
 import { backdropForScene, useBackdropStore } from '../stores/useBackdropStore';
 import { SceneFx } from './SceneFx';
+import { SceneVfx } from './SceneVfx';
+import { deriveVfx, emoteFor, stickyWeather } from '../utils/sceneVfx';
 import { Message, SceneEmphasis } from '../types';
+import { latestSpeech } from '../utils/dialogueSegments';
 import { cn } from '../utils/cn';
 
 /**
@@ -88,10 +91,10 @@ export const reactionFor = (emotion?: string): string | null => {
 };
 
 const Portrait = ({
-  avatar, name, active, side, reaction,
+  avatar, name, active, side, reaction, emote,
 }: {
   avatar?: string; name: string; active: boolean; side: 'left' | 'right';
-  reaction?: string | null;
+  reaction?: string | null; emote?: string | null;
 }) => (
   <div
     className={cn(
@@ -105,6 +108,7 @@ const Portrait = ({
     ) : (
       <div className="stage-portrait-fallback">{(name[0] ?? '?').toUpperCase()}</div>
     )}
+    {active && emote && <span className="stage-emote" aria-hidden="true">{emote}</span>}
   </div>
 );
 
@@ -123,7 +127,9 @@ export const StageView = () => {
   const isUser = current?.role === 'user';
 
   const rawText = store.streamingMessage
-    ? balanceEmphasis(truncateToWord(store.streamedText))
+    // Hide the in-progress last word only WHILE revealing — once the passage is
+    // committed (the end-of-message hold), show it whole so it never looks cut off.
+    ? balanceEmphasis(store.revealComplete ? store.streamedText : truncateToWord(store.streamedText))
     : current
       ? processText(resolveContent(current, overrides, lensOn), {
           hideMetadata: store.hideMetadata && !current.hidden,
@@ -143,9 +149,14 @@ export const StageView = () => {
   // Images never render inside the textbox — they belong ON the stage (CG).
   // The Director's whisper/shout/beat spans are woven into the words (the
   // Stage is a performance, so emphasis is always on here).
-  const emphasis = storyId && current
+  const baseEmphasis = storyId && current
     ? v2.sceneByStory[storyId]?.[current.id]?.emphasis
     : undefined;
+  // Reader-authored SFX marks weave in as an always-on 'sfx' emphasis span.
+  const sfxMarks = storyId && current ? v2.sfxMarksByStory[storyId]?.[current.id] : undefined;
+  const emphasis = sfxMarks?.length
+    ? [...(baseEmphasis ?? []), ...sfxMarks.map(m => ({ text: m.text, kind: 'sfx' as const }))]
+    : baseEmphasis;
   const bodyHtml = useMemo(
     () => rawText
       .split(/\n{2,}/)
@@ -178,7 +189,30 @@ export const StageView = () => {
   // and picks the character's expression sprite when one is uploaded.
   const descriptor = storyId && current ? v2.sceneByStory[storyId]?.[current.id] : undefined;
   const reaction = store.themeEffects ? reactionFor(descriptor?.speaker?.emotion) : null;
+  const emote = store.themeEffects ? emoteFor(descriptor?.speaker?.emotion) : null;
   const bucket = bucketFor(descriptor?.speaker?.emotion);
+
+  // Screen special effect for this passage — the Director's vfx, else a mood
+  // punch (heuristic scene mood/tension when there's no AI descriptor, so it
+  // works AI-off). `shake` moves the stage itself (root class); rest is overlay.
+  const vfxSource = descriptor ?? (scene && current
+    ? { mood: scene.mood, tension: scene.tensionById[current.id] ?? scene.peakTension }
+    : undefined);
+  const vfx = store.themeEffects ? deriveVfx(vfxSource) : undefined;
+  const [shakeNow, setShakeNow] = React.useState(false);
+  const shakenMsg = useRef('');
+  useEffect(() => {
+    if (vfx !== 'shake' || !current) return;
+    if (shakenMsg.current === current.id) return;
+    shakenMsg.current = current.id;
+    setShakeNow(true);
+    const t = setTimeout(() => setShakeNow(false), 520);
+    return () => clearTimeout(t);
+  }, [vfx, current?.id]);
+
+  // Weather lingers across the scene, then this passage's own fx wins.
+  const weather = stickyWeather(scene, current?.id, storyId ? v2.sceneByStory[storyId] : undefined)
+    ?? descriptor?.fx;
   const sprites = useSpriteStore(s => s.sprites);
   const spriteUrls = useSpriteStore(s => s.urls);
 
@@ -186,7 +220,7 @@ export const StageView = () => {
   const backdrops = useBackdropStore(s => s.backdrops);
   const backdropUrls = useBackdropStore(s => s.urls);
   const backdrop = store.showImages
-    ? backdropForScene(scene?.location, scene?.mood, backdrops, backdropUrls)
+    ? backdropForScene(storyId, scene?.location, scene?.mood, backdrops, backdropUrls)
     : null;
 
   // The scene's mood reaches the stage itself (glow + tinted chrome).
@@ -194,8 +228,6 @@ export const StageView = () => {
   const tintVars = (store.sceneTheming && store.themeEffects && scene && atmo
     ? { '--scene-tint': MOOD_COLOR[scene.mood], '--scene-tint-a': String(atmo.washOpacity) }
     : {}) as React.CSSProperties;
-
-  const dialogue = useMemo(() => latestDialogue(rawText), [rawText]);
 
   // Portrait sources — the story's lead on the left, the reader on the right.
   const story = store.currentStory;
@@ -208,6 +240,37 @@ export const StageView = () => {
     ?? story?.avatar;
   const userName = story?.userName ?? 'You';
   const userAvatar = story?.userAvatar;
+
+  // Known names for attribution: the two leads plus every character that has
+  // ever sent a message or owns an avatar. NPCs the author only voices in the
+  // prose aren't here — the speech-verb guess in latestSpeech catches those.
+  const cast = useMemo(
+    () => [...new Set([
+      story?.characterName, story?.userName,
+      ...Object.keys(story?.characterAvatars ?? {}),
+      ...store.chains.flatMap(c => c.messages).map(m => m.name),
+    ].filter(Boolean) as string[])],
+    [story?.id, store.chains],
+  );
+
+  // Who actually speaks the current line — attributed from the prose so an NPC
+  // the author voices reads as its own speaker, not the lead. Narration and
+  // unattributed lines fall back to the message's own character.
+  const speech = useMemo(
+    () => latestSpeech(rawText, { author: current?.name ?? aiName, cast, dialogue: descriptor?.dialogue }),
+    [rawText, current?.name, aiName, cast, descriptor?.dialogue],
+  );
+  const dialogue = speech?.line ?? null;
+  const norm = (s?: string) => (s ?? '').trim().toLowerCase();
+  const bubbleOwner: 'user' | 'char' | 'other' =
+    !speech ? (isUser ? 'user' : 'char')
+    : norm(speech.speaker) === norm(userName) ? 'user'
+    : !speech.attributed ? (isUser ? 'user' : 'char')
+    : norm(speech.speaker) === norm(aiName) ? 'char'
+    : 'other';
+  // Tag the bubble only when the line belongs to someone other than the
+  // portrait it would sit under (a voiced third party).
+  const bubbleSpeaker = bubbleOwner === 'other' ? speech?.speaker : undefined;
 
   // Keep the textbox pinned to the newest line while it streams.
   const boxRef = useRef<HTMLDivElement>(null);
@@ -228,13 +291,16 @@ export const StageView = () => {
     );
   }
 
-  const aiSprite = spriteFor(aiName, !isUser ? bucket : 'neutral', sprites, spriteUrls);
+  const aiSprite = spriteFor(storyId, aiName, !isUser ? bucket : 'neutral', sprites, spriteUrls);
   // The reader's own sprites live ONLY under the namespaced key — a plain-name
   // fallback here can collide with a character set when names overlap.
-  const userSprite = spriteFor(`user:${userName}`, isUser ? bucket : 'neutral', sprites, spriteUrls);
+  const userSprite = spriteFor(storyId, `user:${userName}`, isUser ? bucket : 'neutral', sprites, spriteUrls);
 
   return (
-    <div className="stage relative z-10 flex-1 min-h-0 flex flex-col" style={tintVars}>
+    <div
+      className={cn('stage relative z-10 flex-1 min-h-0 flex flex-col', shakeNow && 'fx-shake', store.isAutofocusMode && 'stage-autofocus')}
+      style={tintVars}
+    >
       <SceneAtmosphere scene={scene} activeId={activeSceneId} enabled={atmosphereOn} />
       {store.sceneTheming && <SceneSpine scenes={scenes} activeSceneId={scene?.id} />}
 
@@ -245,8 +311,10 @@ export const StageView = () => {
             <img src={backdrop.url} alt="" />
           </div>
         )}
-        {/* Director-called particle weather for this passage. */}
-        {store.themeEffects && <SceneFx fx={descriptor?.fx} />}
+        {/* Director-called particle weather — lingers across the scene. */}
+        {store.themeEffects && <SceneFx fx={weather} />}
+        {/* Screen special effect (flash / vignette / desaturate / glitch / bloom). */}
+        <SceneVfx kind={vfx} beatKey={current?.id ?? 'x'} />
         {/* RPG HUD (game themes only, via CSS): the Director's read on screen. */}
         {scene && (
           <div className="stage-hud" aria-hidden="true">
@@ -265,11 +333,13 @@ export const StageView = () => {
             not only when the reaction class happens to change. */}
         <Portrait
           key={`l-${current?.id ?? 'x'}-${reaction ?? ''}`}
-          avatar={aiSprite ?? aiAvatar} name={aiName} active={!isUser} side="left" reaction={reaction}
+          avatar={aiSprite ?? aiAvatar} name={aiName} active={!isUser} side="left"
+          reaction={reaction} emote={emote}
         />
         <Portrait
           key={`r-${current?.id ?? 'x'}-${reaction ?? ''}`}
-          avatar={userSprite ?? userAvatar} name={userName} active={isUser} side="right" reaction={reaction}
+          avatar={userSprite ?? userAvatar} name={userName} active={isUser} side="right"
+          reaction={reaction} emote={emote}
         />
 
         {sceneImages.length > 0 && (
@@ -284,8 +354,12 @@ export const StageView = () => {
         {dialogue && (
           <div
             key={`${current?.id}-${dialogue.length < 8 ? dialogue : ''}`}
-            className={cn('stage-bubble', isUser ? 'stage-bubble-right' : 'stage-bubble-left')}
+            className={cn('stage-bubble',
+              bubbleOwner === 'user' ? 'stage-bubble-right'
+                : bubbleOwner === 'other' ? 'stage-bubble-npc'
+                  : 'stage-bubble-left')}
           >
+            {bubbleSpeaker && <span className="stage-bubble-name">{bubbleSpeaker}</span>}
             {dialogue}
           </div>
         )}

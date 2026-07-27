@@ -10,8 +10,12 @@ import { MOOD_COLOR, sceneAtmosphere } from '../utils/sceneMood';
 import { bucketFor } from '../lib/spriteStorage';
 import { spriteFor, useSpriteStore } from '../stores/useSpriteStore';
 import { backdropForScene, useBackdropStore } from '../stores/useBackdropStore';
-import { latestDialogue, reactionFor, renderWithEmphasis } from './StageView';
+import { reactionFor, renderWithEmphasis } from './StageView';
+import { latestSpeech } from '../utils/dialogueSegments';
 import { SceneFx } from './SceneFx';
+import { SceneVfx } from './SceneVfx';
+import { deriveStaging } from '../utils/vnStaging';
+import { deriveVfx, emoteFor, stickyWeather } from '../utils/sceneVfx';
 import { Message } from '../types';
 import { cn } from '../utils/cn';
 
@@ -39,7 +43,9 @@ export const VNView = () => {
   const story = store.currentStory;
 
   const rawText = store.streamingMessage
-    ? balanceEmphasis(truncateToWord(store.streamedText))
+    // Hide the in-progress last word only WHILE revealing — show it whole once
+    // the passage is committed so short lines never appear cut off on the hold.
+    ? balanceEmphasis(store.revealComplete ? store.streamedText : truncateToWord(store.streamedText))
     : current
       ? processText(resolveContent(current, overrides, lensOn), {
           hideMetadata: store.hideMetadata && !current.hidden,
@@ -57,14 +63,31 @@ export const VNView = () => {
       : '';
 
   const descriptor = storyId && current ? v2.sceneByStory[storyId]?.[current.id] : undefined;
-  const emphasis = descriptor?.emphasis;
+  const sfxMarks = storyId && current ? v2.sfxMarksByStory[storyId]?.[current.id] : undefined;
+  const emphasis = sfxMarks?.length
+    ? [...(descriptor?.emphasis ?? []), ...sfxMarks.map(m => ({ text: m.text, kind: 'sfx' as const }))]
+    : descriptor?.emphasis;
   const bucket = bucketFor(descriptor?.speaker?.emotion);
 
   // ADV-style box, like a real VN (and like the RPG / Text Message feel the
   // reader asked for): the CURRENT BEAT only — the spoken line front and
   // center, the narration around it as a quiet band. Falls back to the
   // latest narration paragraph when nobody is speaking.
-  const dialogue = useMemo(() => latestDialogue(rawText), [rawText]);
+  // Known names for attribution — leads, senders, avatar owners. Voiced NPCs
+  // not in this list are still caught by the speech-verb guess in latestSpeech.
+  const cast = useMemo(
+    () => [...new Set([
+      story?.characterName, story?.userName,
+      ...Object.keys(story?.characterAvatars ?? {}),
+      ...store.chains.flatMap(c => c.messages).map(m => m.name),
+    ].filter(Boolean) as string[])],
+    [story?.id, store.chains],
+  );
+  const speech = useMemo(
+    () => latestSpeech(rawText, { author: current?.name ?? story?.characterName ?? 'Story', cast, dialogue: descriptor?.dialogue }),
+    [rawText, current?.name, story?.characterName, cast, descriptor?.dialogue],
+  );
+  const dialogue = speech?.line ?? null;
   const beat = useMemo(() => {
     const paras = rawText.split(/\n{2,}/).map(p => p.trim()).filter(Boolean);
     const lastPara = paras[paras.length - 1] ?? '';
@@ -87,7 +110,12 @@ export const VNView = () => {
   // The character HOLDS the scene (dimmed while the reader speaks — never a
   // bare stage during user turns); the reader joins beside them when they
   // have a sprite or picture of their own. Whoever speaks takes the light.
-  const speakerName = current?.name ?? story?.characterName ?? 'Story';
+  // The name band shows who's actually speaking — a voiced NPC by name, not the
+  // lead — falling back to the message's own character for narration.
+  const norm = (s?: string) => (s ?? '').trim().toLowerCase();
+  const speakerName = beat.primaryIsSpeech && speech?.attributed
+    ? speech.speaker
+    : (current?.name ?? story?.characterName ?? 'Story');
   const sprites = useSpriteStore(s => s.sprites);
   const spriteUrls = useSpriteStore(s => s.urls);
 
@@ -100,14 +128,14 @@ export const VNView = () => {
     return story?.characterName ?? 'Story';
   }, [current, isUser, store.visibleMessages, story?.characterName]);
 
-  const charSprite = spriteFor(charName, !isUser ? bucket : 'neutral', sprites, spriteUrls);
+  const charSprite = spriteFor(story?.id, charName, !isUser ? bucket : 'neutral', sprites, spriteUrls);
   const charPortrait = charSprite
     ?? (!isUser ? current?.avatar : undefined)
     ?? story?.characterAvatars?.[charName]
     ?? story?.characterAvatar
     ?? story?.avatar;
   const userSprite = spriteFor(
-    `user:${story?.userName ?? 'You'}`, isUser ? bucket : 'neutral', sprites, spriteUrls);
+    story?.id, `user:${story?.userName ?? 'You'}`, isUser ? bucket : 'neutral', sprites, spriteUrls);
   const userPortrait = userSprite ?? story?.userAvatar;
   const bothOnStage = !!charPortrait && !!userPortrait;
 
@@ -115,7 +143,7 @@ export const VNView = () => {
   const backdrops = useBackdropStore(s => s.backdrops);
   const backdropUrls = useBackdropStore(s => s.urls);
   const backdrop = store.showImages
-    ? backdropForScene(scene?.location, scene?.mood, backdrops, backdropUrls)
+    ? backdropForScene(story?.id, scene?.location, scene?.mood, backdrops, backdropUrls)
     : null;
 
   const [areaCard, setAreaCard] = useState<string | null>(null);
@@ -128,6 +156,56 @@ export const VNView = () => {
     const t = setTimeout(() => setAreaCard(null), 2600);
     return () => clearTimeout(t);
   }, [scene?.location]);
+
+  // ----- the shot -----------------------------------------------------------
+  // A VN scene shouldn't hold one frozen pose for a whole message: the camera
+  // reads the CURRENT beat and reframes — pushing in on the talker, cutting
+  // wide when we arrive somewhere new. Heuristic by default; the Director's
+  // `shot`/tension sharpens it. (See utils/vnStaging.)
+  // The reader takes the light when the line is theirs (even a rare user line
+  // the author quotes); otherwise the character's side holds the speech.
+  const speakerSide = beat.primaryIsSpeech
+    ? (norm(speech?.speaker) === norm(story?.userName ?? 'You') ? 'user' : 'char')
+    : null;
+  const staging = useMemo(
+    () => deriveStaging({
+      primaryIsSpeech: beat.primaryIsSpeech,
+      speakerSide,
+      descriptor,
+      locationJustChanged: !!areaCard,
+      bothOnStage,
+    }),
+    [beat.primaryIsSpeech, speakerSide, descriptor, areaCard, bothOnStage],
+  );
+
+  // Screen special effect for this beat — the Director's vfx, else a mood punch
+  // derived from the passage's read. Falls back to the ASSET-FREE heuristic
+  // scene mood/tension when no AI descriptor exists, so effects work AI-off.
+  const beatKey = `${current?.id ?? 'x'}:${beat.primary.slice(0, 32)}`;
+  const vfxSource = descriptor ?? (scene && current
+    ? { mood: scene.mood, tension: scene.tensionById[current.id] ?? scene.peakTension }
+    : undefined);
+  const vfx = store.themeEffects ? deriveVfx(vfxSource) : undefined;
+
+  // A `shake` moves the frame itself, so it rides a root class (not the overlay).
+  const [shakeNow, setShakeNow] = useState(false);
+  const shakenBeat = useRef('');
+  useEffect(() => {
+    if (vfx !== 'shake') return;
+    if (shakenBeat.current === beatKey) return;
+    shakenBeat.current = beatKey;
+    setShakeNow(true);
+    const t = setTimeout(() => setShakeNow(false), 520);
+    return () => clearTimeout(t);
+  }, [vfx, beatKey]);
+
+  // Weather lingers across a scene (Fablekin's stickyUntil), then the current
+  // passage's own fx wins.
+  const weather = stickyWeather(scene, current?.id, storyId ? v2.sceneByStory[storyId] : undefined)
+    ?? descriptor?.fx;
+
+  // A VN emote pop over the lit sprite at a loud emotion.
+  const emote = store.themeEffects ? emoteFor(descriptor?.speaker?.emotion) : null;
 
   // ----- cinematics ---------------------------------------------------------
   const tension = scene
@@ -161,6 +239,25 @@ export const VNView = () => {
     return [] as string[];
   }, [store.showImages, store.visibleMessages, store.streamingMessage]);
 
+  // CG choreography: a new picture shouldn't just float over the sprite. It
+  // stands in CENTER STAGE for a beat (the sprite steps aside), then shrinks
+  // and docks to the side so the sprite retakes the scene. A CG that's already
+  // been revealed stays docked (no re-reveal on later beats).
+  const cgSrc = sceneImages[0];
+  const [cgPhase, setCgPhase] = useState<'reveal' | 'docked' | null>(null);
+  const cgShownRef = useRef<string | null>(null);
+  useEffect(() => {
+    // No picture right now — hide it, but REMEMBER the last one shown so a
+    // transient blip (streaming re-render) doesn't re-trigger the reveal.
+    if (!cgSrc) { setCgPhase(null); return; }
+    // Already revealed this exact picture — keep it docked, don't re-reveal.
+    if (cgShownRef.current === cgSrc) { setCgPhase(p => (p === 'reveal' ? p : 'docked')); return; }
+    cgShownRef.current = cgSrc;
+    setCgPhase('reveal');
+    const t = setTimeout(() => setCgPhase('docked'), 2600);
+    return () => clearTimeout(t);
+  }, [cgSrc]);
+
   const boxRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const el = boxRef.current;
@@ -178,7 +275,10 @@ export const VNView = () => {
   }
 
   return (
-    <div className="vn relative z-10 flex-1 min-h-0 overflow-hidden" style={tintVars}>
+    <div
+      className={cn('vn relative z-10 flex-1 min-h-0 overflow-hidden', shakeNow && 'fx-shake', store.isAutofocusMode && 'vn-autofocus')}
+      style={tintVars}
+    >
       <SceneAtmosphere scene={scene} activeId={activeSceneId} enabled={atmosphereOn} />
 
       {/* The area. */}
@@ -189,11 +289,20 @@ export const VNView = () => {
       )}
       <div className="vn-wash" aria-hidden="true" />
 
-      {/* Director-called particle weather rides above the backdrop. */}
-      {store.themeEffects && <SceneFx fx={descriptor?.fx} />}
+      {/* Director-called particle weather rides above the backdrop; it lingers
+          across the scene until a new area or a fresh cue replaces it. */}
+      {store.themeEffects && <SceneFx fx={weather} />}
 
-      {/* The camera: pushes in slowly while the speaker performs. */}
-      <div className={cn('vn-camera', store.isStreaming && 'vn-speaking')}>
+      {/* The camera: reframes per beat — push in on the talker, wide on arrival. */}
+      <div
+        className={cn(
+          'vn-camera',
+          `vn-shot-${staging.shot}`,
+          `vn-focus-${staging.focus}`,
+          staging.dof && 'vn-dof',
+          cgPhase === 'reveal' && 'vn-cg-revealing',
+        )}
+      >
         {charPortrait && (
           <div
             key={`c-${current?.id ?? 'x'}-${charSprite ? bucket : 'av'}`}
@@ -209,6 +318,9 @@ export const VNView = () => {
               src={charPortrait} alt={charName} draggable={false}
               className={cn(!isUser && reaction)}
             />
+            {!isUser && emote && (
+              <span key={beatKey} className="vn-emote" aria-hidden="true">{emote}</span>
+            )}
           </div>
         )}
         {userPortrait && (
@@ -224,13 +336,22 @@ export const VNView = () => {
               src={userPortrait} alt={story?.userName ?? 'You'} draggable={false}
               className={cn(isUser && reaction)}
             />
+            {isUser && emote && (
+              <span key={beatKey} className="vn-emote" aria-hidden="true">{emote}</span>
+            )}
           </div>
         )}
       </div>
 
-      {sceneImages.length > 0 && (
-        <div className="vn-cg" onClick={() => setLightbox(sceneImages[0])}>
-          <img src={sceneImages[0]} alt="" loading="lazy" referrerPolicy="no-referrer" />
+      {/* Screen special effect (flash / vignette / desaturate / glitch / bloom). */}
+      <SceneVfx kind={vfx} beatKey={beatKey} />
+
+      {cgSrc && (
+        <div
+          className={cn('vn-cg', cgPhase === 'reveal' ? 'vn-cg-reveal' : 'vn-cg-docked')}
+          onClick={() => setLightbox(cgSrc)}
+        >
+          <img src={cgSrc} alt="" loading="lazy" referrerPolicy="no-referrer" />
         </div>
       )}
 

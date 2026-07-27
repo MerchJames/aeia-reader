@@ -374,6 +374,14 @@ export const ReaderDisplay = () => {
         ?? store.currentStory?.characterAvatar
         ?? store.currentStory?.avatar);
 
+    // Reader-authored SFX marks render as an always-on 'sfx' emphasis span. Only
+    // build a new array when marks exist, so the memo stays stable otherwise.
+    const baseEmphasis = store.sceneEmphasis && storyId ? v2.sceneByStory[storyId]?.[msg.id]?.emphasis : undefined;
+    const sfxMarks = storyId ? v2.sfxMarksByStory[storyId]?.[msg.id] : undefined;
+    const emphasis = sfxMarks?.length
+      ? [...(baseEmphasis ?? []), ...sfxMarks.map(m => ({ text: m.text, kind: 'sfx' as const }))]
+      : baseEmphasis;
+
     return (
       <MessageBlock
         key={msg.id}
@@ -388,8 +396,10 @@ export const ReaderDisplay = () => {
         streamEffect={store.streamEffect}
         expressiveText={store.expressiveText}
         ttsReading={store.ttsEnabled && store.ttsPending && isStreamingMsg}
-        emphasis={store.sceneEmphasis && storyId ? v2.sceneByStory[storyId]?.[msg.id]?.emphasis : undefined}
+        emphasis={emphasis}
+        dialogue={storyId ? v2.sceneByStory[storyId]?.[msg.id]?.dialogue : undefined}
         isStreamingMsg={isStreamingMsg}
+        revealComplete={isStreamingMsg && store.revealComplete}
         isMsgZoomed={isMsgZoomed}
         avatar={avatar}
         msgAnim={resolveMsgAnim(msg)}
@@ -566,6 +576,13 @@ export const ReaderDisplay = () => {
           setSelPopover(null);
           setNoteDraft('');
         }}
+        onSfx={store.audioCuesEnabled ? (prompt, slow) => {
+          if (storyId && selPopover.messageId) {
+            v2.addSfxMark(storyId, selPopover.messageId, { text: selPopover.text.trim(), prompt, slow });
+          }
+          window.getSelection()?.removeAllRanges();
+          setSelPopover(null);
+        } : undefined}
       />
     )}
 

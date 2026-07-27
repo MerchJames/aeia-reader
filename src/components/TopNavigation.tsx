@@ -1,31 +1,50 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft, BookMarked, BookOpen, Bot, Clapperboard, Film, Focus, GitBranch, Highlighter,
-  List, MessageSquare, Network, Pencil, Search, Settings, Table2, X,
+  Info, List, MessageSquare, Network, Pencil, Search, Settings, Table2, Wand2, X,
 } from 'lucide-react';
 import { useAppStore } from '../store';
 import { useAuraV2Store, committedCount, flatMessages } from '../stores/useAuraV2Store';
 import { wordsPerSecond } from '../hooks/useStreamer';
-import { ViewMode } from '../types';
+import { UiMode, ViewMode } from '../types';
 import { cn } from '../utils/cn';
 import { resolveContent } from '../utils/lens';
 import { buildSearchIndex, searchStory, SearchHit } from '../utils/storySearch';
 
-const VIEW_BUTTONS: { mode: ViewMode; icon: React.ReactNode; label: string }[] = [
-  { mode: 'storybook', icon: <BookOpen size={18} />, label: 'Storybook' },
-  { mode: 'book', icon: <BookMarked size={18} />, label: 'Book' },
-  { mode: 'stage', icon: <Clapperboard size={18} />, label: 'Stage' },
-  { mode: 'vn', icon: <Film size={18} />, label: 'Visual Novel' },
-  { mode: 'chat', icon: <MessageSquare size={18} />, label: 'Chat' },
-  { mode: 'branches', icon: <GitBranch size={18} />, label: 'Branches' },
-  { mode: 'overview', icon: <List size={18} />, label: 'Overview' },
-  { mode: 'highlights', icon: <Highlighter size={18} />, label: 'Highlights' },
+/** Which workspace group a view belongs to — gates its visibility per UiMode. */
+type ViewGroup = 'read' | 'cowrite' | 'scenes';
+
+const VIEW_BUTTONS: { mode: ViewMode; icon: React.ReactNode; label: string; group: ViewGroup }[] = [
+  { mode: 'storybook', icon: <BookOpen size={18} />, label: 'Storybook', group: 'read' },
+  { mode: 'book', icon: <BookMarked size={18} />, label: 'Book', group: 'read' },
+  { mode: 'stage', icon: <Clapperboard size={18} />, label: 'Stage', group: 'read' },
+  { mode: 'vn', icon: <Film size={18} />, label: 'Visual Novel', group: 'read' },
+  { mode: 'sandbox', icon: <Wand2 size={18} />, label: 'Sandbox', group: 'scenes' },
+  { mode: 'chat', icon: <MessageSquare size={18} />, label: 'Chat', group: 'cowrite' },
+  { mode: 'branches', icon: <GitBranch size={18} />, label: 'Branches', group: 'read' },
+  { mode: 'overview', icon: <List size={18} />, label: 'Overview', group: 'read' },
+  { mode: 'highlights', icon: <Highlighter size={18} />, label: 'Highlights', group: 'read' },
 ];
+
+/** The workspace presets, in order, with a one-line "what this reveals" hint. */
+const UI_MODES: { mode: UiMode; label: string; hint: string }[] = [
+  { mode: 'read', label: 'Read', hint: 'Just the reading views — no AI tools in the way.' },
+  { mode: 'cowrite', label: 'Cowrite', hint: 'Adds the AI writing assistant and the Chat view.' },
+  { mode: 'scenes', label: 'Scenes', hint: 'Adds the Sandbox view and the Scene Director.' },
+  { mode: 'all', label: 'All', hint: 'Everything, unfiltered.' },
+];
+
+/** Is a view's group visible under the active workspace preset? Reading views
+ *  are always on; 'all' shows every group; otherwise the mode name = the group. */
+const groupVisible = (group: ViewGroup, mode: UiMode): boolean =>
+  mode === 'all' || group === 'read' || group === mode;
 
 export const TopNavigation = () => {
   const currentStory = useAppStore(s => s.currentStory);
   const viewMode = useAppStore(s => s.viewMode);
   const setViewMode = useAppStore(s => s.setViewMode);
+  const uiMode = useAppStore(s => s.uiMode);
+  const setUiMode = useAppStore(s => s.setUiMode);
   const searchQuery = useAppStore(s => s.searchQuery);
   const setSearchQuery = useAppStore(s => s.setSearchQuery);
   const isAutofocusMode = useAppStore(s => s.isAutofocusMode);
@@ -139,8 +158,23 @@ export const TopNavigation = () => {
 
   const showResults = searchFocused && debouncedQuery.trim().length >= 2;
 
+  // Views visible under the active preset; the AI assistant is a Cowrite tool.
+  const visibleViews = VIEW_BUTTONS.filter(v => groupVisible(v.group, uiMode));
+  const aiToolVisible = uiMode === 'all' || uiMode === 'cowrite';
+  const activeMode = UI_MODES.find(m => m.mode === uiMode) ?? UI_MODES[3];
+
+  // Switching preset: if it hides the view you're on, land on a visible one,
+  // and close the AI assistant if the new preset no longer offers it.
+  const changeMode = (m: UiMode) => {
+    setUiMode(m);
+    const nextViews = VIEW_BUTTONS.filter(v => groupVisible(v.group, m));
+    if (!nextViews.some(v => v.mode === viewMode)) setViewMode(nextViews[0].mode);
+    if (aiOpen && m !== 'all' && m !== 'cowrite') setAiOpen(false);
+  };
+
   return (
-    <div className="sticky top-0 z-40 flex items-center justify-between gap-3 px-4 py-3 border-b border-app-border bg-surface/85 backdrop-blur-md">
+    <div className="sticky top-0 z-40 border-b border-app-border bg-surface/85 backdrop-blur-md">
+    <div className="flex items-center justify-between gap-3 px-4 py-3">
       <div className="flex items-center gap-3 min-w-0">
         <button
           onClick={() => closeStory()}
@@ -161,22 +195,42 @@ export const TopNavigation = () => {
         )}
       </div>
 
-      <div className="flex bg-app-text/5 p-1 rounded-lg shrink-0">
-        {VIEW_BUTTONS.map(({ mode, icon, label }) => (
-          <button
-            key={mode}
-            onClick={() => setViewMode(mode)}
-            title={label}
-            className={cn(
-              'p-1.5 rounded-md transition-colors',
-              viewMode === mode
-                ? 'bg-surface shadow-sm text-accent'
-                : 'opacity-50 hover:opacity-100',
-            )}
-          >
-            {icon}
-          </button>
-        ))}
+      <div className="flex items-center gap-2 shrink-0">
+        {/* Workspace preset — gates how much of the app is on screen. */}
+        <div className="hidden md:flex bg-app-text/5 p-1 rounded-lg" role="tablist" aria-label="Workspace mode">
+          {UI_MODES.map(({ mode, label, hint }) => (
+            <button
+              key={mode}
+              role="tab"
+              aria-selected={uiMode === mode}
+              onClick={() => changeMode(mode)}
+              title={hint}
+              className={cn(
+                'px-2.5 py-1 rounded-md text-xs font-medium transition-colors',
+                uiMode === mode ? 'bg-surface shadow-sm text-accent' : 'opacity-50 hover:opacity-100',
+              )}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <div className="flex bg-app-text/5 p-1 rounded-lg">
+          {visibleViews.map(({ mode, icon, label }) => (
+            <button
+              key={mode}
+              onClick={() => setViewMode(mode)}
+              title={label}
+              className={cn(
+                'p-1.5 rounded-md transition-colors',
+                viewMode === mode
+                  ? 'bg-surface shadow-sm text-accent'
+                  : 'opacity-50 hover:opacity-100',
+              )}
+            >
+              {icon}
+            </button>
+          ))}
+        </div>
       </div>
 
       <div className="flex items-center gap-2 shrink-0">
@@ -277,18 +331,20 @@ export const TopNavigation = () => {
             )}
           </div>
         )}
-        <button
-          onClick={() => setAiOpen(!aiOpen)}
-          title="Reading assistant (AI)"
-          className={cn(
-            'p-2 rounded-lg transition-colors',
-            aiOpen
-              ? 'bg-accent/20 text-accent'
-              : 'opacity-60 hover:opacity-100 hover:bg-app-text/5',
-          )}
-        >
-          <Bot size={18} />
-        </button>
+        {aiToolVisible && (
+          <button
+            onClick={() => setAiOpen(!aiOpen)}
+            title="Reading assistant (AI)"
+            className={cn(
+              'p-2 rounded-lg transition-colors',
+              aiOpen
+                ? 'bg-accent/20 text-accent'
+                : 'opacity-60 hover:opacity-100 hover:bg-app-text/5',
+            )}
+          >
+            <Bot size={18} />
+          </button>
+        )}
         <button
           onClick={() => setIsAutofocusMode(!isAutofocusMode)}
           title="Autofocus handsfree mode"
@@ -309,6 +365,19 @@ export const TopNavigation = () => {
           <Settings size={18} />
         </button>
       </div>
+    </div>
+
+      {/* Guided assistance: what the active preset shows, and how to see more. */}
+      {uiMode !== 'all' && (
+        <div className="flex items-center gap-2 px-4 py-1.5 text-[11px] text-muted border-t border-app-border/50">
+          <Info size={12} className="shrink-0 text-accent/70" />
+          <span className="min-w-0">
+            <b className="text-app-text/80 font-semibold">{activeMode.label} mode</b> — {activeMode.hint}{' '}
+            <button onClick={() => changeMode('all')} className="text-accent hover:underline">Show everything</button>
+            {' '}or switch presets above.
+          </span>
+        </div>
+      )}
     </div>
   );
 };
