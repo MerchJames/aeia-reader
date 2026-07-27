@@ -111,9 +111,11 @@ const CONFIG_KEYS: (keyof AppConfig)[] = [
   'styleQuotes', 'substituteNames', 'dialogueColor', 'dialogueStyle', 'dialogueAnimation',
   'contentWidth', 'oocHandling', 'phoneDialogueOnly', 'themeEffects', 'livingBackground',
   'revealMode', 'messagePause', 'pauseAtPageEnd', 'ttsEnabled', 'ttsVoiceURI', 'ttsRate',
-  'ttsPitch', 'ttsFollowSpeed', 'aiBaseUrl', 'aiApiKey', 'aiModel', 'aiAdvanced',
+  'ttsPitch', 'ttsFollowSpeed', 'ttsMultiVoice', 'ttsDialogueOnly', 'aiBaseUrl', 'aiApiKey', 'aiModel', 'aiAdvanced',
   'ttsEngine', 'kokoroBaseUrl', 'kokoroApiKey', 'kokoroVoice', 'kokoroUserVoice', 'ttsVoiceByCharacter',
+  'audioBaseUrl', 'audioCuesEnabled', 'audioLiveGen', 'sceneMusic', 'musicVolume', 'sfxPermissiveness',
   'autoCastVoices', 'ambientEnabled', 'ambientVolume', 'ambientByTheme',
+  'uiMode',
 ];
 
 const pickConfig = (state: AppState): AppConfig => {
@@ -219,8 +221,19 @@ export const useAppStore = create<AppState>()(
         ttsRate: 1,
         ttsPitch: 1,
         ttsFollowSpeed: true,
+        ttsMultiVoice: true,
+        ttsDialogueOnly: false,
         ttsEngine: 'browser',
         kokoroBaseUrl: 'http://localhost:8880',
+        audioBaseUrl: 'http://localhost:8899',
+        audioCuesEnabled: false,
+        audioLiveGen: false,
+        sceneMusic: true,
+        musicVolume: 0.6,
+        sfxPermissiveness: 'off',
+        librarySoundscapeActive: false,
+        recentSfx: [],
+        midSceneLocation: null,
         kokoroApiKey: '',
         kokoroVoice: 'af_bella',
         kokoroUserVoice: 'am_michael',
@@ -267,12 +280,14 @@ export const useAppStore = create<AppState>()(
         visibleMessages: [],
         streamingMessage: null,
         streamedText: '',
+        revealComplete: false,
         currentChainIndex: 0,
         currentMessageIndex: 0,
         isStreaming: false,
 
         /* ----- view ----- */
         viewMode: 'chat',
+        uiMode: 'all',
         layoutMode: 'continuous',
         searchQuery: '',
         isAutofocusMode: false,
@@ -475,7 +490,7 @@ export const useAppStore = create<AppState>()(
             streamedText: '',
             isStreaming: false,
             // "Read this timeline" means READ — leave list views for the text.
-            viewMode: ['storybook', 'chat', 'book', 'stage', 'vn'].includes(vm) ? vm : 'chat',
+            viewMode: ['storybook', 'chat', 'book', 'stage', 'vn', 'sandbox'].includes(vm) ? vm : 'chat',
           });
           schedulePersist();
         },
@@ -532,7 +547,7 @@ export const useAppStore = create<AppState>()(
           // Read through the story's active timeline (attached branch), if any.
           const chains = buildChains(timelineMessages(story), story.format, story.stars);
           const proseFormat = story.format === 'kobold' || story.format === 'document';
-          const READING_VIEWS = ['storybook', 'chat', 'book', 'stage', 'vn'] as const;
+          const READING_VIEWS = ['storybook', 'chat', 'book', 'stage', 'vn', 'sandbox'] as const;
           const readingView = (READING_VIEWS as readonly string[]).includes(viewMode)
             ? viewMode
             : (proseFormat ? 'storybook' : 'chat');
@@ -690,11 +705,16 @@ export const useAppStore = create<AppState>()(
           schedulePersist();
         },
 
-        updateStreamedText: (streamedText) => set({ streamedText }),
+        updateStreamedText: (streamedText) => set({ streamedText, revealComplete: false }),
 
-        finishCurrentMessage: () => {
+        finishCurrentMessage: (fullText) => {
           const { streamingMessage } = get();
-          if (streamingMessage) set({ streamedText: streamingMessage.content });
+          // Commit the PROCESSED text the reveal was showing (paragraph spacing,
+          // dialogue-own-line, name substitution) — not the raw content, which
+          // would flip the just-finished message back to unformatted source.
+          if (streamingMessage) {
+            set({ streamedText: fullText ?? streamingMessage.content, revealComplete: true });
+          }
         },
 
         resetPlayback: () => {
@@ -880,6 +900,7 @@ export const useAppStore = create<AppState>()(
         /* ----- view / settings ----- */
 
         setViewMode: (viewMode) => set({ viewMode }),
+        setUiMode: (uiMode) => set({ uiMode }),
 
         setLayoutMode: (layoutMode) => {
           const { chains, currentChainIndex: ci, currentMessageIndex: mi, streamingMessage } = get();
@@ -929,10 +950,22 @@ export const useAppStore = create<AppState>()(
         setTtsRate: (ttsRate) => set({ ttsRate }),
         setTtsPitch: (ttsPitch) => set({ ttsPitch }),
         setTtsFollowSpeed: (ttsFollowSpeed) => set({ ttsFollowSpeed }),
+        setTtsMultiVoice: (ttsMultiVoice) => set({ ttsMultiVoice }),
+        setTtsDialogueOnly: (ttsDialogueOnly) => set({ ttsDialogueOnly }),
         setTtsPending: (ttsPending) => set({ ttsPending }),
         setTtsProgress: (ttsProgress) => set({ ttsProgress }),
         setTtsEngine: (ttsEngine) => set({ ttsEngine }),
         setKokoroBaseUrl: (kokoroBaseUrl) => set({ kokoroBaseUrl }),
+        setAudioBaseUrl: (audioBaseUrl) => set({ audioBaseUrl }),
+        setAudioCuesEnabled: (audioCuesEnabled) => set({ audioCuesEnabled }),
+        setAudioLiveGen: (audioLiveGen) => set({ audioLiveGen }),
+        setSceneMusic: (sceneMusic) => set({ sceneMusic }),
+        setMusicVolume: (musicVolume) => set({ musicVolume }),
+        setSfxPermissiveness: (sfxPermissiveness) => set({ sfxPermissiveness }),
+        setLibrarySoundscapeActive: (librarySoundscapeActive) => set({ librarySoundscapeActive }),
+        pushRecentSfx: (e) => set((s) => ({ recentSfx: [{ ...e, at: Date.now() }, ...s.recentSfx].slice(0, 4) })),
+        clearRecentSfx: () => set({ recentSfx: [] }),
+        setMidSceneLocation: (midSceneLocation) => set({ midSceneLocation }),
         setKokoroApiKey: (kokoroApiKey) => set({ kokoroApiKey }),
         setKokoroVoice: (kokoroVoice) => set({ kokoroVoice }),
         setKokoroUserVoice: (kokoroUserVoice) => set({ kokoroUserVoice }),
@@ -1132,7 +1165,7 @@ export const useAppStore = create<AppState>()(
       partialize: (state) => ({
         ...pickConfig(state),
         savedConfigs: state.savedConfigs,
-        viewMode: ['storybook', 'chat', 'book', 'stage', 'vn'].includes(state.viewMode)
+        viewMode: ['storybook', 'chat', 'book', 'stage', 'vn', 'sandbox'].includes(state.viewMode)
           ? state.viewMode
           : 'chat',
         layoutMode: state.layoutMode,

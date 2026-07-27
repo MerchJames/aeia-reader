@@ -9,7 +9,7 @@ interface BackdropState {
   loaded: boolean;
   error: string | null;
   loadBackdrops: () => Promise<void>;
-  addBackdrop: (keyword: string, file: File) => Promise<void>;
+  addBackdrop: (storyId: string, keyword: string, file: File) => Promise<void>;
   removeBackdrop: (id: string) => Promise<void>;
 }
 
@@ -34,15 +34,16 @@ export const useBackdropStore = create<BackdropState>()((set, get) => ({
     }
   },
 
-  addBackdrop: async (keyword, file) => {
+  addBackdrop: async (storyId, keyword, file) => {
     const key = keyword.trim().toLowerCase();
-    if (!key) return;
+    if (!key || !storyId) return;
     try {
       const data = await file.arrayBuffer();
-      // One image per keyword — replacing is the intuitive flow.
-      const existing = get().backdrops.find(b => b.keyword === key);
+      // One image per (story, keyword) — replacing is the intuitive flow.
+      const existing = get().backdrops.find(b => b.storyId === storyId && b.keyword === key);
       const backdrop: StoredBackdrop = {
         id: existing?.id ?? `bd-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+        storyId,
         keyword: key,
         data,
         type: file.type || 'image/png',
@@ -78,20 +79,24 @@ export const useBackdropStore = create<BackdropState>()((set, get) => ({
  * location wins, then a keyword equal to the mood, then "default".
  */
 export const backdropForScene = (
+  storyId: string | undefined,
   location: string | undefined,
   mood: string | undefined,
   backdrops: StoredBackdrop[],
   urls: Record<string, string>,
 ): { id: string; url: string } | null => {
+  if (!storyId) return null;
+  // Only this chat's backdrops are in play — they never cross chats.
+  const pool = backdrops.filter(b => b.storyId === storyId);
   const loc = (location ?? '').toLowerCase();
   // NOTE: never mix && into a ?? chain here — an empty string short-circuits
   // the whole chain ('' is falsy but not nullish) and kills the fallback.
   const byLocation = loc
-    ? backdrops.find(b => b.keyword !== 'default' && loc.includes(b.keyword))
+    ? pool.find(b => b.keyword !== 'default' && loc.includes(b.keyword))
     : undefined;
   const byMood = mood
-    ? backdrops.find(b => b.keyword === mood.toLowerCase())
+    ? pool.find(b => b.keyword === mood.toLowerCase())
     : undefined;
-  const hit = byLocation ?? byMood ?? backdrops.find(b => b.keyword === 'default');
+  const hit = byLocation ?? byMood ?? pool.find(b => b.keyword === 'default');
   return hit && urls[hit.id] ? { id: hit.id, url: urls[hit.id] } : null;
 };

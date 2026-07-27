@@ -49,7 +49,7 @@ const clamp01 = (n: number): number => Math.max(0, Math.min(1, n));
 /** Baseline tension each mood carries, before punctuation/intensity nudges. */
 const MOOD_TENSION: Record<Mood, number> = {
   action: 0.85, ominous: 0.8, tense: 0.7, eerie: 0.6,
-  awe: 0.5, joyful: 0.42, melancholy: 0.45, tender: 0.32, neutral: 0.3,
+  awe: 0.5, romantic: 0.5, joyful: 0.42, melancholy: 0.45, tender: 0.32, neutral: 0.3,
 };
 
 /** Lexical votes: a word family points at a mood. First-listed wins ties via tension. */
@@ -57,6 +57,7 @@ const MOOD_LEX: [RegExp, Mood][] = [
   [/\b(blood|scream|knife|blade|kill(?:ed|s)?|die|dead|corpse|terror|horror|dread|threat)\b/i, 'ominous'],
   [/\b(ran|run|chase|fight|struck|strike|dodge|explod|slam|burst|charg(?:e|ed)|leap|sprint|grab)\b/i, 'action'],
   [/\b(shadow|whisper|cold|empty|hollow|wrong|creak|flicker|unseen|silent|watch(?:ing|ed)?)\b/i, 'eerie'],
+  [/\b(passion(?:ate)?|desire|longing|yearn(?:ed|ing)?|breathless|caress|lips|lover|entwin\w*|seduc\w*|press(?:ed)?\s+against|arch(?:ed)?\s+into|trembl\w*\s+with\s+(?:desire|want|need))\b/i, 'romantic'],
   [/\b(smile|smiled|laugh|warm|gentle|kiss|embrace|soft|tender|comfort|held|home)\b/i, 'tender'],
   [/\b(joy|delight|bright|cheer|celebrat|radiant|beam(?:ed|ing)?|grin|thrill)\b/i, 'joyful'],
   [/\b(tear|tears|wept|weep|sorrow|grief|lonely|mourn|ache|loss|sigh(?:ed)?)\b/i, 'melancholy'],

@@ -1693,6 +1693,28 @@ body {
 .stage-bubble-left::after { left: 26px; }
 .stage-bubble-right { right: clamp(60px, 11vw, 260px); border-bottom-right-radius: 4px; }
 .stage-bubble-right::after { right: 26px; }
+/* A voiced third party (an NPC the author speaks for): centered and tagged so
+   it never reads as the lead character's line. */
+.stage-bubble-npc {
+  left: 50%;
+  transform: translateX(-50%);
+  border-color: var(--app-accent, var(--app-border));
+  animation-name: stagePopCenter;
+}
+.stage-bubble-npc::after { left: 50%; margin-left: -7px; }
+@keyframes stagePopCenter {
+  from { opacity: 0; transform: translate(-50%, 8px) scale(0.92); }
+  to { opacity: 1; transform: translate(-50%, 0) scale(1); }
+}
+.stage-bubble-name {
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  opacity: 0.65;
+  margin-bottom: 0.15rem;
+}
 @keyframes stagePop {
   from { opacity: 0; transform: translateY(8px) scale(0.92); }
   to { opacity: 1; transform: translateY(0) scale(1); }
@@ -1929,20 +1951,30 @@ body {
   40% { transform: translateY(-14px); }
   70% { transform: translateY(-3px); }
 }
-.stage-em-sad { filter: saturate(0.7) brightness(0.85); transform: translateY(8px); }
+.stage-em-sad {
+  filter: saturate(0.7) brightness(0.85);
+  animation: emSink 0.9s ease-out both;
+}
+@keyframes emSink {
+  0% { transform: translateY(-5px); }
+  70% { transform: translateY(9px); }
+  100% { transform: translateY(7px); }
+}
 .stage-em-shock { animation: emPop 0.3s ease-out 1; }
 @keyframes emPop {
   0% { transform: scale(1); }
   45% { transform: scale(1.06); }
   100% { transform: scale(1); }
 }
-.no-effects .stage-em-anger, .no-effects .stage-em-fear,
-.no-effects .stage-em-joy, .no-effects .stage-em-shock {
+.no-effects .stage-em-anger, .no-effects .stage-em-fear, .no-effects .stage-em-joy,
+.no-effects .stage-em-sad, .no-effects .stage-em-shock {
   animation: none;
+  transform: none;
 }
 @media (prefers-reduced-motion: reduce) {
-  .stage-em-anger, .stage-em-fear, .stage-em-joy, .stage-em-shock {
+  .stage-em-anger, .stage-em-fear, .stage-em-joy, .stage-em-sad, .stage-em-shock {
     animation: none !important;
+    transform: none;
   }
 }
 
@@ -2092,9 +2124,23 @@ body {
   position: absolute;
   inset: 0;
   z-index: 0;
+  overflow: hidden;
   animation: backdropIn 1.2s ease both;
 }
-.vn-backdrop img { width: 100%; height: 100%; object-fit: cover; }
+/* Ken Burns: the backdrop breathes with a slow drift so a held scene never
+   sits dead-still. Keyed per area (the wrapper remounts) so a new place
+   restarts the move. */
+.vn-backdrop img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform-origin: 50% 45%;
+  animation: vnKenBurns 32s ease-in-out both;
+}
+@keyframes vnKenBurns {
+  from { transform: scale(1.06) translate(-1.2%, -0.8%); }
+  to { transform: scale(1.14) translate(1.2%, 1%); }
+}
 /* Mood wash + legibility floor over the backdrop. */
 .vn-wash {
   position: absolute;
@@ -2119,11 +2165,25 @@ body {
   position: absolute;
   inset: 0;
   z-index: 2;
-  transform: scale(1);
-  transform-origin: 50% 68%;
-  transition: transform 7s cubic-bezier(0.2, 0.5, 0.3, 1);
+  --vn-scale: 1;
+  --vn-px: 0%;
+  --vn-py: 0%;
+  transform: scale(var(--vn-scale)) translate(var(--vn-px), var(--vn-py));
+  transform-origin: 50% 62%;
+  transition: transform 1.6s cubic-bezier(0.22, 0.61, 0.36, 1);
+  will-change: transform;
 }
-.vn-camera.vn-speaking { transform: scale(1.06); }
+/* Shots: the framing the reader (or Director) chose for the current beat. */
+.vn-camera.vn-shot-wide { --vn-scale: 1; --vn-py: 0%; }
+.vn-camera.vn-shot-establishing { --vn-scale: 1.03; --vn-py: 0%; }
+.vn-camera.vn-shot-mid { --vn-scale: 1.13; --vn-py: -1.5%; }
+.vn-camera.vn-shot-close { --vn-scale: 1.28; --vn-py: -3.5%; }
+/* Focus: pan toward the talker when two leads share the stage. */
+.vn-camera.vn-focus-left { --vn-px: 7%; }
+.vn-camera.vn-focus-right { --vn-px: -7%; }
+.vn-camera.vn-focus-center { --vn-px: 0%; }
+/* Depth of field: on a close-up the un-lit sprite softens out of focus. */
+.vn-camera.vn-dof .vn-dim img { filter: brightness(0.42) saturate(0.55) blur(3px); }
 
 /* The focused sprite: bottom-anchored center, entering with a soft rise. */
 .vn-sprite {
@@ -2155,24 +2215,50 @@ body {
   to { opacity: 1; transform: translateX(-50%) scaleX(-1) translateY(0); }
 }
 
-/* CG floats upper-center, above the sprite. */
+/* CG: a scene picture. It reveals CENTER STAGE (swapping in for the sprite),
+   then docks to the side so the sprite retakes the scene. Position + size are
+   numeric so the reveal→dock move animates smoothly. */
 .vn-cg {
   position: absolute;
-  left: 50%;
-  top: 34%;
   transform: translate(-50%, -50%);
-  z-index: 3;
+  z-index: 4;
   cursor: zoom-in;
-  animation: stageCgPop 0.3s ease-out both;
+  transition: left 0.85s cubic-bezier(0.4, 0, 0.2, 1),
+              top 0.85s cubic-bezier(0.4, 0, 0.2, 1),
+              width 0.85s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .vn-cg img {
-  max-width: min(44vw, 640px);
-  max-height: 40vh;
+  width: 100%;
+  height: auto;
+  max-height: 82vh;
   object-fit: contain;
   border-radius: 10px;
-  border: 2px solid rgba(255, 255, 255, 0.25);
+  border: 2px solid rgba(255, 255, 255, 0.24);
   box-shadow: 0 16px 44px rgba(0, 0, 0, 0.6);
+  display: block;
 }
+/* Reveal: front and center, standing in for the sprite. */
+.vn-cg-reveal {
+  left: 50%;
+  top: 50%;
+  width: min(46vw, 600px);
+  animation: vnCgReveal 0.55s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+}
+@keyframes vnCgReveal {
+  from { opacity: 0; transform: translate(-50%, -46%) scale(0.94); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+/* Docked: shrunk to the upper-right, out of the sprite's way but still there. */
+.vn-cg-docked {
+  left: 84%;
+  top: 31%;
+  width: min(19vw, 250px);
+}
+.vn-cg-docked img { border-color: rgba(255, 255, 255, 0.32); }
+/* While a CG holds center stage, the sprite steps aside. !important is needed
+   to beat the sprite's own vnSpriteIn entrance animation (fill:both holds
+   opacity:1 and would otherwise override this). It returns on dock. */
+.vn-camera.vn-cg-revealing .vn-sprite { opacity: 0 !important; }
 
 /* Area title card. */
 .vn-area {
@@ -2276,11 +2362,30 @@ body {
   pointer-events: none;
 }
 
+/* Camera shake: a high-tension beat punches the whole frame (Stage + VN). */
+.fx-shake { animation: fxShake 0.5s ease-in-out; }
+@keyframes fxShake {
+  0%, 100% { transform: translate(0, 0); }
+  15% { transform: translate(-5px, 3px); }
+  30% { transform: translate(4px, -4px); }
+  45% { transform: translate(-4px, -2px); }
+  60% { transform: translate(4px, 3px); }
+  78% { transform: translate(-2px, 1px); }
+}
+.no-effects .fx-shake { animation: none !important; }
+@media (prefers-reduced-motion: reduce) { .fx-shake { animation: none !important; } }
+
 .no-effects .vn-camera { transition: none; transform: none !important; }
 .no-effects .vn-sprite, .no-effects .vn-backdrop, .no-effects .vn-area { animation: none; }
+.no-effects .vn-backdrop img { animation: none; transform: scale(1.08); }
+.no-effects .vn-camera.vn-dof .vn-dim img { filter: brightness(0.42) saturate(0.55); }
+.no-effects .vn-cg { transition: none !important; }
 @media (prefers-reduced-motion: reduce) {
   .vn-camera { transition: none; transform: none !important; }
   .vn-sprite, .vn-backdrop, .vn-area, .vn-cursor, .vn-cg { animation: none !important; }
+  .vn-cg { transition: none !important; }
+  .vn-backdrop img { animation: none !important; transform: scale(1.08); }
+  .vn-camera.vn-dof .vn-dim img { filter: brightness(0.42) saturate(0.55); }
   .vn-bar { transition: none; }
 }
 
@@ -2295,6 +2400,94 @@ body {
 @keyframes sceneFxIn { from { opacity: 0; } to { opacity: 1; } }
 .no-effects .scene-fx { display: none; }
 @media (prefers-reduced-motion: reduce) { .scene-fx { display: none; } }
+
+/* --- Screen special effects (Fablekin-style vfx, asset-free CSS) -------- */
+/* One overlay over the scene, below the dialogue box (z6). Momentary punches
+   replay per beat (remounted with a keyed name); washes hold. */
+.scene-vfx {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+}
+/* FLASH — a white impact bloom that falls off fast. */
+.scene-vfx-flash {
+  background: radial-gradient(ellipse at center, rgba(255, 255, 255, 0.95), rgba(255, 255, 255, 0.5) 55%, transparent 78%);
+  mix-blend-mode: screen;
+  animation: vfxFlash 0.5s ease-out forwards;
+}
+@keyframes vfxFlash { from { opacity: 1; } to { opacity: 0; } }
+/* VIGNETTE — dread closes in from the edges (held). */
+.scene-vfx-vignette {
+  background: radial-gradient(ellipse at center, transparent 42%, rgba(0, 0, 0, 0.28) 74%, rgba(0, 0, 0, 0.62) 100%);
+  animation: vfxFadeIn 0.9s ease both;
+}
+/* DESATURATE — the colour drains from everything behind the layer (held). */
+.scene-vfx-desaturate {
+  backdrop-filter: saturate(0.25) brightness(0.94) contrast(1.02);
+  -webkit-backdrop-filter: saturate(0.25) brightness(0.94) contrast(1.02);
+  animation: vfxFadeIn 1.1s ease both;
+}
+/* BLOOM — a soft radiant wash for wonder (held). */
+.scene-vfx-bloom {
+  background: radial-gradient(ellipse at center, rgba(255, 246, 214, 0.34), transparent 66%);
+  backdrop-filter: brightness(1.1) saturate(1.12);
+  -webkit-backdrop-filter: brightness(1.1) saturate(1.12);
+  mix-blend-mode: screen;
+  animation: vfxBloom 4.5s ease-in-out infinite alternate;
+}
+@keyframes vfxBloom { from { opacity: 0.55; } to { opacity: 1; } }
+/* GLITCH — an uncanny RGB tear that flickers a few times. */
+.scene-vfx-glitch {
+  backdrop-filter: hue-rotate(0deg);
+  -webkit-backdrop-filter: hue-rotate(0deg);
+  animation: vfxGlitch 0.42s steps(2, end) 3;
+}
+.scene-vfx-glitch::before,
+.scene-vfx-glitch::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  mix-blend-mode: screen;
+}
+.scene-vfx-glitch::before { background: rgba(255, 0, 80, 0.14); animation: vfxGlitchR 0.42s steps(2, end) 3; }
+.scene-vfx-glitch::after { background: rgba(0, 200, 255, 0.14); animation: vfxGlitchB 0.42s steps(2, end) 3; }
+@keyframes vfxGlitch {
+  0%, 100% { backdrop-filter: hue-rotate(0deg); -webkit-backdrop-filter: hue-rotate(0deg); }
+  50% { backdrop-filter: hue-rotate(28deg) contrast(1.12); -webkit-backdrop-filter: hue-rotate(28deg) contrast(1.12); }
+}
+@keyframes vfxGlitchR { 0%, 100% { transform: translate(0, 0); } 50% { transform: translate(-4px, 1px); } }
+@keyframes vfxGlitchB { 0%, 100% { transform: translate(0, 0); } 50% { transform: translate(4px, -1px); } }
+@keyframes vfxFadeIn { from { opacity: 0; } to { opacity: 1; } }
+.no-effects .scene-vfx { display: none; }
+@media (prefers-reduced-motion: reduce) {
+  .scene-vfx-flash, .scene-vfx-glitch { display: none; }
+  .scene-vfx-glitch::before, .scene-vfx-glitch::after { display: none; }
+  .scene-vfx-vignette, .scene-vfx-desaturate, .scene-vfx-bloom { animation: none; }
+}
+
+/* --- Emote pops: a classic VN symbol bursts over the speaking sprite ---- */
+.stage-emote, .vn-emote {
+  position: absolute;
+  top: 4%;
+  right: 12%;
+  z-index: 6;
+  font-size: clamp(1.6rem, 3.4vw, 2.6rem);
+  line-height: 1;
+  filter: drop-shadow(0 2px 5px rgba(0, 0, 0, 0.6));
+  pointer-events: none;
+  animation: emotePop 0.42s cubic-bezier(0.3, 1.5, 0.5, 1) both;
+}
+.vn-emote { top: 6%; right: 22%; }
+@keyframes emotePop {
+  0% { opacity: 0; transform: scale(0.2) translateY(8px); }
+  60% { opacity: 1; transform: scale(1.15) translateY(-2px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+.no-effects .stage-emote, .no-effects .vn-emote { animation: none; }
+@media (prefers-reduced-motion: reduce) {
+  .stage-emote, .vn-emote { animation: none; }
+}
 
 /* VN beat box: the spoken line leads; narration around it stays quiet. */
 .vn-aside {
@@ -2336,3 +2529,77 @@ img.stage-em-anger { filter: drop-shadow(0 0 18px rgba(255, 60, 40, 0.45)); }
 .vn-sprite { transition: filter 0.6s ease, opacity 0.6s ease; }
 .vn-dim { filter: brightness(0.45) saturate(0.6); opacity: 0.92; z-index: 1; }
 .vn-sprite:not(.vn-dim) { z-index: 2; }
+
+/* ---------------------------------------------------------------- */
+/* Specialized AUTOFOCUS layouts (hands-free) per view.             */
+/* Story/Chat autofocus lives in ReaderDisplay; these dress the     */
+/* cinematic views so the eye lands on the live reveal edge.        */
+/* ---------------------------------------------------------------- */
+
+/* STAGE: the textbox rises to top-center and enlarges into focus;  */
+/* the portraits shrink to the sides underneath it.                 */
+.stage-autofocus .stage-boxwrap { order: -1; padding-top: 1.75rem; padding-bottom: 0.6rem; }
+.stage-autofocus .stage-box {
+  max-width: 1100px;
+  max-height: 48vh;
+  font-size: 1.06em;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--app-accent, #888) 55%, transparent),
+              0 24px 70px rgba(0, 0, 0, 0.55);
+  transition: max-width 0.5s ease, box-shadow 0.5s ease;
+}
+.stage-autofocus .stage-scene { flex: 0 1 auto; min-height: 34vh; }
+.stage-autofocus .stage-portrait { transform: scale(0.82); transition: transform 0.5s ease; }
+.no-effects .stage-autofocus .stage-box,
+.no-effects .stage-autofocus .stage-portrait { transition: none; }
+
+/* VN: a quiet focus vignette pulls the eye to the centre reveal —  */
+/* no transform, so the camera framing stays intact.               */
+.vn-autofocus::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  background: radial-gradient(ellipse at 50% 55%, transparent 52%, rgba(0, 0, 0, 0.5) 100%);
+  transition: opacity 0.6s ease;
+}
+
+/* BOOK: a slight camera tilt + a spotlight on the page being read. */
+.book-autofocus {
+  position: relative;
+  transform: perspective(1800px) rotateX(4deg);
+  transition: transform 0.6s ease;
+}
+.book-autofocus::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  background: radial-gradient(ellipse at 50% 62%, transparent 46%, rgba(0, 0, 0, 0.42) 100%);
+}
+.no-effects .book-autofocus { transform: none; }
+@media (prefers-reduced-motion: reduce) {
+  .book-autofocus { transform: none; }
+  .stage-autofocus .stage-box, .stage-autofocus .stage-portrait { transition: none; }
+}
+
+/* ---------------------------------------------------------------- */
+/* Reader-authored SFX marks — a subtle persistent cue on the span   */
+/* the reader tied a sound to (main reader .sfx-mark; Stage/VN via    */
+/* .stage-emk-sfx). A soft accent underline + a tiny speaker glyph.   */
+/* ---------------------------------------------------------------- */
+.sfx-mark, .stage-emk-sfx {
+  text-decoration: underline dotted
+    color-mix(in srgb, var(--app-accent, #7aa) 70%, transparent);
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1.5px;
+}
+.sfx-mark::after, .stage-emk-sfx::after {
+  content: '\266A'; /* ♪ */
+  font-size: 0.62em;
+  vertical-align: super;
+  margin-left: 0.12em;
+  opacity: 0.55;
+  color: var(--app-accent, currentColor);
+}

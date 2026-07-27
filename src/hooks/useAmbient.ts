@@ -1,10 +1,11 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useReducer, useRef } from 'react';
 import { useAppStore } from '../store';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { AmbientController } from '../utils/ambient';
 import { sceneAmbientSpec, tensionVolume } from '../utils/sceneMood';
 import { useScenes } from './useScenes';
 import { tensionAt } from '../utils/sceneSegment';
+import { audioMixer } from '../utils/audioMixer';
 
 /**
  * Loops an ambient bed while the reader is open. By default the bed is per
@@ -20,6 +21,9 @@ export const useAmbient = () => {
   const screen = useAppStore(s => s.screen);
   const soundscapes = useAppStore(s => s.sceneSoundscapes);
   const storyId = useAppStore(s => s.currentStory?.id);
+  // When a generated-library bed is playing (Adaptive Soundscapes), the
+  // procedural bed stands down so the two don't stack.
+  const libActive = useAppStore(s => s.audioCuesEnabled && s.librarySoundscapeActive);
   const { active: scene, activeId } = useScenes();
 
   // A dramatic beat the Director marked in the message now streaming — fire a
@@ -33,8 +37,15 @@ export const useAmbient = () => {
   // A scene with a bed drives the sound (mood/location) + volume (tension arc);
   // otherwise the per-theme bed at the plain volume.
   const sceneSpec = soundscapes && scene ? sceneAmbientSpec(scene.mood, scene.location) : '';
-  const spec = sceneSpec || themeSpec;
-  const effVolume = sceneSpec ? tensionVolume(volume, tensionAt(scene!, activeId)) : volume;
+  // A live library bed owns the soundscape — silence the procedural one entirely.
+  const spec = libActive ? '' : (sceneSpec || themeSpec);
+  // Re-render when the mixer ducks (TTS speaking) so the bed drops out of the
+  // way of the voice, then restores. Legacy loudness is preserved (only the
+  // duck multiplier is applied — the new library beds carry the full hierarchy).
+  const [, bumpDuck] = useReducer((x: number) => x + 1, 0);
+  useEffect(() => audioMixer.subscribe(bumpDuck), []);
+  const baseVol = sceneSpec ? tensionVolume(volume, tensionAt(scene!, activeId)) : volume;
+  const effVolume = baseVol * audioMixer.duck('ambience');
 
   const ctlRef = useRef<AmbientController | null>(null);
   if (!ctlRef.current) ctlRef.current = new AmbientController();

@@ -48,6 +48,23 @@ export const useStreamer = () => {
     let holdUntil = 0;
     let cachedFullText: string | null = null;
     let cachedKey = '';
+    // Reader-authored "slow the reveal here" spans (highlight → SFX marks) —
+    // resolved to offsets once the full text is known.
+    let slowRanges: [number, number][] | null = null;
+    const computeSlow = (full: string): [number, number][] => {
+      const s = useAppStore.getState();
+      const storyId = s.currentStory?.id;
+      if (!storyId) return [];
+      const marks = useAuraV2Store.getState().sfxMarksByStory[storyId]?.[messageId] ?? [];
+      const hay = full.toLowerCase();
+      const out: [number, number][] = [];
+      for (const m of marks) {
+        if (!m.slow || !m.text) continue;
+        const i = hay.indexOf(m.text.toLowerCase());
+        if (i >= 0) out.push([i, i + m.text.length]);
+      }
+      return out;
+    };
 
     const fullText = () => {
       const s = useAppStore.getState();
@@ -88,7 +105,9 @@ export const useStreamer = () => {
 
     const scheduleAdvance = () => {
       const s = useAppStore.getState();
-      s.finishCurrentMessage();
+      // Commit the PROCESSED text we just revealed (not raw source) so the
+      // finished message keeps its formatting and full last word.
+      s.finishCurrentMessage(fullText());
       // Short lines finish streaming in a blink and would vanish before
       // they can be read (worst on Stage/VN where only the current passage
       // shows) — hold them for a read-speed floor before advancing.
@@ -142,12 +161,20 @@ export const useStreamer = () => {
         return;
       }
       const pacingCfg = pacingFor(s.expressiveIntensity);
-      const mul = pacing ? rateMultiplier(full, s.streamedText.length, pacingCfg) : 1;
+      // A reader-marked "slow here" span drags the reveal to a crawl so the beat
+      // (and any SFX timed to it) lands with weight.
+      if (slowRanges === null) slowRanges = computeSlow(full);
+      const pos = s.streamedText.length;
+      const slowMul = slowRanges.some(([a, b]) => pos >= a && pos < b) ? 0.4 : 1;
+      const mul = (pacing ? rateMultiplier(full, s.streamedText.length, pacingCfg) : 1) * slowMul;
 
       // Voice sync: while TTS narrates this message, the reveal must not outrun
       // it. Cap the reveal to the spoken position (plus a small lead so words
       // surface just ahead of the voice, not behind it).
-      const ttsSync = s.ttsEnabled && s.ttsPending;
+      // Dialogue-only TTS voices just the quotes, so its progress covers only a
+      // fraction of the text — never gate the reveal to it (the narration must
+      // keep reading); the quotes are spoken as the reveal passes them instead.
+      const ttsSync = s.ttsEnabled && s.ttsPending && !s.ttsDialogueOnly;
       const voiceCap = ttsSync
         ? Math.ceil(s.ttsProgress * full.length) + TTS_LEAD_CHARS
         : Infinity;

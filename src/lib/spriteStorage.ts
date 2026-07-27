@@ -1,8 +1,9 @@
 /**
  * Local storage for character expression sprites (Stage view). Own IndexedDB
  * database so image bytes never bloat the story records. Everything stays on
- * the device. Sprites are keyed by character NAME (lowercased), not story —
- * the same character across many chats shares one expression set.
+ * the device. Sprites are scoped to ONE chat: keyed by (storyId, character
+ * NAME) so a set uploaded in one chat never shows up in another. Legacy records
+ * saved before scoping (no storyId) simply no longer match — re-upload per chat.
  */
 
 /** The emotion buckets an expression image can be filed under. */
@@ -22,6 +23,8 @@ export const bucketFor = (emotion?: string): EmotionBucket => {
 
 export interface StoredSprite {
   id: string;
+  /** The chat this sprite belongs to — sprites never cross chats. */
+  storyId: string;
   /** Lowercased character name this sprite belongs to. */
   character: string;
   emotion: EmotionBucket;

@@ -64,6 +64,23 @@ export const directorCoverage = (storyId: string): { directed: number; total: nu
   return { directed: all.length - stale, total: all.length };
 };
 
+/**
+ * The story's location just BEFORE the first stale passage — the nearest
+ * already-read location upstream. Seeds continuity so enriching a page picks up
+ * where the last page left off instead of guessing a fresh, unrelated place.
+ */
+const seedLocation = (storyId: string, firstStaleId?: string): string | undefined => {
+  if (!firstStaleId) return undefined;
+  const all = passagesForStory();
+  const cache = useAuraV2Store.getState().sceneByStory[storyId] ?? {};
+  const idx = all.findIndex(p => p.messageId === firstStaleId);
+  for (let i = idx - 1; i >= 0; i--) {
+    const loc = cache[all[i].messageId]?.location;
+    if (loc) return loc;
+  }
+  return undefined;
+};
+
 /** Abort any in-flight run. */
 export const stopEnrich = (): void => {
   controller?.abort();
@@ -91,6 +108,7 @@ const run = async (storyId: string, passages: ScenePassage[]): Promise<void> => 
   try {
     await enrichPassages(stale, cfg, {
       signal: controller.signal,
+      prevLocation: seedLocation(storyId, stale[0]?.messageId),
       onBatch: (descriptors, done) => {
         if (descriptors.length) useAuraV2Store.getState().putScenes(storyId, descriptors);
         useSceneDirectorStore.getState().advance(done);
@@ -107,3 +125,16 @@ export const enrichAll = (storyId: string): Promise<void> => run(storyId, passag
 
 /** Auto (hybrid) — read the current page/chapter's stale passages. */
 export const enrichCurrentPage = (storyId: string): Promise<void> => run(storyId, currentPagePassages());
+
+/**
+ * Manual "retry this page" — throw away the current page's cached descriptors so
+ * they read as stale, then re-run the Director on them. Lets the reader ask for a
+ * fresh take when the auto pass gave a weak read. No-ops if a run is in flight.
+ */
+export const retryCurrentPage = (storyId: string): Promise<void> => {
+  if (useSceneDirectorStore.getState().running) return Promise.resolve();
+  const passages = currentPagePassages();
+  const store = useAuraV2Store.getState();
+  for (const p of passages) store.clearScenes(storyId, p.messageId);
+  return run(storyId, passages);
+};

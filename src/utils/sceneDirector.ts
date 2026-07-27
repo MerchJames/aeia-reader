@@ -23,12 +23,14 @@ export interface ScenePassage {
 
 export const MOODS: readonly Mood[] = [
   'tense', 'tender', 'ominous', 'joyful', 'melancholy',
-  'action', 'eerie', 'awe', 'neutral',
+  'action', 'eerie', 'awe', 'romantic', 'neutral',
 ];
 
 const TIMES = ['dawn', 'day', 'dusk', 'night', 'unknown'] as const;
 const EMPHASIS_KINDS = ['whisper', 'shout', 'beat'] as const;
 const FX_KINDS = ['smoke', 'fog', 'stars', 'sparkles', 'rain', 'embers', 'snow', 'petals'] as const;
+const SHOT_KINDS = ['establishing', 'close', 'wide'] as const;
+const VFX_KINDS = ['flash', 'shake', 'vignette', 'desaturate', 'glitch', 'bloom'] as const;
 
 /** Passages per enrichment request. Small enough to keep locality + valid JSON. */
 export const SCENE_BATCH_SIZE = 10;
@@ -57,17 +59,49 @@ export const SCENE_SYSTEM_PROMPT = [
   '  "i": <passage number>,',
   `  "mood": one of ${MOODS.join('|')},`,
   '  "tension": number 0..1,',
-  '  "location": short phrase or null,',
+  '  "location": short phrase, or null when the place has NOT changed,',
   '  "timeOfDay": one of dawn|day|dusk|night|unknown,',
   '  "speaker": { "name": string, "emotion": short word } or null,',
+  '  "dialogue": [ { "text": <verbatim quoted line, WITHOUT the quote marks>, "speaker": who says it } ],',
   '  "emphasis": [ { "text": <verbatim substring of the passage>, "kind": whisper|shout|beat } ],',
-  `  "fx": one of ${FX_KINDS.join('|')} or null`,
+  `  "fx": one of ${FX_KINDS.join('|')} or null,`,
+  `  "shot": one of ${SHOT_KINDS.join('|')} or null,`,
+  `  "vfx": one of ${VFX_KINDS.join('|')} or null`,
   '}]',
+  '',
+  'MOOD — pick the DOMINANT emotional register, not the surface activity:',
+  '- "action" is for physical conflict, combat, a chase, urgent danger — NOT for',
+  '  emotional intensity. A charged, breathless, or passionate scene is NOT action.',
+  '- "romantic" for romance, passion, desire, intimacy, a charged connection;',
+  '  "tender" for gentle warmth, affection, comfort. Prefer these over "action"',
+  '  or "tense" whenever the heat is emotional/physical intimacy, not danger.',
+  '- "awe" for wonder/the sublime; "eerie"/"ominous" for dread; "melancholy" for',
+  '  grief/loss. When unsure, choose the register a reader would FEEL, not the verbs.',
+  '',
+  'LOCATION CONTINUITY: the story stays in one place until it clearly MOVES.',
+  'Only name a location when a passage establishes or travels to one; otherwise',
+  'set location to null and the reader carries the previous one forward. NEVER',
+  'invent a place unrelated to the story so far — if a PREVIOUS LOCATION is given,',
+  'you are still there unless the passage explicitly leaves it.',
+  '',
+  'DIALOGUE ATTRIBUTION: list every quoted line and WHO speaks it. text = the words',
+  'inside the quotes, copied verbatim (no quote marks). Attribute to the ACTUAL',
+  'speaker — an NPC the narrator voices, a script tag ("Kara:"), a "said X". A name',
+  'that is merely ADDRESSED ("turned to Elara", "Elara, come here") is the listener,',
+  'NOT the speaker — never attribute a line to its addressee. If truly unknown, use',
+  "the passage's own character. At most 8 entries; omit or [] when there is no speech.",
   '',
   'Rules: emphasis.text MUST be an exact substring copied from the passage.',
   'Keep emphasis to at most 3 spans per passage. Set fx ONLY when the prose',
   'clearly shows that weather or particle effect on screen (mist rolling in,',
   'snowfall, sparks, floating ash, cherry blossoms…) — otherwise null.',
+  'Set shot to signal the camera framing ONLY when the passage clearly calls for',
+  'it: "establishing" when it opens on a place/vista, "close" for an intimate or',
+  'charged one-on-one beat, "wide" for a sweeping or crowded moment — otherwise',
+  'null and the reader frames it automatically. Set vfx ONLY for a genuinely',
+  'charged beat: "flash" on a sudden impact/blow, "shake" on a jolt or blast,',
+  '"glitch" for the uncanny/broken, "vignette" to close in on dread, "desaturate"',
+  'for despair or loss, "bloom" for a radiant or wondrous moment — otherwise null.',
   'Output nothing but the JSON array.',
 ].join('\n');
 
@@ -75,6 +109,7 @@ export const SCENE_SYSTEM_PROMPT = [
 export const buildEnrichMessages = (
   passages: ScenePassage[],
   card?: CardInfo,
+  prevLocation?: string,
 ): ChatMsg[] => {
   const cardBlock = cardToPromptBlock(card);
   const body = passages
@@ -90,6 +125,7 @@ export const buildEnrichMessages = (
   // the app's U-shaped placement rule (see docs/SCENE_DIRECTOR.md §4).
   const user = [
     cardBlock && `STORY CONTEXT (for grounding only):\n${cardBlock}`,
+    prevLocation && `PREVIOUS LOCATION: ${prevLocation} — the story is here now; keep it unless a passage clearly moves elsewhere.`,
     `PASSAGES:\n${body}`,
     'Return the JSON array of descriptors, one per passage, in order.',
   ].filter(Boolean).join('\n\n');
@@ -128,6 +164,23 @@ const cleanEmphasis = (raw: unknown, passageText: string): SceneEmphasis[] | und
   return out.length ? out : undefined;
 };
 
+/** Keep only dialogue entries whose quoted text is really in the passage and
+ *  that name a speaker. Quote marks are stripped so matching is lenient. */
+const cleanDialogue = (raw: unknown, passageText: string): { text: string; speaker: string }[] | undefined => {
+  if (!Array.isArray(raw)) return undefined;
+  const hay = passageText.toLowerCase();
+  const out: { text: string; speaker: string }[] = [];
+  for (const d of raw) {
+    const text = typeof d?.text === 'string' ? d.text.replace(/^["'“”]+|["'“”]+$/g, '').trim() : '';
+    const speaker = typeof d?.speaker === 'string' ? d.speaker.trim() : '';
+    if (!text || !speaker || text.length < 2) continue;
+    if (!hay.includes(text.toLowerCase())) continue; // verbatim only — matched at play time
+    out.push({ text, speaker });
+    if (out.length >= 8) break;
+  }
+  return out.length ? out : undefined;
+};
+
 /** Pull the first JSON array out of a model reply (tolerant of prose/fences). */
 const extractJsonArray = (raw: string): unknown[] | null => {
   const start = raw.indexOf('[');
@@ -151,6 +204,7 @@ export const parseDescriptors = (
   raw: string,
   passages: ScenePassage[],
   now = Date.now(),
+  prevLocation?: string,
 ): SceneDescriptor[] => {
   const arr = extractJsonArray(raw);
   if (!arr) return [];
@@ -173,13 +227,28 @@ export const parseDescriptors = (
       location: typeof rec.location === 'string' && rec.location.trim() ? rec.location.trim() : undefined,
       timeOfDay: asTime(rec.timeOfDay),
       speaker,
+      dialogue: cleanDialogue(rec.dialogue, passage.content),
       emphasis: cleanEmphasis(rec.emphasis, passage.content),
       fx: typeof rec.fx === 'string' && (FX_KINDS as readonly string[]).includes(rec.fx)
         ? (rec.fx as SceneDescriptor['fx'])
         : undefined,
+      shot: typeof rec.shot === 'string' && (SHOT_KINDS as readonly string[]).includes(rec.shot)
+        ? (rec.shot as SceneDescriptor['shot'])
+        : undefined,
+      vfx: typeof rec.vfx === 'string' && (VFX_KINDS as readonly string[]).includes(rec.vfx)
+        ? (rec.vfx as SceneDescriptor['vfx'])
+        : undefined,
       createdAt: now,
     });
   });
+  // Location continuity: a passage that names no new place STAYS where the story
+  // was — carry the last known location forward (seeded by the prior batch), so
+  // the soundscape/scene never jumps to an unrelated place mid-thread.
+  let last = prevLocation?.trim() || undefined;
+  for (const d of out) {
+    if (d.location) last = d.location;
+    else if (last) d.location = last;
+  }
   return out;
 };
 
@@ -209,6 +278,9 @@ export interface EnrichConfig {
 
 export interface EnrichOptions {
   signal?: AbortSignal;
+  /** The story's location entering this run — seeds location continuity so the
+   *  first passage doesn't jump to an unrelated place. */
+  prevLocation?: string;
   /**
    * Called after each batch with that batch's descriptors plus running counts
    * (`done` = unique passages read so far, `total` = passages requested). Lets
@@ -230,17 +302,22 @@ export const enrichPassages = async (
 ): Promise<SceneDescriptor[]> => {
   const { signal, onBatch } = opts;
   const byId = new Map<string, SceneDescriptor>();
+  // The place the story was in at the end of the last batch — seeds continuity
+  // so the first passage of a batch doesn't guess a fresh, unrelated location.
+  let lastLocation = opts.prevLocation;
   for (const batch of batchPassages(passages)) {
     if (signal?.aborted) break;
     try {
       const reply = await chatCompletion(
         cfg.base, cfg.key, cfg.model,
-        buildEnrichMessages(batch, cfg.card),
+        buildEnrichMessages(batch, cfg.card, lastLocation),
         { temperature: 0.2, max_tokens: 1200, ...cfg.params },
         signal,
       );
-      const descriptors = parseDescriptors(reply, batch);
+      const descriptors = parseDescriptors(reply, batch, Date.now(), lastLocation);
       for (const d of descriptors) byId.set(d.messageId, d);
+      const withLoc = descriptors.filter(d => d.location);
+      if (withLoc.length) lastLocation = withLoc[withLoc.length - 1].location;
       onBatch?.(descriptors, byId.size, passages.length);
     } catch (e) {
       if (signal?.aborted) break;

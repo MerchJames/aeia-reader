@@ -5,10 +5,12 @@ import { ReaderDisplay } from './components/ReaderDisplay';
 import { BookView } from './components/BookView';
 import { StageView } from './components/StageView';
 import { VNView } from './components/VNView';
+import { SandboxView } from './components/SandboxView';
 import { OverviewMode } from './components/OverviewMode';
 import { HighlightsMode } from './components/HighlightsMode';
 import { BranchesMode } from './components/BranchesMode';
 import { AutoFormatModal } from './components/AutoFormatModal';
+import { RefineModal } from './components/RefineModal';
 
 // AI panel pulls in KaTeX — load it only when opened.
 const AIChat = lazy(() => import('./components/AIChat').then(m => ({ default: m.AIChat })));
@@ -18,6 +20,8 @@ import { Library } from './components/Library';
 import { useStreamer } from './hooks/useStreamer';
 import { useTTS } from './hooks/useTTS';
 import { useAmbient } from './hooks/useAmbient';
+import { useSceneSfx } from './hooks/useSceneSfx';
+import { SceneSoundscape } from './components/SceneSoundscape';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useAppStore } from './store';
 import { customFamilyFor, useFontStore } from './stores/useFontStore';
@@ -43,6 +47,7 @@ export default function App() {
   useStreamer();
   useTTS();
   useAmbient();
+  useSceneSfx();
   useKeyboardShortcuts();
 
   const screen = useAppStore(s => s.screen);
@@ -60,6 +65,7 @@ export default function App() {
   const loadBackdrops = useBackdropStore(s => s.loadBackdrops);
   const customFonts = useFontStore(s => s.fonts);
   const [showAutoFormat, setShowAutoFormat] = useState(false);
+  const [showRefine, setShowRefine] = useState(false);
 
   useEffect(() => {
     void initLibrary();
@@ -122,6 +128,8 @@ export default function App() {
             <StageView />
           ) : viewMode === 'vn' ? (
             <VNView />
+          ) : viewMode === 'sandbox' ? (
+            <SandboxView />
           ) : (
             <ReaderDisplay />
           )}
@@ -129,13 +137,15 @@ export default function App() {
         </>
       )}
 
-      <SettingsPanel onOpenAutoFormat={() => setShowAutoFormat(true)} />
+      <SettingsPanel onOpenAutoFormat={() => setShowAutoFormat(true)} onOpenRefine={() => setShowRefine(true)} />
       {showAutoFormat && <AutoFormatModal onClose={() => setShowAutoFormat(false)} />}
+      {showRefine && <RefineModal onClose={() => setShowRefine(false)} />}
       {aiOpen && screen === 'reader' && (
         <Suspense fallback={null}>
           <AIChat />
         </Suspense>
       )}
+      <SceneSoundscape />
     </div>
   );
 }

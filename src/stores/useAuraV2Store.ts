@@ -1,7 +1,7 @@
 import React from 'react';
 import { create } from 'zustand';
 import { createJSONStorage, persist, StateStorage } from 'zustand/middleware';
-import { Annotation, Chain, ChatThread, ChatTurn, ContextZone, CowritePreset, Message, MessageOverride, Pin, PinSet, PinVersion, SceneDescriptor, Sheet } from '../types';
+import { Annotation, Chain, ChatThread, ChatTurn, ContextZone, CowritePreset, Message, MessageOverride, Pin, PinSet, PinVersion, SandboxActive, SandboxScope, SandboxTreatment, SceneCue, SceneDescriptor, Sheet, StyleConfig } from '../types';
 import { useAppStore } from '../store';
 
 /**
@@ -291,6 +291,17 @@ const MAX_TURNS_PER_THREAD = 400;
 
 const normName = (s: string) => s.trim().toLowerCase();
 
+/** A reader-authored sound cue on a hand-picked span (see #1 highlight→SFX). */
+export interface SfxMark {
+  id: string;
+  /** Verbatim selected text — the anchor the SFX fires at as it's revealed. */
+  text: string;
+  /** The sound to render/reuse. */
+  prompt: string;
+  /** Slow the reveal across this span so the beat lands with the sound. */
+  slow?: boolean;
+}
+
 interface AuraV2State {
   /* Codex data (persisted) */
   codexByStory: Record<string, CodexEntity[]>;
@@ -308,6 +319,11 @@ interface AuraV2State {
 
   /* Anchored notes (persisted) */
   annotationsByStory: Record<string, Annotation[]>;
+
+  /* Reader-authored SFX marks — story → messageId → span cues (persisted). */
+  sfxMarksByStory: Record<string, Record<string, SfxMark[]>>;
+  addSfxMark: (storyId: string, messageId: string, mark: Omit<SfxMark, 'id'>) => void;
+  removeSfxMark: (storyId: string, messageId: string, markId: string) => void;
 
   /* Pinned visuals (persisted) */
   pinsByStory: Record<string, Pin[]>;
@@ -333,6 +349,24 @@ interface AuraV2State {
   sceneByStory: Record<string, Record<string, SceneDescriptor>>;
   /** Whether the Director pass is enabled for a story (opt-in, spends tokens). */
   directorEnabledByStory: Record<string, boolean>;
+
+  /* Sandbox mode — AI-authored per-message presentation treatments (persisted).
+     story → messageId → treatment. See SANDBOX_PLAN.md. */
+  sandboxByStory: Record<string, Record<string, SandboxTreatment>>;
+
+  /* Sandbox Studio — saved, named Style Configs + which is active at each scope
+     + a master on/off, all per story (persisted). */
+  sandboxConfigs: Record<string, StyleConfig[]>;
+  sandboxActive: Record<string, SandboxActive>;
+  sandboxEnabledByStory: Record<string, boolean>;
+  /** Reader colour override applied over any Sandbox styling (per story). */
+  sandboxPaletteByStory: Record<string, { text?: string; accent?: string; bg?: string }>;
+  /** AI director scene cues — story → messageId → ordered cue track (persisted). */
+  sandboxCuesByStory: Record<string, Record<string, SceneCue[]>>;
+  /** Named, toggleable metadata for a message's built scene (like a saved View). */
+  sandboxSceneByStory: Record<string, Record<string, { name: string; enabled: boolean }>>;
+  /** Reader's standing direction for the Scene Director, per story (persisted). */
+  sandboxGuidanceByStory: Record<string, string>;
 
   /** The summary pin the agentic summarizer maintains per story (for versioning
    *  across re-runs). Absent until the first summary is generated. */
@@ -463,6 +497,33 @@ interface AuraV2State {
   /** Drop one passage's descriptor (id given) or the whole story's cache. */
   clearScenes: (storyId: string, messageId?: string) => void;
 
+  /** Store one message's AI Sandbox treatment (last wins). */
+  setSandboxTreatment: (storyId: string, messageId: string, treatment: SandboxTreatment) => void;
+  /** Drop one message's treatment (id given) or the whole story's. */
+  clearSandboxTreatment: (storyId: string, messageId?: string) => void;
+
+  /* Sandbox Studio config library + assignment + master toggle. */
+  addSandboxConfig: (storyId: string, config: StyleConfig) => void;
+  updateSandboxConfig: (storyId: string, id: string, patch: Partial<StyleConfig>) => void;
+  deleteSandboxConfig: (storyId: string, id: string) => void;
+  /** Assign a config at a scope. `targetKey` is the chainId/messageId for those scopes. */
+  setSandboxActive: (storyId: string, scope: SandboxScope, configId: string, targetKey?: string) => void;
+  /** Unassign at a scope (targetKey for chain/message). */
+  clearSandboxActive: (storyId: string, scope: SandboxScope, targetKey?: string) => void;
+  setSandboxEnabled: (storyId: string, on: boolean) => void;
+  /** Patch the reader colour override (pass {} / undefined values to clear). */
+  setSandboxPalette: (storyId: string, patch: { text?: string; accent?: string; bg?: string }) => void;
+  /** Store one message's directed scene cue track (last wins). */
+  setSandboxCues: (storyId: string, messageId: string, cues: SceneCue[]) => void;
+  /** Drop cues for one message, or the whole story when messageId is omitted. */
+  clearSandboxCues: (storyId: string, messageId?: string) => void;
+  /** Name a message's scene (registers it as a toggleable performance). */
+  setSandboxScene: (storyId: string, messageId: string, meta: { name: string; enabled: boolean }) => void;
+  /** Flip a scene on/off without discarding its cues. */
+  toggleSandboxScene: (storyId: string, messageId: string, on: boolean) => void;
+  /** Set the reader's standing Scene Director guidance for a story. */
+  setSandboxGuidance: (storyId: string, guidance: string) => void;
+
   /** Remember which pin holds a story's generated summary (or clear it). */
   setSummaryPin: (storyId: string, pinId: string | null) => void;
 
@@ -511,6 +572,7 @@ export const useAuraV2Store = create<AuraV2State>()(
 
       sheetsByStory: {},
       annotationsByStory: {},
+      sfxMarksByStory: {},
       pinsByStory: {},
       pinSetsByStory: {},
       activePinSetByStory: {},
@@ -519,6 +581,14 @@ export const useAuraV2Store = create<AuraV2State>()(
       activeThreadByStory: {},
       cowritePresets: [],
       sceneByStory: {},
+      sandboxByStory: {},
+      sandboxConfigs: {},
+      sandboxActive: {},
+      sandboxEnabledByStory: {},
+      sandboxPaletteByStory: {},
+      sandboxCuesByStory: {},
+      sandboxSceneByStory: {},
+      sandboxGuidanceByStory: {},
       directorEnabledByStory: {},
       summaryPinByStory: {},
 
@@ -1130,10 +1200,117 @@ export const useAuraV2Store = create<AuraV2State>()(
         }
         set({ sceneByStory: all });
       },
+      setSandboxTreatment: (storyId, messageId, treatment) => {
+        const forStory = { ...(get().sandboxByStory[storyId] ?? {}), [messageId]: treatment };
+        set({ sandboxByStory: { ...get().sandboxByStory, [storyId]: forStory } });
+      },
+      clearSandboxTreatment: (storyId, messageId) => {
+        const all = { ...get().sandboxByStory };
+        if (messageId == null) {
+          delete all[storyId];
+        } else {
+          const forStory = { ...(all[storyId] ?? {}) };
+          delete forStory[messageId];
+          if (Object.keys(forStory).length === 0) delete all[storyId];
+          else all[storyId] = forStory;
+        }
+        set({ sandboxByStory: all });
+      },
+
+      addSandboxConfig: (storyId, config) => {
+        const list = get().sandboxConfigs[storyId] ?? [];
+        set({ sandboxConfigs: { ...get().sandboxConfigs, [storyId]: [...list, config] } });
+      },
+      updateSandboxConfig: (storyId, id, patch) => {
+        const list = get().sandboxConfigs[storyId] ?? [];
+        set({
+          sandboxConfigs: {
+            ...get().sandboxConfigs,
+            [storyId]: list.map(c => (c.id === id ? { ...c, ...patch, updatedAt: Date.now() } : c)),
+          },
+        });
+      },
+      deleteSandboxConfig: (storyId, id) => {
+        const list = (get().sandboxConfigs[storyId] ?? []).filter(c => c.id !== id);
+        // Also drop any assignment that pointed at it.
+        const active: SandboxActive = { ...(get().sandboxActive[storyId] ?? {}) };
+        if (active.chat === id) delete active.chat;
+        if (active.chains) active.chains = Object.fromEntries(Object.entries(active.chains).filter(([, v]) => v !== id));
+        if (active.messages) active.messages = Object.fromEntries(Object.entries(active.messages).filter(([, v]) => v !== id));
+        set({
+          sandboxConfigs: { ...get().sandboxConfigs, [storyId]: list },
+          sandboxActive: { ...get().sandboxActive, [storyId]: active },
+        });
+      },
+      setSandboxActive: (storyId, scope, configId, targetKey) => {
+        const active: SandboxActive = { ...(get().sandboxActive[storyId] ?? {}) };
+        if (scope === 'chat') active.chat = configId;
+        else if (scope === 'chain') active.chains = { ...(active.chains ?? {}), [targetKey!]: configId };
+        else active.messages = { ...(active.messages ?? {}), [targetKey!]: configId };
+        set({ sandboxActive: { ...get().sandboxActive, [storyId]: active } });
+      },
+      clearSandboxActive: (storyId, scope, targetKey) => {
+        const active: SandboxActive = { ...(get().sandboxActive[storyId] ?? {}) };
+        if (scope === 'chat') delete active.chat;
+        else if (scope === 'chain' && active.chains) { const c = { ...active.chains }; delete c[targetKey!]; active.chains = c; }
+        else if (scope === 'message' && active.messages) { const m = { ...active.messages }; delete m[targetKey!]; active.messages = m; }
+        set({ sandboxActive: { ...get().sandboxActive, [storyId]: active } });
+      },
+      setSandboxEnabled: (storyId, on) => {
+        set({ sandboxEnabledByStory: { ...get().sandboxEnabledByStory, [storyId]: on } });
+      },
+      setSandboxPalette: (storyId, patch) => {
+        const next = { ...(get().sandboxPaletteByStory[storyId] ?? {}), ...patch };
+        for (const k of Object.keys(next) as (keyof typeof next)[]) if (!next[k]) delete next[k];
+        set({ sandboxPaletteByStory: { ...get().sandboxPaletteByStory, [storyId]: next } });
+      },
+      setSandboxCues: (storyId, messageId, cues) => {
+        const forStory = { ...(get().sandboxCuesByStory[storyId] ?? {}) };
+        if (cues.length) forStory[messageId] = cues; else delete forStory[messageId];
+        set({ sandboxCuesByStory: { ...get().sandboxCuesByStory, [storyId]: forStory } });
+      },
+      clearSandboxCues: (storyId, messageId) => {
+        const all = { ...get().sandboxCuesByStory };
+        const scenes = { ...get().sandboxSceneByStory };
+        if (messageId == null) { delete all[storyId]; delete scenes[storyId]; }
+        else {
+          const forStory = { ...(all[storyId] ?? {}) };
+          delete forStory[messageId];
+          all[storyId] = forStory;
+          const sForStory = { ...(scenes[storyId] ?? {}) };
+          delete sForStory[messageId];
+          scenes[storyId] = sForStory;
+        }
+        set({ sandboxCuesByStory: all, sandboxSceneByStory: scenes });
+      },
+      setSandboxScene: (storyId, messageId, meta) => {
+        const forStory = { ...(get().sandboxSceneByStory[storyId] ?? {}), [messageId]: meta };
+        set({ sandboxSceneByStory: { ...get().sandboxSceneByStory, [storyId]: forStory } });
+      },
+      toggleSandboxScene: (storyId, messageId, on) => {
+        const cur = get().sandboxSceneByStory[storyId]?.[messageId];
+        if (!cur) return;
+        const forStory = { ...(get().sandboxSceneByStory[storyId] ?? {}), [messageId]: { ...cur, enabled: on } };
+        set({ sandboxSceneByStory: { ...get().sandboxSceneByStory, [storyId]: forStory } });
+      },
+      setSandboxGuidance: (storyId, guidance) => {
+        set({ sandboxGuidanceByStory: { ...get().sandboxGuidanceByStory, [storyId]: guidance } });
+      },
       setSummaryPin: (storyId, pinId) => {
         const next = { ...get().summaryPinByStory };
         if (pinId) next[storyId] = pinId; else delete next[storyId];
         set({ summaryPinByStory: next });
+      },
+
+      addSfxMark: (storyId, messageId, mark) => {
+        const byMsg = get().sfxMarksByStory[storyId] ?? {};
+        const list = [...(byMsg[messageId] ?? []), { ...mark, id: newId() }];
+        set({ sfxMarksByStory: { ...get().sfxMarksByStory, [storyId]: { ...byMsg, [messageId]: list } } });
+      },
+      removeSfxMark: (storyId, messageId, markId) => {
+        const byMsg = get().sfxMarksByStory[storyId];
+        if (!byMsg?.[messageId]) return;
+        set({ sfxMarksByStory: { ...get().sfxMarksByStory, [storyId]: { ...byMsg, [messageId]: byMsg[messageId].filter(m => m.id !== markId) } } });
       },
 
       addAnnotation: (storyId, annotation) => {
@@ -1190,6 +1367,7 @@ export const useAuraV2Store = create<AuraV2State>()(
         lensOnByStory: s.lensOnByStory,
         sheetsByStory: s.sheetsByStory,
         annotationsByStory: s.annotationsByStory,
+        sfxMarksByStory: s.sfxMarksByStory,
         pinsByStory: s.pinsByStory,
         pinSetsByStory: s.pinSetsByStory,
         activePinSetByStory: s.activePinSetByStory,
@@ -1198,6 +1376,14 @@ export const useAuraV2Store = create<AuraV2State>()(
         activeThreadByStory: s.activeThreadByStory,
         cowritePresets: s.cowritePresets,
         sceneByStory: s.sceneByStory,
+        sandboxByStory: s.sandboxByStory,
+        sandboxConfigs: s.sandboxConfigs,
+        sandboxActive: s.sandboxActive,
+        sandboxEnabledByStory: s.sandboxEnabledByStory,
+        sandboxPaletteByStory: s.sandboxPaletteByStory,
+        sandboxCuesByStory: s.sandboxCuesByStory,
+        sandboxSceneByStory: s.sandboxSceneByStory,
+        sandboxGuidanceByStory: s.sandboxGuidanceByStory,
         directorEnabledByStory: s.directorEnabledByStory,
         summaryPinByStory: s.summaryPinByStory,
         codexEnabled: s.codexEnabled,

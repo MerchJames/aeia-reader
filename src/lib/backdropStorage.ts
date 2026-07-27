@@ -3,10 +3,13 @@
  * The zero-config idea: name a backdrop "forest" and any scene the Director
  * places in a forest gets it (concept inspired by VN engines' asset folders;
  * implementation original). Own IndexedDB database; stays on the device.
+ * Backdrops are scoped to ONE chat via storyId — they never cross chats.
  */
 
 export interface StoredBackdrop {
   id: string;
+  /** The chat this backdrop belongs to — backdrops never cross chats. */
+  storyId: string;
   /** Lowercased keyword matched against the scene's location (or mood). */
   keyword: string;
   data: ArrayBuffer;

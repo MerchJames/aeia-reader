@@ -137,8 +137,14 @@ export interface Story extends StoryMeta {
 
 export type Screen = 'library' | 'reader';
 export type ViewMode =
-  | 'storybook' | 'chat' | 'book' | 'stage' | 'vn'
+  | 'storybook' | 'chat' | 'book' | 'stage' | 'vn' | 'sandbox'
   | 'overview' | 'highlights' | 'branches';
+/**
+ * Top-level workspace preset — gates which tools/views are visible so the app
+ * can start simple and reveal power on demand. 'read' = just reading; 'cowrite'
+ * = AI writing tools; 'scenes' = the Sandbox/Scene Director; 'all' = everything.
+ */
+export type UiMode = 'read' | 'cowrite' | 'scenes' | 'all';
 export type LayoutMode = 'continuous' | 'paginated';
 export type Theme =
   | 'light' | 'dark' | 'sepia' | 'notebook' | 'terminal'
@@ -365,12 +371,13 @@ export type ExpressiveIntensity = 'subtle' | 'expressive' | 'cinematic';
 
 export type Mood =
   | 'tense' | 'tender' | 'ominous' | 'joyful' | 'melancholy'
-  | 'action' | 'eerie' | 'awe' | 'neutral';
+  | 'action' | 'eerie' | 'awe' | 'romantic' | 'neutral';
 
-/** An emphasis span the Director judged worth performing (verbatim substring). */
+/** An emphasis span the Director judged worth performing (verbatim substring).
+ *  'sfx' is a reader-authored sound-effect mark (visual cue for the span). */
 export interface SceneEmphasis {
   text: string;
-  kind: 'whisper' | 'shout' | 'beat';
+  kind: 'whisper' | 'shout' | 'beat' | 'sfx';
 }
 
 /**
@@ -389,10 +396,133 @@ export interface SceneDescriptor {
   timeOfDay?: 'dawn' | 'day' | 'dusk' | 'night' | 'unknown';
   /** Dominant speaker + their emotion, for expressive TTS. */
   speaker?: { name: string; emotion: string };
+  /** AI-attributed quoted lines: who ACTUALLY speaks each (the enrichment's read,
+   *  preferred over the runtime heuristic for bubbles + multi-voice TTS). `text`
+   *  is a verbatim quoted substring (no surrounding quote marks). */
+  dialogue?: { text: string; speaker: string }[];
   emphasis?: SceneEmphasis[];
   /** Particle weather the prose clearly shows (fog, snowfall, floating ash…). */
   fx?: 'smoke' | 'fog' | 'stars' | 'sparkles' | 'rain' | 'embers' | 'snow' | 'petals';
+  /**
+   * The passage's signature framing for the VN camera — the compact form of a
+   * "scene builder". One word the Director may emit to override the heuristic
+   * shot: an intimate `close`, a sweeping `wide`, or an `establishing` open.
+   */
+  shot?: 'establishing' | 'close' | 'wide';
+  /**
+   * A screen-level special effect for a charged beat — the compact form of
+   * Fablekin's `vfx:trigger`. Momentary punches (`flash`, `shake`, `glitch`)
+   * fire once; washes (`vignette`, `desaturate`, `bloom`) hold across the beat.
+   * The reader also derives one heuristically from mood+tension when unset.
+   */
+  vfx?: 'flash' | 'shake' | 'vignette' | 'desaturate' | 'glitch' | 'bloom';
   createdAt: number;
+}
+
+/**
+ * Sandbox mode — an AI-authored per-message *treatment*. The model emits only
+ * presentation (CSS, and optionally an HTML skeleton with `{{speaker}}`/`{{body}}`
+ * placeholders); Aura injects the verbatim source text into the slots, so the
+ * words are never touched. Cached per (story, message). See SANDBOX_PLAN.md.
+ */
+export interface SandboxTreatment {
+  /** AI-authored CSS, sanitized (no `<script>`, no `@import`, no url() network). */
+  css: string;
+  /** Optional skeleton that replaces the card's inner markup; must slot {{body}}. */
+  skeleton?: string;
+  createdAt: number;
+}
+
+/** How wide a Style Config reaches. */
+export type SandboxScope = 'message' | 'chain' | 'chat';
+/** `theme` restyles the message cards; `shell` is a self-contained view. */
+export type SandboxKind = 'theme' | 'shell';
+/** Shell layout: one beat at a time (slideshow/doors) or all stacked (scroll). */
+export type ShellMode = 'slideshow' | 'scroll';
+/** Interactive controls Aura injects into a shell's own control bar. */
+export type ShellControl = 'playpause' | 'prev' | 'next' | 'restart' | 'text' | 'fx';
+
+/**
+ * Sandbox Studio — a named, saveable, toggleable AI-authored presentation. A
+ * `theme` dresses the message cards at some scope; a `shell` takes over the
+ * whole chat as its own view (slideshow, walk-through-doors, ASCII dungeon)
+ * with interactive widgets that talk back to the app over an allowlisted intent
+ * bus. The model authors only presentation — Aura slots the verbatim words —
+ * so the chat still works no matter how wild the design. See SANDBOX_PLAN.md.
+ */
+export interface StyleConfig {
+  id: string;
+  name: string;
+  scope: SandboxScope;
+  kind: SandboxKind;
+  /** The direction that produced it — shown in the manager, reused on restyle. */
+  intent: string;
+  /** Sanitized AI CSS. */
+  css: string;
+  /** theme: the card's inner markup; shell: the whole-view skeleton. */
+  skeleton?: string;
+  /** shell only — slideshow vs scroll. */
+  mode?: ShellMode;
+  /** shell only — an optional title-screen line (styled by css). */
+  title?: string;
+  /** shell only — which controls Aura puts in the always-present bar. */
+  controls?: ShellControl[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Which saved config is active at each scope, per story. */
+export interface SandboxActive {
+  /** Config id for the whole chat. */
+  chat?: string;
+  /** chainId → config id. */
+  chains?: Record<string, string>;
+  /** messageId → config id. */
+  messages?: Record<string, string>;
+}
+
+/** A transient on-screen effect a cue can fire (all CSS-only, motion-gated). */
+export type FxKind = 'shake' | 'zoom' | 'flash' | 'pulse' | 'glitch' | 'rumble' | 'fade';
+/** A procedural, asset-free sound a cue can play (synthesised in WebAudio). */
+export type SoundKind = 'clink' | 'boom' | 'whoosh' | 'chime' | 'heartbeat' | 'thud' | 'shimmer';
+/** A generated-audio library category (see aura-audio/ service + manifest). */
+export type AudioCategory = 'sfx' | 'ambience' | 'music';
+/** How freely anchor-triggered SFX fire while reading (see utils/sfxPlanner). */
+export type SfxLevel = 'off' | 'light' | 'medium' | 'immersive';
+
+/**
+ * A directed beat *inside a single message* — the AI director's scene layer.
+ * Anchored to a short VERBATIM phrase from the message text; Aura resolves the
+ * anchor to a character offset and fires the cue just after those words are
+ * revealed while streaming. The words are never touched — we search for the
+ * offset, we never rewrite — so source stays sacred, in time as well as space.
+ */
+export interface SceneCue {
+  id: string;
+  /** A short verbatim substring from the message; the cue fires as it's read. */
+  anchor: string;
+  kind: 'fx' | 'audio' | 'theme';
+  /** fx cue — a transient animation on the current card/frame. */
+  fx?: FxKind;
+  /** fx cue — how long the animation runs (ms); defaults per-effect. */
+  ms?: number;
+  /** audio cue — which procedural sound to play. */
+  sound?: SoundKind;
+  /** audio cue — a generated library asset to play instead of a procedural sound
+   *  (id from the aura-audio manifest). Overrides `sound` when present. */
+  assetId?: string;
+  /** audio cue — which library category the asset is (for playback + labelling). */
+  assetCategory?: AudioCategory;
+  /** audio cue — loop the asset as a bed (ambience/music) until the scene changes. */
+  loop?: boolean;
+  /** theme cue — swaps the whole presentation for the rest of the beat (sanitized CSS). */
+  css?: string;
+  /** theme cue — optional replacement skeleton ({{speaker}}/{{body}}). */
+  skeleton?: string;
+  /** theme cue — retime the text reveal from here ("time slows" / a rush). */
+  pace?: 'slow' | 'normal' | 'fast';
+  /** Human label for the cue list. */
+  label?: string;
 }
 
 export type PinFormat = 'html' | 'markdown';
@@ -476,6 +606,8 @@ export interface Annotation {
 export type RevealMode = 'character' | 'word';
 
 export interface AppConfig {
+  /** Workspace preset gating which tools/views show (persisted). */
+  uiMode: UiMode;
   theme: Theme;
   accentColor: AccentColor;
   fontFamily: FontFamily;
@@ -537,6 +669,13 @@ export interface AppConfig {
   ttsPitch: number;
   /** Let the reading-speed slider also drive the TTS voice speed. */
   ttsFollowSpeed: boolean;
+  /** Kokoro only: voice narration and each character's dialogue in distinct
+   *  voices (segment + attribute per message) instead of one flat voice. */
+  ttsMultiVoice: boolean;
+  /** Speak ONLY the dialogue (quoted speech), in each speaker's voice, as the
+   *  reveal reaches each line — narration stays silent. A conversational read
+   *  instead of a narrator reading everything. Forces per-speaker casting. */
+  ttsDialogueOnly: boolean;
   /** Which voice engine reads aloud: the OS Web Speech API or a Kokoro server. */
   ttsEngine: TtsEngine;
   /** Kokoro-FastAPI (OpenAI-compatible /v1/audio/speech) base URL. */
@@ -548,6 +687,19 @@ export interface AppConfig {
   kokoroUserVoice: string;
   /** Per-character Kokoro voice, keyed by the speaker's display name. */
   ttsVoiceByCharacter: Record<string, string>;
+  /** Optional aura-audio generation service (SFX/ambience/music) base URL. */
+  audioBaseUrl: string;
+  /** Play generated audio-library cues in the Scene Director (opt-in). */
+  audioCuesEnabled: boolean;
+  /** Offer to live-generate a scene bed when the library has no match (opt-in;
+   *  otherwise the reader only ever REUSES existing clips). */
+  audioLiveGen: boolean;
+  /** Layer generated MUSIC over ambience on scenes that earn it (opt-in). */
+  sceneMusic: boolean;
+  /** Music layer level (0..1); sits under voice, over ambience via the mixer. */
+  musicVolume: number;
+  /** Anchor-triggered SFX permissiveness while reading (how freely it fires). */
+  sfxPermissiveness: SfxLevel;
   /** Auto-assign distinct voices to unmapped side characters (dialogue casts itself). */
   autoCastVoices: boolean;
 
@@ -596,6 +748,9 @@ export interface AppState extends AppConfig {
   visibleMessages: Message[];
   streamingMessage: Message | null;
   streamedText: string;
+  /** True once the reveal has committed the full passage — the view stops
+   *  hiding the in-progress last word during the end-of-message hold. */
+  revealComplete: boolean;
   currentChainIndex: number;
   currentMessageIndex: number;
   isStreaming: boolean;
@@ -649,7 +804,9 @@ export interface AppState extends AppConfig {
   setPlaybackSpeed: (speed: number) => void;
   advanceMessage: () => void;
   updateStreamedText: (text: string) => void;
-  finishCurrentMessage: () => void;
+  /** Commit the reveal. Pass the PROCESSED full text so the finished message
+   *  keeps its formatting instead of flipping back to raw source. */
+  finishCurrentMessage: (fullText?: string) => void;
   resetPlayback: () => void;
   restreamFromId: (id: string) => void;
   jumpToMessage: (id: string) => void;
@@ -668,6 +825,7 @@ export interface AppState extends AppConfig {
 
   // View / settings actions
   setViewMode: (mode: ViewMode) => void;
+  setUiMode: (mode: UiMode) => void;
   setLayoutMode: (mode: LayoutMode) => void;
   setTheme: (theme: Theme) => void;
   setAccentColor: (accent: AccentColor) => void;
@@ -704,10 +862,31 @@ export interface AppState extends AppConfig {
   setTtsRate: (ttsRate: number) => void;
   setTtsPitch: (ttsPitch: number) => void;
   setTtsFollowSpeed: (ttsFollowSpeed: boolean) => void;
+  setTtsMultiVoice: (ttsMultiVoice: boolean) => void;
+  setTtsDialogueOnly: (ttsDialogueOnly: boolean) => void;
   setTtsPending: (ttsPending: boolean) => void;
   setTtsProgress: (progress: number) => void;
   setTtsEngine: (ttsEngine: TtsEngine) => void;
   setKokoroBaseUrl: (kokoroBaseUrl: string) => void;
+  setAudioBaseUrl: (audioBaseUrl: string) => void;
+  setAudioCuesEnabled: (audioCuesEnabled: boolean) => void;
+  setAudioLiveGen: (audioLiveGen: boolean) => void;
+  setSceneMusic: (sceneMusic: boolean) => void;
+  setMusicVolume: (musicVolume: number) => void;
+  setSfxPermissiveness: (sfxPermissiveness: SfxLevel) => void;
+  /** Transient: a generated-library ambience bed is currently playing, so the
+   *  procedural ambient stands down to avoid stacking two beds. Not persisted. */
+  librarySoundscapeActive: boolean;
+  setLibrarySoundscapeActive: (on: boolean) => void;
+  /** Transient: the last few anchor-SFX that fired, for the scene-audio panel. */
+  recentSfx: { id: string; label: string; at: number }[];
+  pushRecentSfx: (e: { id: string; label: string }) => void;
+  clearRecentSfx: () => void;
+  /** Transient: a mid-message location the reader just crossed into (bridging),
+   *  so the soundscape can switch beds before the next message. Null = follow
+   *  the enriched scene location. */
+  midSceneLocation: string | null;
+  setMidSceneLocation: (loc: string | null) => void;
   setKokoroApiKey: (kokoroApiKey: string) => void;
   setKokoroVoice: (kokoroVoice: string) => void;
   setKokoroUserVoice: (kokoroUserVoice: string) => void;

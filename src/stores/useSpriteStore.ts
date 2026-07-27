@@ -6,8 +6,8 @@ import {
 /**
  * User-uploaded character expression sprites for the Stage view. Bytes live
  * in IndexedDB; this store keeps the list plus object URLs ready to render.
- * Keyed by character name (lowercased) so one expression set follows the
- * character across every chat.
+ * Scoped per chat: keyed by (storyId, character name) so a set uploaded in one
+ * chat never leaks into another.
  */
 interface SpriteState {
   sprites: StoredSprite[];
@@ -16,7 +16,7 @@ interface SpriteState {
   loaded: boolean;
   error: string | null;
   loadSprites: () => Promise<void>;
-  addSprite: (character: string, emotion: EmotionBucket, file: File) => Promise<void>;
+  addSprite: (storyId: string, character: string, emotion: EmotionBucket, file: File) => Promise<void>;
   removeSprite: (id: string) => Promise<void>;
 }
 
@@ -41,15 +41,16 @@ export const useSpriteStore = create<SpriteState>()((set, get) => ({
     }
   },
 
-  addSprite: async (character, emotion, file) => {
+  addSprite: async (storyId, character, emotion, file) => {
     const key = character.trim().toLowerCase();
-    if (!key) return;
+    if (!key || !storyId) return;
     try {
       const data = await file.arrayBuffer();
-      // One image per (character, emotion): replacing is the intuitive flow.
-      const existing = get().sprites.find(s => s.character === key && s.emotion === emotion);
+      // One image per (story, character, emotion): replacing is the intuitive flow.
+      const existing = get().sprites.find(s => s.storyId === storyId && s.character === key && s.emotion === emotion);
       const sprite: StoredSprite = {
         id: existing?.id ?? `sp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+        storyId,
         character: key,
         emotion,
         data,
@@ -81,16 +82,19 @@ export const useSpriteStore = create<SpriteState>()((set, get) => ({
   },
 }));
 
-/** Resolve the sprite URL for a character's emotion, neutral as fallback. */
+/** Resolve the sprite URL for a character's emotion in ONE chat, neutral as
+ *  fallback. Scoped by storyId so sprites never cross chats. */
 export const spriteFor = (
+  storyId: string | undefined,
   character: string | undefined,
   bucket: EmotionBucket,
   sprites: StoredSprite[],
   urls: Record<string, string>,
 ): string | undefined => {
-  if (!character) return undefined;
+  if (!character || !storyId) return undefined;
   const key = character.trim().toLowerCase();
-  const hit = sprites.find(s => s.character === key && s.emotion === bucket)
-    ?? sprites.find(s => s.character === key && s.emotion === 'neutral');
+  const mine = (s: StoredSprite) => s.storyId === storyId && s.character === key;
+  const hit = sprites.find(s => mine(s) && s.emotion === bucket)
+    ?? sprites.find(s => mine(s) && s.emotion === 'neutral');
   return hit ? urls[hit.id] : undefined;
 };
