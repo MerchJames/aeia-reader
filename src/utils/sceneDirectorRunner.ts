@@ -13,6 +13,7 @@ import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { useSceneDirectorStore } from '../stores/useSceneDirectorStore';
 import { resolveContent } from './lens';
 import { EnrichConfig, enrichPassages, ScenePassage, selectStale } from './sceneDirector';
+import { StoryRead, isStoryReadStale, readStory } from './storyRead';
 
 let controller: AbortController | null = null;
 
@@ -81,6 +82,32 @@ const seedLocation = (storyId: string, firstStaleId?: string): string | undefine
   return undefined;
 };
 
+/**
+ * The story's whole-story read, taken once and cached.
+ *
+ * Costs one extra request per story (not per passage) and grounds every batch
+ * that follows, so the Director can weight a cue by the arc instead of by local
+ * punctuation. A failure is not fatal: enrichment runs ungrounded, exactly as it
+ * did before this pass existed.
+ */
+const ensureStoryRead = async (
+  storyId: string,
+  cfg: EnrichConfig,
+  signal: AbortSignal,
+): Promise<StoryRead | undefined> => {
+  const all = passagesForStory();
+  const cached = useAuraV2Store.getState().storyReadByStory[storyId];
+  if (!isStoryReadStale(cached, all)) return cached;
+  const read = await readStory(all, cfg, signal);
+  if (read && !signal.aborted) {
+    useAuraV2Store.getState().putStoryRead(storyId, read);
+    return read;
+  }
+  // Keep using a stale read rather than none — an out-of-date arc still weights
+  // better than no arc, and it will be replaced on the next successful run.
+  return cached;
+};
+
 /** Abort any in-flight run. */
 export const stopEnrich = (): void => {
   controller?.abort();
@@ -106,12 +133,15 @@ const run = async (storyId: string, passages: ScenePassage[]): Promise<void> => 
   controller = new AbortController();
   dir.begin(storyId, stale.length);
   try {
+    const storyRead = await ensureStoryRead(storyId, cfg, controller.signal);
+    if (controller.signal.aborted) return;
     await enrichPassages(stale, cfg, {
       signal: controller.signal,
+      storyRead,
       prevLocation: seedLocation(storyId, stale[0]?.messageId),
-      onBatch: (descriptors, done) => {
+      onBatch: (descriptors, done, _total, unread) => {
         if (descriptors.length) useAuraV2Store.getState().putScenes(storyId, descriptors);
-        useSceneDirectorStore.getState().advance(done);
+        useSceneDirectorStore.getState().advance(done, unread);
       },
     });
   } finally {

@@ -7,7 +7,10 @@ import {
   parseStudioConfig, sanitizeCss, sanitizeSkeleton,
   buildCueMessages, parseCueTrack, resolveCues,
   buildPlanMessages, parseScenePlan, buildSceneMessages,
+  designSamplers, PLAN_TOKENS, SCENE_TOKENS,
 } from './sandboxDirector';
+import { mergeSamplers, samplerParamsFrom } from './aiClient';
+import { heuristicPacket } from './stylePacket';
 
 let pass = 0, fail = 0;
 const ok = (cond: boolean, msg: string) => { if (cond) { pass++; } else { fail++; console.error('✗', msg); } };
@@ -212,6 +215,52 @@ const sceneAssetReply = ['```json', JSON.stringify([
   { anchor: 'blade had fallen', kind: 'scene', intent: 'x', asset: 'music__medieval-panflute__aaaaaaaaaa' },
 ]), '```'].join('\n');
 ok(parseScenePlan(sceneAssetReply, cueContent, validIds)[0].assetId === undefined, 'asset id ignored on a non-audio beat');
+
+/* ---- the style packet supersedes the raw guidance line ---- */
+
+const packet = heuristicPacket('1970s giallo horror');
+const pPlan = buildPlanMessages({ name: 'Mara', content: cueContent, guidance: '1970s giallo horror', packet });
+ok(pPlan[1].content.includes('STYLE PACKET'), 'the plan prompt leads with the resolved packet');
+ok(pPlan[1].content.includes(packet.palette.accent), 'the plan prompt carries literal hex, not adjectives');
+ok(!/STANDING GUIDANCE/.test(pPlan[1].content), 'the raw guidance line steps aside for the packet');
+
+const pBuild = buildSceneMessages({ name: 'Mara', content: cueContent, guidance: 'x', packet }, plan[0]);
+ok(pBuild[1].content.includes('STYLE PACKET'), 'the build prompt carries the same packet');
+ok(pBuild[1].content.includes(packet.type.stack), 'the build prompt names the exact font stack');
+
+// The two passes must be directed against IDENTICAL bytes — the whole reason a
+// story looks like one story instead of six unrelated designs.
+const blockOf = (m: string) => m.slice(m.indexOf('STYLE PACKET'), m.indexOf('\nSpeaker:') > 0 ? m.indexOf('\nSpeaker:') : undefined);
+ok(blockOf(pPlan[1].content).startsWith('STYLE PACKET'), 'the packet block is locatable in the plan prompt');
+ok(pBuild[1].content.includes(blockOf(pPlan[1].content).trim().split('\n')[3]),
+  'plan and build see the same packet lines');
+
+/* ---- sampling for a design task ---- */
+
+const local = designSamplers('http://localhost:5001/v1');
+const remote = designSamplers('https://api.openai.com/v1');
+ok(local.repetition_penalty === 1, 'repetition penalty is neutralised locally — CSS is repetitive by nature');
+ok(remote.repetition_penalty === undefined, 'non-OpenAI samplers are not sent to a remote endpoint');
+ok((local.temperature ?? 1) > 0 && (local.temperature ?? 1) < 0.6,
+  'design sampling is low but not greedy — greedy collapses a design task onto the generic completion');
+ok(SCENE_TOKENS >= 1500 && PLAN_TOKENS < SCENE_TOKENS, 'a stylesheet gets room; the plan needs less');
+
+// The bug this exists to prevent: an all-null reader config must NOT wipe the
+// task regime. Plain spread does exactly that; mergeSamplers does not.
+const untouched = samplerParamsFrom({
+  streaming: true, systemPrompt: '', contextTemplate: '', contextSize: 0, maxTokens: 0,
+  extendedSamplers: false, temperature: null, topP: null, topK: null, minP: null,
+  repetitionPenalty: null, frequencyPenalty: null, presencePenalty: null,
+});
+const spread = { ...designSamplers('http://localhost:5001/v1'), max_tokens: SCENE_TOKENS, ...untouched };
+ok(spread.temperature === null, 'a plain spread WOULD have wiped the regime (this is the bug)');
+const merged = mergeSamplers({ ...designSamplers('http://localhost:5001/v1'), max_tokens: SCENE_TOKENS }, untouched);
+ok(merged.temperature === local.temperature, 'mergeSamplers keeps the task regime when the reader chose nothing');
+ok(merged.max_tokens === SCENE_TOKENS, 'and keeps the token budget rather than the reader’s 0');
+
+// But an explicit reader setting still wins — that is the whole contract.
+const chosen = mergeSamplers({ ...designSamplers('http://localhost:5001/v1') }, { temperature: 0.9 });
+ok(chosen.temperature === 0.9, 'an explicit reader temperature still wins');
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);

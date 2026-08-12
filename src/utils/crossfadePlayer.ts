@@ -16,6 +16,7 @@ export class CrossfadePlayer {
   private cur: HTMLAudioElement; // the element currently "up"
   private curUrl: string | null = null;
   private ceiling = 1; // volume cap from the mixer (duck × level)
+  private rate = 1;    // playback-speed factor from the performance envelope
   private fadeMs: number;
   private raf: ReturnType<typeof setTimeout> | null = null;
 
@@ -24,8 +25,28 @@ export class CrossfadePlayer {
     this.b = new Audio();
     this.a.loop = this.b.loop = true;
     this.a.volume = this.b.volume = 0;
+    // Let pitch follow speed: a bed dragged to 0.9× should sag, not chipmunk
+    // back up to concert pitch. That sag IS the effect.
+    for (const el of [this.a, this.b]) {
+      const any = el as HTMLAudioElement & { preservesPitch?: boolean; mozPreservesPitch?: boolean };
+      any.preservesPitch = false;
+      any.mozPreservesPitch = false;
+    }
     this.cur = this.a;
     this.fadeMs = fadeMs;
+  }
+
+  /**
+   * Playback-speed factor for both elements — the narrative "tape drag". Clamped
+   * to a musical range; outside it a loop stops sounding like the same place.
+   */
+  setRate(rate: number) {
+    const r = Math.max(0.5, Math.min(1.6, rate));
+    if (r === this.rate) return;
+    this.rate = r;
+    for (const el of [this.a, this.b]) {
+      try { el.playbackRate = r; } catch { /* some engines refuse extremes */ }
+    }
   }
 
   /** The clip currently playing (null = silent). */
@@ -50,6 +71,7 @@ export class CrossfadePlayer {
     if (url) {
       if (incoming.src !== url) incoming.src = url;
       incoming.volume = 0;
+      try { incoming.playbackRate = this.rate; } catch { /* ignore */ }
       void incoming.play().catch(() => {});
     }
     this.cur = incoming;

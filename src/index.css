@@ -818,19 +818,172 @@ body {
   user-select: none;
 }
 
+/* Scene performance — the Director's text-manipulation track. The reveal side
+   (drag, rush, per-word beats, the silence before a line) is paced by the
+   streamer; these are the treatments the marked words wear as they ARRIVE.
+   Each is one-shot: the word performs, then settles back to normal prose. */
+.perf-swell,
+.perf-tremble,
+.perf-drop,
+.perf-fade,
+.perf-unwrite,
+.perf-slow,
+.perf-rush,
+.perf-stagger,
+.perf-hold,
+.perf-cut {
+  display: inline-block;
+  transform-origin: 50% 60%;
+  will-change: transform, opacity;
+}
+
+/* --- the pacing verbs' visual signatures ------------------------------------
+   These four bend the reveal rather than the type, so their treatment is quiet
+   by design — just enough that a reader SEES the pacing is deliberate instead
+   of reading it as the app lagging. */
+
+/* Slow — the word arrives already spread, and draws itself back together. */
+.perf-slow { animation: perfSlow var(--perf-slow-dur, 1.6s) cubic-bezier(0.16, 0.8, 0.3, 1) both; }
+@keyframes perfSlow {
+  0%   { letter-spacing: var(--perf-slow-track, 0.16em); opacity: 0.45; filter: blur(0.6px); }
+  100% { letter-spacing: normal; opacity: 1; filter: blur(0); }
+}
+/* Rush — a leading smear, as if the word overran its own arrival. */
+.perf-rush { animation: perfRush 0.34s ease-out both; }
+@keyframes perfRush {
+  0%   { transform: translateX(var(--perf-rush-dx, 0.5em)) skewX(-9deg); opacity: 0; filter: blur(1.6px); }
+  100% { transform: translateX(0) skewX(0); opacity: 1; filter: blur(0); }
+}
+/* Stagger — each word STAMPS down, like a hand pressing it into the page. */
+.perf-stagger { animation: perfStamp 0.3s cubic-bezier(0.2, 1.6, 0.4, 1) both; }
+@keyframes perfStamp {
+  0%   { transform: scale(var(--perf-stamp-scale, 1.5)); opacity: 0; }
+  55%  { transform: scale(0.95); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+/* Hold — the silence broke; the word arrives on an intake of breath. */
+.perf-hold { animation: perfHold 0.9s cubic-bezier(0.16, 0.9, 0.3, 1) both; }
+@keyframes perfHold {
+  0%   { opacity: 0; transform: translateY(0.14em) scale(0.97); text-shadow: 0 0 10px var(--app-accent); }
+  100% { opacity: 1; transform: translateY(0) scale(1); text-shadow: none; }
+}
+/* Cut — the words race in and STOP, with the jolt of being interrupted. */
+.perf-cut { animation: perfCut 0.22s cubic-bezier(0.3, 1.8, 0.5, 1) both; }
+@keyframes perfCut {
+  0%   { transform: translateX(var(--perf-cut-dx, 0.35em)); opacity: 0; }
+  70%  { transform: translateX(-0.05em); opacity: 1; }
+  100% { transform: translateX(0); opacity: 1; }
+}
+/* The last word before the break keeps a hard edge after it lands. */
+.perf-cut:last-child { box-shadow: inset -2px 0 0 -1px color-mix(in srgb, var(--app-accent) 55%, transparent); }
+/* Swell — the word blooms larger, holds, then eases back to size. */
+.perf-swell { animation: perfSwell var(--perf-swell-dur, 1.5s) cubic-bezier(0.22, 0.8, 0.3, 1) both; }
+@keyframes perfSwell {
+  0%   { transform: scale(1); }
+  45%  { transform: scale(var(--perf-swell-scale, 1.28)); letter-spacing: 0.02em; }
+  70%  { transform: scale(var(--perf-swell-scale, 1.28)); letter-spacing: 0.02em; }
+  100% { transform: scale(1); letter-spacing: normal; }
+}
+/* Tremble — an unsteady voice: fine jitter that dies out on its own. */
+.perf-tremble { animation: perfTremble 0.16s linear var(--perf-tremble-count, 9) both; }
+@keyframes perfTremble {
+  0%   { transform: translate(0, 0) rotate(0deg); }
+  25%  { transform: translate(var(--perf-tremble-amp, 0.6px), -0.4px) rotate(-0.35deg); }
+  50%  { transform: translate(0, 0.5px) rotate(0.3deg); }
+  75%  { transform: translate(calc(var(--perf-tremble-amp, 0.6px) * -1), -0.3px) rotate(0.25deg); }
+  100% { transform: translate(0, 0) rotate(0deg); }
+}
+/* Drop — the word falls in and lands heavy. */
+.perf-drop {
+  font-weight: 700;
+  animation: perfDrop 0.42s cubic-bezier(0.3, 1.4, 0.5, 1) both;
+}
+@keyframes perfDrop {
+  0%   { transform: translateY(calc(var(--perf-drop-rise, 0.5em) * -1)) scale(1.12); opacity: 0; }
+  60%  { transform: translateY(0.04em) scale(0.98); opacity: 1; }
+  100% { transform: translateY(0) scale(1); opacity: 1; }
+}
+/* Unwrite — the words are set down, then dissolve off the page. The text is
+   never removed (the passage stays whole and selectable), so the ghost can be
+   brought back just by looking straight at it. */
+.perf-unwrite {
+  animation: perfUnwrite var(--perf-unwrite-dur, 2.6s) ease-in both;
+  transition: opacity 0.35s ease, filter 0.35s ease;
+}
+@keyframes perfUnwrite {
+  0%   { opacity: 1; filter: blur(0); letter-spacing: normal; }
+  40%  { opacity: 1; filter: blur(0); letter-spacing: normal; }
+  100% {
+    opacity: var(--perf-unwrite-opacity, 0.22);
+    filter: blur(1.4px);
+    letter-spacing: 0.08em;
+  }
+}
+/* Looking straight at it brings it back — the erased words are still there. */
+.perf-unwrite:hover {
+  opacity: 1;
+  filter: blur(0);
+  animation: none;
+}
+
+/* Fade — the words arrive faint and stay quiet, like a voice trailing off. */
+.perf-fade {
+  opacity: var(--perf-fade-opacity, 0.55);
+  font-style: italic;
+  animation: perfFade 1.4s ease-out both;
+}
+@keyframes perfFade {
+  0%   { opacity: 0; filter: blur(2px); }
+  100% { opacity: var(--perf-fade-opacity, 0.55); filter: blur(0); }
+}
+
 /* Intensity presets — subtle whisper → cinematic punch. */
 .reader-page.expr-subtle {
   --expr-shout-size: 1.07em; --expr-shout-tint: 24%; --expr-key-track: 0.006em;
   --expr-scene-gap: 1.2em; --expr-scene-opacity: 0.4;
+  --perf-swell-scale: 1.12; --perf-swell-dur: 1.1s; --perf-tremble-amp: 0.4px;
+  --perf-tremble-count: 6; --perf-drop-rise: 0.3em; --perf-fade-opacity: 0.68;
+  --perf-unwrite-dur: 2s; --perf-unwrite-opacity: 0.34;
+  --perf-slow-track: 0.08em; --perf-slow-dur: 1.1s; --perf-stamp-scale: 1.22;
+  --perf-rush-dx: 0.3em; --perf-cut-dx: 0.2em;
 }
 .reader-page.expr-expressive {
   --expr-shout-size: 1.15em; --expr-shout-tint: 40%; --expr-key-track: 0.012em;
   --expr-scene-gap: 1.6em; --expr-scene-opacity: 0.5;
+  --perf-swell-scale: 1.28; --perf-swell-dur: 1.5s; --perf-tremble-amp: 0.6px;
+  --perf-tremble-count: 9; --perf-drop-rise: 0.5em; --perf-fade-opacity: 0.55;
+  --perf-unwrite-dur: 2.6s; --perf-unwrite-opacity: 0.22;
+  --perf-slow-track: 0.16em; --perf-slow-dur: 1.6s; --perf-stamp-scale: 1.5;
+  --perf-rush-dx: 0.5em; --perf-cut-dx: 0.35em;
 }
 .reader-page.expr-cinematic {
   --expr-shout-size: 1.3em; --expr-shout-tint: 58%; --expr-key-track: 0.022em;
   --expr-scene-gap: 2.4em; --expr-scene-opacity: 0.62;
+  --perf-swell-scale: 1.5; --perf-swell-dur: 2s; --perf-tremble-amp: 1px;
+  --perf-tremble-count: 14; --perf-drop-rise: 0.75em; --perf-fade-opacity: 0.42;
+  --perf-unwrite-dur: 3.2s; --perf-unwrite-opacity: 0.12;
+  --perf-slow-track: 0.26em; --perf-slow-dur: 2.1s; --perf-stamp-scale: 1.85;
+  --perf-rush-dx: 0.8em; --perf-cut-dx: 0.55em;
 }
+
+/* Motion is the whole point of these, so honour the OS/app opt-outs: the words
+   keep their weight/quiet, they just stop moving. */
+@media (prefers-reduced-motion: reduce) {
+  .perf-swell, .perf-tremble, .perf-drop, .perf-fade, .perf-unwrite,
+  .perf-slow, .perf-rush, .perf-stagger, .perf-hold, .perf-cut {
+    animation: none !important;
+  }
+}
+.no-effects .perf-swell,
+.no-effects .perf-tremble,
+.no-effects .perf-drop,
+.no-effects .perf-fade,
+.no-effects .perf-unwrite,
+.no-effects .perf-slow,
+.no-effects .perf-rush,
+.no-effects .perf-stagger,
+.no-effects .perf-hold,
+.no-effects .perf-cut { animation: none !important; }
 
 /* Drop cap — the opening letter of each AI passage set large, book-style.
    Only non-user, non-streaming passages (the reveal would jump the cap). */
@@ -2398,6 +2551,14 @@ body {
   animation: sceneFxIn 1.4s ease both;
 }
 @keyframes sceneFxIn { from { opacity: 0; } to { opacity: 1; } }
+/* In the main reader the weather is full-viewport, behind the reading column
+   (which is z-10) and above the mood wash. */
+.scene-fx-fixed {
+  position: fixed;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+}
 .no-effects .scene-fx { display: none; }
 @media (prefers-reduced-motion: reduce) { .scene-fx { display: none; } }
 
@@ -2603,3 +2764,82 @@ img.stage-em-anger { filter: drop-shadow(0 0 18px rgba(255, 60, 40, 0.45)); }
   opacity: 0.55;
   color: var(--app-accent, currentColor);
 }
+
+/* ── Reading magnifier ──────────────────────────────────────────────────────
+ * A spotlight that follows the reveal edge in Autofocus: ONE fixed scrim with
+ * a hole in it, positioned from custom properties that ReaderDisplay updates as
+ * the words arrive (see utils/readingFocus for why this is an overlay and not
+ * a mask on the text).
+ *
+ * It must never touch the passage: masking the text faded bubble chrome, fought
+ * the autofocus font-size zoom, and did nothing at all in the views that use
+ * their own renderers. A scrim is purely positional, so it behaves the same
+ * everywhere.
+ */
+.reading-spotlight {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  pointer-events: none;
+  --focus-x: 50vw;
+  --focus-y: 50vh;
+  --focus-rx: 420px;
+  --focus-ry: 60px;
+  background: radial-gradient(
+    var(--focus-rx) var(--focus-ry) at var(--focus-x) var(--focus-y),
+    rgba(0, 0, 0, 0) 0%,
+    rgba(0, 0, 0, 0) 42%,
+    color-mix(in srgb, var(--app-bg) 62%, transparent) 78%,
+    color-mix(in srgb, var(--app-bg) 82%, transparent) 100%);
+  /* Moving the light is a paint, and the browser keeps the layer. */
+  will-change: background-position;
+  transition: background 90ms linear;
+}
+
+.no-effects .reading-spotlight { display: none; }
+
+/* The tour's autofocus demo: the same idea as the real spotlight — a scrim with
+ * a hole in it — on a loop, so the step SHOWS what autofocus does instead of
+ * describing it. Inert: pointer-events off, and it stops with every other
+ * effect under the reduced-motion and no-effects switches. */
+.tour-spotlight {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  --tx: 22%;
+  --ty: 30%;
+  background: radial-gradient(
+    150px 34px at var(--tx) var(--ty),
+    rgba(0, 0, 0, 0) 0%, rgba(0, 0, 0, 0) 40%,
+    color-mix(in srgb, var(--app-bg) 72%, transparent) 100%);
+  animation: tourSpot 7s ease-in-out infinite;
+}
+@keyframes tourSpot {
+  0%   { --tx: 18%; --ty: 26%; }
+  30%  { --tx: 74%; --ty: 26%; }
+  32%  { --tx: 14%; --ty: 58%; }
+  62%  { --tx: 80%; --ty: 58%; }
+  64%  { --tx: 14%; --ty: 86%; }
+  95%  { --tx: 62%; --ty: 86%; }
+  100% { --tx: 18%; --ty: 26%; }
+}
+@property --tx { syntax: '<percentage>'; inherits: false; initial-value: 22%; }
+@property --ty { syntax: '<percentage>'; inherits: false; initial-value: 30%; }
+
+@media (prefers-reduced-motion: reduce) {
+  .tour-spotlight { animation: none; }
+}
+.no-effects .tour-spotlight { animation: none; }
+
+/* The tour's read-aloud demo: a small equaliser, purely decorative. */
+.tour-eq { animation: tourEq 1.1s ease-in-out infinite alternate; transform-origin: bottom; }
+@keyframes tourEq { from { transform: scaleY(0.35); opacity: 0.5 } to { transform: scaleY(1); opacity: 1 } }
+@media (prefers-reduced-motion: reduce) { .tour-eq { animation: none } }
+.no-effects .tour-eq { animation: none; }
+
+/* The tour's view preview fades in rather than snapping, so sliding across the
+ * grid reads as one panel changing its mind instead of a strobe. */
+.tour-preview-in { animation: tourPreviewIn 220ms ease-out both; }
+@keyframes tourPreviewIn { from { opacity: 0 } to { opacity: 1 } }
+@media (prefers-reduced-motion: reduce) { .tour-preview-in { animation: none } }
+.no-effects .tour-preview-in { animation: none; }

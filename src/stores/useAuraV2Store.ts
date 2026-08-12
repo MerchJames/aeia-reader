@@ -1,45 +1,12 @@
 import React from 'react';
 import { create } from 'zustand';
-import { createJSONStorage, persist, StateStorage } from 'zustand/middleware';
-import { Annotation, Chain, ChatThread, ChatTurn, ContextZone, CowritePreset, Message, MessageOverride, Pin, PinSet, PinVersion, SandboxActive, SandboxScope, SandboxTreatment, SceneCue, SceneDescriptor, Sheet, StyleConfig } from '../types';
+import { applyOps, loadV2 } from '../lib/v2Storage';
+import { SliceBag, diffSlices, misdeclaredSlices, pickPersisted } from '../utils/v2Persist';
+import { Annotation, Chain, ChatThread, ChatTurn, ContextZone, CowritePreset, Message, MessageOverride, Pin, PinSet, PinVersion, SandboxActive, SandboxScope, SandboxTreatment, SceneCue, SceneDescriptor, ScenePerformCue, Sheet, StyleConfig } from '../types';
 import { useAppStore } from '../store';
-
-/**
- * Debounced localStorage. This blob can hold codex data, overrides and several
- * large pinned visuals (up to ~150k chars each) — serializing and writing all
- * of it on every single `set()` (panel toggles, codex-scan ticks, annotations)
- * stutters the reader. Coalesce rapid writes into one, and flush on hide/unload
- * so nothing is lost.
- */
-const debouncedLocalStorage = (delay = 500): StateStorage => {
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  let pending: { name: string; value: string } | null = null;
-  const flush = () => {
-    if (timer) { clearTimeout(timer); timer = null; }
-    if (pending) {
-      try { localStorage.setItem(pending.name, pending.value); } catch { /* quota */ }
-      pending = null;
-    }
-  };
-  if (typeof window !== 'undefined') {
-    window.addEventListener('visibilitychange', () => { if (document.hidden) flush(); });
-    window.addEventListener('pagehide', flush);
-    window.addEventListener('beforeunload', flush);
-  }
-  return {
-    getItem: (name) => localStorage.getItem(name),
-    setItem: (name, value) => {
-      pending = { name, value };
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(flush, delay);
-    },
-    removeItem: (name) => {
-      pending = null;
-      if (timer) { clearTimeout(timer); timer = null; }
-      localStorage.removeItem(name);
-    },
-  };
-};
+import type { StoryRead } from '../utils/storyRead';
+import type { PacketRecord, StylePacket } from '../utils/stylePacket';
+import { readThread, type AskTurn } from '../utils/askCharacter';
 
 /* ------------------------------------------------------------------ */
 /* Codex types                                                         */
@@ -302,6 +269,11 @@ export interface SfxMark {
   slow?: boolean;
 }
 
+/** A reader-authored performance direction on a hand-picked span. */
+export interface PerformMark extends ScenePerformCue {
+  id: string;
+}
+
 interface AuraV2State {
   /* Codex data (persisted) */
   codexByStory: Record<string, CodexEntity[]>;
@@ -325,6 +297,16 @@ interface AuraV2State {
   addSfxMark: (storyId: string, messageId: string, mark: Omit<SfxMark, 'id'>) => void;
   removeSfxMark: (storyId: string, messageId: string, markId: string) => void;
 
+  /* Reader-authored PERFORMANCE cues — story → messageId → span directions
+   * (persisted). Same shape the Director emits, so the reveal treats a
+   * hand-marked span exactly like a directed one; these are applied first, so
+   * a reader's call always wins over the AI's on the same words. */
+  performMarksByStory: Record<string, Record<string, PerformMark[]>>;
+  addPerformMark: (storyId: string, messageId: string, mark: Omit<PerformMark, 'id'>) => void;
+  removePerformMark: (storyId: string, messageId: string, markId: string) => void;
+  /** Drop any hand-marked cue on `text` (the popover's "no performance"). */
+  clearPerformMarkFor: (storyId: string, messageId: string, text: string) => void;
+
   /* Pinned visuals (persisted) */
   pinsByStory: Record<string, Pin[]>;
 
@@ -347,6 +329,13 @@ interface AuraV2State {
   /* Scene Director — cached per-passage AI scene reading (persisted).
      story → messageId → descriptor. See docs/SCENE_DIRECTOR.md. */
   sceneByStory: Record<string, Record<string, SceneDescriptor>>;
+  /**
+   * One cached whole-story read per story (persisted) — the arc, cast
+   * registers, recurring places and motifs that let the per-passage read
+   * weight its cues. NEVER render this: unlike the Codex it is not
+   * spoiler-safe (see `utils/storyRead.ts`).
+   */
+  storyReadByStory: Record<string, StoryRead>;
   /** Whether the Director pass is enabled for a story (opt-in, spends tokens). */
   directorEnabledByStory: Record<string, boolean>;
 
@@ -365,8 +354,18 @@ interface AuraV2State {
   sandboxCuesByStory: Record<string, Record<string, SceneCue[]>>;
   /** Named, toggleable metadata for a message's built scene (like a saved View). */
   sandboxSceneByStory: Record<string, Record<string, { name: string; enabled: boolean }>>;
+  /** Interviews with a character, anchored per message — story → messageId →
+   *  turns. READER-ONLY by construction: nothing here is canon, so it must never
+   *  reach the Lens, an export, the Multiverse graph, or any AI context built
+   *  for the Director/summarizer/assistant. Exactly one component reads it. */
+  askByStory: Record<string, AskTurn[]>;
+
   /** Reader's standing direction for the Scene Director, per story (persisted). */
   sandboxGuidanceByStory: Record<string, string>;
+  /** That direction RESOLVED into concrete values — the brief every beat of the
+   *  story is directed against. Kept beside the guidance it came from so a
+   *  reworded direction can be detected as stale. See utils/stylePacket. */
+  sandboxPacketByStory: Record<string, PacketRecord>;
 
   /** The summary pin the agentic summarizer maintains per story (for versioning
    *  across re-runs). Absent until the first summary is generated. */
@@ -494,6 +493,8 @@ interface AuraV2State {
   setDirectorEnabled: (storyId: string, on: boolean) => void;
   /** Merge descriptors into a story's cache, keyed by message id (last wins). */
   putScenes: (storyId: string, descriptors: SceneDescriptor[]) => void;
+  /** Cache this story's whole-story read. */
+  putStoryRead: (storyId: string, read: StoryRead) => void;
   /** Drop one passage's descriptor (id given) or the whole story's cache. */
   clearScenes: (storyId: string, messageId?: string) => void;
 
@@ -521,8 +522,15 @@ interface AuraV2State {
   setSandboxScene: (storyId: string, messageId: string, meta: { name: string; enabled: boolean }) => void;
   /** Flip a scene on/off without discarding its cues. */
   toggleSandboxScene: (storyId: string, messageId: string, on: boolean) => void;
+  /** Append a turn to the story's running interview. */
+  addAskTurn: (storyId: string, turn: AskTurn) => void;
+  /** Discard the interview entirely. */
+  clearAskThread: (storyId: string) => void;
+
   /** Set the reader's standing Scene Director guidance for a story. */
   setSandboxGuidance: (storyId: string, guidance: string) => void;
+  /** Store the resolved Style Packet for a story (with the guidance it came from). */
+  setSandboxPacket: (storyId: string, packet: StylePacket, guidance: string) => void;
 
   /** Remember which pin holds a story's generated summary (or clear it). */
   setSummaryPin: (storyId: string, pinId: string | null) => void;
@@ -561,7 +569,6 @@ const mirrorActiveSet = (sets: PinSet[], activeId: string, pins: Pin[]): PinSet[
 };
 
 export const useAuraV2Store = create<AuraV2State>()(
-  persist(
     (set, get) => ({
       codexByStory: {},
       scanProgress: {},
@@ -573,6 +580,7 @@ export const useAuraV2Store = create<AuraV2State>()(
       sheetsByStory: {},
       annotationsByStory: {},
       sfxMarksByStory: {},
+      performMarksByStory: {},
       pinsByStory: {},
       pinSetsByStory: {},
       activePinSetByStory: {},
@@ -581,6 +589,7 @@ export const useAuraV2Store = create<AuraV2State>()(
       activeThreadByStory: {},
       cowritePresets: [],
       sceneByStory: {},
+      storyReadByStory: {},
       sandboxByStory: {},
       sandboxConfigs: {},
       sandboxActive: {},
@@ -589,6 +598,8 @@ export const useAuraV2Store = create<AuraV2State>()(
       sandboxCuesByStory: {},
       sandboxSceneByStory: {},
       sandboxGuidanceByStory: {},
+      sandboxPacketByStory: {},
+      askByStory: {},
       directorEnabledByStory: {},
       summaryPinByStory: {},
 
@@ -1181,6 +1192,9 @@ export const useAuraV2Store = create<AuraV2State>()(
         if (on) next[storyId] = true; else delete next[storyId];
         set({ directorEnabledByStory: next });
       },
+      putStoryRead: (storyId, read) =>
+        set({ storyReadByStory: { ...get().storyReadByStory, [storyId]: read } }),
+
       putScenes: (storyId, descriptors) => {
         if (descriptors.length === 0) return;
         const existing = get().sceneByStory[storyId] ?? {};
@@ -1293,8 +1307,21 @@ export const useAuraV2Store = create<AuraV2State>()(
         const forStory = { ...(get().sandboxSceneByStory[storyId] ?? {}), [messageId]: { ...cur, enabled: on } };
         set({ sandboxSceneByStory: { ...get().sandboxSceneByStory, [storyId]: forStory } });
       },
+      addAskTurn: (storyId, turn) => {
+        const thread = readThread(get().askByStory[storyId]);
+        set({ askByStory: { ...get().askByStory, [storyId]: [...thread, turn] } });
+      },
+      clearAskThread: (storyId) => {
+        const next = { ...get().askByStory };
+        delete next[storyId];
+        set({ askByStory: next });
+      },
+
       setSandboxGuidance: (storyId, guidance) => {
         set({ sandboxGuidanceByStory: { ...get().sandboxGuidanceByStory, [storyId]: guidance } });
+      },
+      setSandboxPacket: (storyId, packet, guidance) => {
+        set({ sandboxPacketByStory: { ...get().sandboxPacketByStory, [storyId]: { packet, guidance } } });
       },
       setSummaryPin: (storyId, pinId) => {
         const next = { ...get().summaryPinByStory };
@@ -1311,6 +1338,32 @@ export const useAuraV2Store = create<AuraV2State>()(
         const byMsg = get().sfxMarksByStory[storyId];
         if (!byMsg?.[messageId]) return;
         set({ sfxMarksByStory: { ...get().sfxMarksByStory, [storyId]: { ...byMsg, [messageId]: byMsg[messageId].filter(m => m.id !== markId) } } });
+      },
+
+      addPerformMark: (storyId, messageId, mark) => {
+        const text = mark.text.trim();
+        if (!text) return;
+        const byMsg = get().performMarksByStory[storyId] ?? {};
+        // One direction per span — re-marking the same words replaces the old call.
+        const kept = (byMsg[messageId] ?? []).filter(m => m.text !== text);
+        const list = [...kept, { ...mark, text, id: newId() }];
+        set({ performMarksByStory: { ...get().performMarksByStory, [storyId]: { ...byMsg, [messageId]: list } } });
+      },
+      removePerformMark: (storyId, messageId, markId) => {
+        const byMsg = get().performMarksByStory[storyId];
+        if (!byMsg?.[messageId]) return;
+        set({ performMarksByStory: { ...get().performMarksByStory, [storyId]: { ...byMsg, [messageId]: byMsg[messageId].filter(m => m.id !== markId) } } });
+      },
+      clearPerformMarkFor: (storyId, messageId, text) => {
+        const byMsg = get().performMarksByStory[storyId];
+        const list = byMsg?.[messageId];
+        if (!list?.length) return;
+        const t = text.trim();
+        // Drop anything the selection covers, so clearing works whether the
+        // reader re-selects the exact span or a little more around it.
+        const next = list.filter(m => !(m.text === t || t.includes(m.text) || m.text.includes(t)));
+        if (next.length === list.length) return;
+        set({ performMarksByStory: { ...get().performMarksByStory, [storyId]: { ...byMsg, [messageId]: next } } });
       },
 
       addAnnotation: (storyId, annotation) => {
@@ -1356,40 +1409,81 @@ export const useAuraV2Store = create<AuraV2State>()(
         });
       },
     }),
-    {
-      name: 'aura-reader-v2',
-      storage: createJSONStorage(() => debouncedLocalStorage()),
-      partialize: (s) => ({
-        codexByStory: s.codexByStory,
-        scanProgress: s.scanProgress,
-        statsByStory: s.statsByStory,
-        overridesByStory: s.overridesByStory,
-        lensOnByStory: s.lensOnByStory,
-        sheetsByStory: s.sheetsByStory,
-        annotationsByStory: s.annotationsByStory,
-        sfxMarksByStory: s.sfxMarksByStory,
-        pinsByStory: s.pinsByStory,
-        pinSetsByStory: s.pinSetsByStory,
-        activePinSetByStory: s.activePinSetByStory,
-        zonesByStory: s.zonesByStory,
-        chatThreadsByStory: s.chatThreadsByStory,
-        activeThreadByStory: s.activeThreadByStory,
-        cowritePresets: s.cowritePresets,
-        sceneByStory: s.sceneByStory,
-        sandboxByStory: s.sandboxByStory,
-        sandboxConfigs: s.sandboxConfigs,
-        sandboxActive: s.sandboxActive,
-        sandboxEnabledByStory: s.sandboxEnabledByStory,
-        sandboxPaletteByStory: s.sandboxPaletteByStory,
-        sandboxCuesByStory: s.sandboxCuesByStory,
-        sandboxSceneByStory: s.sandboxSceneByStory,
-        sandboxGuidanceByStory: s.sandboxGuidanceByStory,
-        directorEnabledByStory: s.directorEnabledByStory,
-        summaryPinByStory: s.summaryPinByStory,
-        codexEnabled: s.codexEnabled,
-        codexUseAI: s.codexUseAI,
-        codexHighlight: s.codexHighlight,
-      }),
-    },
-  ),
 );
+
+/* ------------------------------------------------------------------ */
+/* Persistence                                                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The persisted shape at the last successful write. Diffing against this is
+ * what keeps a write small: an immutable `set()` replaces only the objects it
+ * touched, so every untouched story compares equal by reference and costs
+ * nothing.
+ */
+let lastSaved: SliceBag = {};
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
+let saving: Promise<void> = Promise.resolve();
+let hydrated = false;
+
+const writeNow = (): Promise<void> => {
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+  if (!hydrated) return saving;
+  const next = pickPersisted(useAuraV2Store.getState() as unknown as SliceBag);
+  const ops = diffSlices(lastSaved, next);
+  if (!ops.length) return saving;
+  // Move the baseline forward BEFORE awaiting, so writes that land during the
+  // transaction are diffed against what we're about to store, not against a
+  // stale snapshot — otherwise they'd be written twice.
+  const previous = lastSaved;
+  lastSaved = next;
+  saving = saving
+    .then(() => applyOps(ops))
+    .catch(e => {
+      // Roll the baseline back so these records are retried on the next write
+      // instead of being silently lost — the failure mode the old localStorage
+      // layer had, and the reason for this whole change.
+      lastSaved = previous;
+      console.error('v2 store: save failed, will retry', e);
+    });
+  return saving;
+};
+
+const scheduleSave = () => {
+  if (!hydrated) return;
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => { void writeNow(); }, 400);
+};
+
+/**
+ * Load the reader's saved data and start persisting changes.
+ *
+ * Called before the app renders (see `main.tsx`), so the first paint sees the
+ * same state the old synchronous localStorage read used to provide — no window
+ * in which a component reads an empty codex and writes that emptiness back.
+ */
+export const hydrateV2 = async (): Promise<void> => {
+  if (hydrated) return;
+  const { state } = await loadV2();
+  if (Object.keys(state).length) useAuraV2Store.setState(state as never);
+  lastSaved = pickPersisted(useAuraV2Store.getState() as unknown as SliceBag);
+  const wrong = misdeclaredSlices(lastSaved);
+  if (wrong.length) {
+    console.error(
+      `v2 store: these slices are declared per-story but are not story-keyed — `
+      + `they will be sharded on the wrong key: ${wrong.join(', ')}`,
+    );
+  }
+  hydrated = true;
+  useAuraV2Store.subscribe(scheduleSave);
+  if (typeof window !== 'undefined') {
+    // IndexedDB writes can't block an unload, so lean on `visibilitychange`,
+    // which fires while the page can still finish work. With a 400ms debounce
+    // the exposure is a fraction of a second of the most recent edit.
+    document.addEventListener('visibilitychange', () => { if (document.hidden) void writeNow(); });
+    window.addEventListener('pagehide', () => { void writeNow(); });
+  }
+};
+
+/** Flush any pending write immediately. Exposed for tests. */
+export const flushV2 = (): Promise<void> => writeNow();

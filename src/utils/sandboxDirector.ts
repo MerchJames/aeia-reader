@@ -8,8 +8,45 @@
  * no scripts, no event handlers, no network (`@import`, remote `url(...)`).
  */
 
-import { ChatMsg, chatCompletion, SamplerParams } from './aiClient';
+import { ChatMsg, chatCompletion, isLocalBase, mergeSamplers, SamplerParams } from './aiClient';
+import { composeScene, packetBlock, StylePacket } from './stylePacket';
+import { ACCEPT_SCORE, REPAIRABLE_SCORE, repairNotes, scoreScene } from './sceneQuality';
 import { FxKind, SceneCue, ShellControl, SoundKind } from '../types';
+
+/**
+ * Sampling for a DESIGN task, not a writing one.
+ *
+ * Every sandbox call used to run on `samplerParamsFrom(store.aiAdvanced)` — the
+ * reader's chat settings, which default to all-null, which means the backend's
+ * own creative-writing defaults. Two of those are actively wrong here:
+ *
+ *  - `repetition_penalty` on a stylesheet penalises the tokens CSS is MADE of:
+ *    `px`, `rgba(`, `;`, `background`, every property name. The longer the sheet
+ *    the more the sampler fights it, which is exactly why long scenes degraded.
+ *  - `max_tokens` was omitted entirely, so a 25-declaration stylesheet — emitted
+ *    on ONE LINE inside a JSON string — could be cut off mid-string. The reply
+ *    then fails `JSON.parse`, `generateSceneCue` returns null, and the reader
+ *    sees "nothing usable came back" with no clue that the design was fine and
+ *    the budget was not. If the reader had set `maxTokens` for chat, EVERY scene
+ *    truncated at that length.
+ *
+ * Temperature stays slightly above zero: greedy decoding collapses a design task
+ * onto the most generic completion, which is the "AI slop" the build prompt
+ * spends a paragraph arguing against. The reader's own explicit settings still
+ * win — this only replaces the defaults nobody chose.
+ */
+export const designSamplers = (base: string): SamplerParams => ({
+  temperature: 0.35, top_p: 0.9, frequency_penalty: 0, presence_penalty: 0,
+  ...(isLocalBase(base) ? { min_p: 0.05, repetition_penalty: 1 } : {}),
+});
+
+/**
+ * Room for a composed stylesheet. A 14-30 declaration sheet with gradients and
+ * keyframes runs 700-1400 tokens once it is JSON-escaped onto one line; the
+ * plan pass is a fraction of that.
+ */
+export const SCENE_TOKENS = 2200;
+export const PLAN_TOKENS = 900;
 
 export interface SandboxGenInput {
   name: string;
@@ -135,7 +172,8 @@ export const generateTreatment = async (
   input: SandboxGenInput, cfg: SandboxGenConfig, signal?: AbortSignal,
 ): Promise<ParsedTreatment | null> => {
   const reply = await chatCompletion(
-    cfg.base, cfg.key, cfg.model, buildSandboxMessages(input), cfg.params ?? {}, signal,
+    cfg.base, cfg.key, cfg.model, buildSandboxMessages(input),
+    mergeSamplers({ ...designSamplers(cfg.base), max_tokens: SCENE_TOKENS }, cfg.params), signal,
   );
   return parseSandboxTreatment(reply);
 };
@@ -271,8 +309,11 @@ export const parseStudioConfig = (input: string, kind: StudioKind): ParsedConfig
 export const generateStudioConfig = async (
   input: StudioInput, cfg: SandboxGenConfig, signal?: AbortSignal,
 ): Promise<ParsedConfig | null> => {
+  // Same design regime as the director: a Studio theme is a stylesheet too, and
+  // it truncated on an unbudgeted max_tokens for exactly the same reason.
   const reply = await chatCompletion(
-    cfg.base, cfg.key, cfg.model, buildStudioMessages(input), cfg.params ?? {}, signal,
+    cfg.base, cfg.key, cfg.model, buildStudioMessages(input),
+    mergeSamplers({ ...designSamplers(cfg.base), max_tokens: SCENE_TOKENS }, cfg.params), signal,
   );
   return parseStudioConfig(reply, input.kind);
 };
@@ -292,6 +333,11 @@ export interface CueGenInput {
   tension?: number;
   /** Reader's own standing direction — a style/vibe to steer every beat. */
   guidance?: string;
+  /** The guidance RESOLVED into concrete values (see utils/stylePacket). When
+   *  present it supersedes the raw guidance line: it says the same thing in hex
+   *  and font stacks instead of adjectives, and it says it identically on every
+   *  beat, which is what makes a story look like one story. */
+  packet?: StylePacket;
   /** Other named characters in play — so the director can tell WHO speaks each
    *  quoted line, even when it's an NPC the author is voicing or a reported line. */
   cast?: string[];
@@ -309,9 +355,17 @@ export interface AudioPaletteItem {
   description?: string;
 }
 
-/** The reader's standing guidance, framed for the model (highest priority). */
-const guidanceLine = (g?: string): string =>
-  g && g.trim() ? `DIRECTOR'S STANDING GUIDANCE (highest priority — obey it): ${g.trim()}` : '';
+/**
+ * The reader's direction, at the head of every prompt.
+ *
+ * A resolved packet wins: it carries the same intent as concrete values the
+ * model cannot reinterpret, and it renders to identical bytes on every call.
+ * The raw guidance line is the fallback for a story with no packet yet.
+ */
+const directionBlock = (input: { guidance?: string; packet?: StylePacket }): string =>
+  input.packet ? packetBlock(input.packet)
+    : input.guidance?.trim() ? `DIRECTOR'S STANDING GUIDANCE (highest priority — obey it): ${input.guidance.trim()}`
+    : '';
 
 /** The cast around this message, so quoted lines can be attributed by speaker. */
 const castLine = (cast?: string[], speaker?: string): string => {
@@ -473,6 +527,11 @@ export interface ScenePlanItem {
    *  soundscape) instead of generating a fresh clip. Only set when the model
    *  picked an id that really exists in the offered palette. */
   assetId?: string;
+  /** The exact text this shot displays (anchor → next shot). Set by the caller
+   *  from the same coverage map the reader sees. A one-line hero and a full
+   *  paragraph need opposite typography, so both the critic and the composed
+   *  floor need to know which one this is. */
+  slice?: string;
 }
 
 const PLAN_SYSTEM = [
@@ -546,7 +605,7 @@ const libraryLine = (lib?: AudioPaletteItem[]): string => {
 export const buildPlanMessages = (input: CueGenInput): ChatMsg[] => {
   const mood = input.mood ? `Mood: ${input.mood}${input.tension != null ? ` (tension ${input.tension.toFixed(2)})` : ''}` : '';
   const user = [
-    guidanceLine(input.guidance),
+    directionBlock(input),
     `Speaker: ${input.name}`, mood,
     castLine(input.cast, input.name),
     libraryLine(input.audioLibrary),
@@ -593,7 +652,8 @@ export const generateScenePlan = async (
   input: CueGenInput, cfg: SandboxGenConfig, signal?: AbortSignal,
 ): Promise<ScenePlanItem[]> => {
   const reply = await chatCompletion(
-    cfg.base, cfg.key, cfg.model, buildPlanMessages(input), cfg.params ?? {}, signal,
+    cfg.base, cfg.key, cfg.model, buildPlanMessages(input),
+    mergeSamplers({ ...designSamplers(cfg.base), max_tokens: PLAN_TOKENS }, cfg.params), signal,
   );
   const validIds = input.audioLibrary?.length ? new Set(input.audioLibrary.map(a => a.id)) : undefined;
   return parseScenePlan(reply, input.content, validIds);
@@ -653,13 +713,15 @@ const BUILD_SYSTEM = [
   '',
   'RULES: no story text anywhere; keep text readable (real contrast, body ≥14px, hero',
   'may be big but must FIT); respect prefers-reduced-motion for big motion; no',
-  '<script>/on*/@import/remote url() — data: URIs only. Return ONLY the ```json.',
+  '<script>/on*/@import/remote url() — data: URIs only. An inline SVG data URI MUST',
+  'be percent-encoded (%3Csvg …%3E) — a raw one is stripped by the sanitiser and',
+  'you lose the texture. Return ONLY the ```json.',
 ].join('\n');
 
 /** Build the messages that realise one planned beat. */
 export const buildSceneMessages = (input: CueGenInput, item: ScenePlanItem): ChatMsg[] => {
   const user = [
-    guidanceLine(input.guidance),
+    directionBlock(input),
     castLine(input.cast, input.name),
     `Passage (context — do not reproduce it):`, '"""', input.content.slice(0, 2400), '"""',
     '', 'The approved beat to build:',
@@ -672,23 +734,108 @@ export const buildSceneMessages = (input: CueGenInput, item: ScenePlanItem): Cha
 };
 
 /**
- * Build one planned beat into a finished cue. Parses the model's single object,
- * stamps the plan's anchor on it, and runs it through the same sanitisation as
- * the track parser. Null if unusable.
+ * Parse ONE build reply into a sanitized cue, stamping the plan's anchor on it.
+ * Exported so the quality harness measures the exact parse the app uses — a
+ * harness with its own parser measures the harness.
  */
-export const generateSceneCue = async (
-  input: CueGenInput, item: ScenePlanItem, cfg: SandboxGenConfig, signal?: AbortSignal,
-): Promise<SceneCue | null> => {
-  const reply = await chatCompletion(
-    cfg.base, cfg.key, cfg.model, buildSceneMessages(input, item), cfg.params ?? {}, signal,
-  );
+export const parseSceneCue = (
+  reply: string, item: ScenePlanItem, content: string,
+): SceneCue | null => {
   const raw = stripReasoning(reply || '');
   const json = fence(raw, 'json') ?? (raw.trim().startsWith('{') ? raw.trim() : null);
   if (!json) return null;
   let obj: any;
   try { obj = JSON.parse(json); } catch { return null; }
   if (Array.isArray(obj)) obj = obj[0];
-  return cueFromItem({ ...obj, anchor: item.anchor, kind: obj?.kind ?? item.kind }, input.content.toLowerCase());
+  if (!obj) return null;
+  return cueFromItem({ ...obj, anchor: item.anchor, kind: obj?.kind ?? item.kind }, content.toLowerCase());
+};
+
+/** How a beat's cue was finally arrived at — surfaced in the modal. */
+export type BuildOrigin = 'ai' | 'repaired' | 'composed';
+
+export interface BuiltCue {
+  cue: SceneCue;
+  origin: BuildOrigin;
+  /** The critic's score for the stylesheet that shipped (scene beats only). */
+  score?: number;
+}
+
+/**
+ * Build one planned beat into a finished cue — and then actually check it.
+ *
+ * The old version took one sample and shipped whatever came back as long as it
+ * parsed. This runs the ladder:
+ *
+ *   1. Build. If it isn't a scene (fx/audio), it's done — nothing to score.
+ *   2. Score the stylesheet against the packet. At or above ACCEPT, ship it.
+ *   3. Otherwise hand the critic's own findings back as a repair — a correction,
+ *      not a re-roll — and re-score. Keep whichever attempt scored higher.
+ *   4. If the best is still below REPAIRABLE, compose the scene from the packet
+ *      in pure TS. That is the floor, and it is why this stops being a gamble:
+ *      the worst case is now a designed shot rather than an empty frame.
+ *
+ * With no packet there is nothing to grade against, so it behaves as before.
+ */
+export const generateSceneCue = async (
+  input: CueGenInput, item: ScenePlanItem, cfg: SandboxGenConfig, signal?: AbortSignal,
+): Promise<BuiltCue | null> => {
+  const params = mergeSamplers({ ...designSamplers(cfg.base), max_tokens: SCENE_TOKENS }, cfg.params);
+  const messages = buildSceneMessages(input, item);
+  const sliceLen = (item.slice ?? input.content).length;
+
+  const build = async (msgs: ChatMsg[]): Promise<SceneCue | null> =>
+    parseSceneCue(await chatCompletion(cfg.base, cfg.key, cfg.model, msgs, params, signal), item, input.content);
+
+  const first = await build(messages);
+  const packet = input.packet;
+
+  // Nothing to grade: a point cue, or a story with no resolved packet.
+  if (!packet) return first ? { cue: first, origin: 'ai' } : null;
+  if (first && first.kind !== 'theme') return { cue: first, origin: 'ai' };
+
+  const graded = first?.css ? { cue: first, score: scoreScene(first.css, packet, sliceLen) } : null;
+  if (graded && graded.score.score >= ACCEPT_SCORE) {
+    return { cue: graded.cue, origin: 'ai', score: graded.score.score };
+  }
+
+  // One targeted repair, quoting the exact measurements it missed.
+  let best = graded;
+  if (graded && !signal?.aborted) {
+    const repaired = await build([
+      ...messages,
+      { role: 'assistant', content: '```json\n' + JSON.stringify({ kind: 'scene', css: graded.cue.css }) + '\n```' },
+      { role: 'user', content: repairNotes(graded.score) },
+    ]);
+    if (repaired?.css) {
+      const score = scoreScene(repaired.css, packet, sliceLen);
+      if (score.score > graded.score.score) best = { cue: repaired, score };
+    }
+  }
+
+  if (best && best.score.score >= REPAIRABLE_SCORE) {
+    return {
+      cue: best.cue,
+      origin: best === graded ? 'ai' : 'repaired',
+      score: best.score.score,
+    };
+  }
+
+  // The floor. Composed from the packet, so it obeys the same brief the model
+  // was given and lands in the same look as every other beat of this story.
+  const composed = composeScene(packet, {
+    weight: input.tension ?? 0.5,
+    textLength: sliceLen,
+  });
+  return {
+    cue: {
+      id: rid(), anchor: item.anchor, kind: 'theme', css: composed,
+      label: item.intent.slice(0, 40),
+      pace: best?.cue.pace, fx: best?.cue.fx,
+    },
+    origin: 'composed',
+    score: scoreScene(composed, packet, sliceLen).score,
+  };
 };
 
 /**
@@ -710,7 +857,8 @@ export const generateCueTrack = async (
   input: CueGenInput, cfg: SandboxGenConfig, signal?: AbortSignal,
 ): Promise<SceneCue[]> => {
   const reply = await chatCompletion(
-    cfg.base, cfg.key, cfg.model, buildCueMessages(input), cfg.params ?? {}, signal,
+    cfg.base, cfg.key, cfg.model, buildCueMessages(input),
+    mergeSamplers({ ...designSamplers(cfg.base), max_tokens: SCENE_TOKENS }, cfg.params), signal,
   );
   return parseCueTrack(reply, input.content);
 };

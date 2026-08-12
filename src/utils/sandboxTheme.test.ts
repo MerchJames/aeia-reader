@@ -95,8 +95,16 @@ ok(/overflow:hidden!important/.test(view) && /max-height:100vh!important/.test(v
   'fullFrame locks the page + caps the stage so a scene cannot leak off-screen');
 ok(view.indexOf('body{background:#000}') < view.indexOf('overflow:hidden!important'),
   'containment is appended AFTER the AI css so it wins');
-ok(/\.card \*\{max-width:100%!important/.test(view),
+ok(/\.card \*\{max-width:100%/.test(view),
   'fullFrame caps every stage descendant so a scene child cannot outgrow the frame');
+// …but NOT with !important. That forced every descendant to exactly 100% and
+// discarded any narrower value, so no scene could hold a readable text column —
+// a paragraph ran the full width of the frame however the stylesheet was written.
+// Containment still holds: the page is clamped and `.card` clips and scrolls.
+ok(!/\.card \*\{max-width:100%!important/.test(view),
+  'the descendant cap does not override a scene’s own narrower column');
+ok(/\.card\{max-height:100vh!important;max-width:100vw!important;overflow:auto!important\}/.test(view),
+  'the stage itself still clips and scrolls, which is what actually contains a scene');
 ok(view.includes('function tail(') && view.includes('r();tail();'),
   'runtime scrolls the reveal edge into view after each live body swap');
 ok(view.includes('A quiet &lt;room&gt;.') && view.includes('id="aura-body"'), 'view slots escaped verbatim text into the live body');

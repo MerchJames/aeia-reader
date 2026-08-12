@@ -153,8 +153,24 @@ const RUNTIME =
   'function fx(name,ms){var c=document.querySelector(".card")||document.body;var cl="aura-fx-"+name;' +
   'c.classList.remove(cl);void c.offsetWidth;c.classList.add(cl);' +
   'setTimeout(function(){c.classList.remove(cl);},ms||700);}' +
+  // Streaming used to do `b.innerHTML = html` on EVERY character. That rebuilds
+  // every node under the body, so any CSS animation the scene put on the text
+  // restarted 100+ times a second — a one-shot pulse became a permanent throb,
+  // and a fade-in became a strobe. The words looked possessed. So reconcile
+  // instead: walk the new markup against the live DOM and touch only what
+  // actually changed, which while streaming is the last text node's data. Old
+  // nodes survive, so their animations keep running instead of restarting.
+  'function sync(t,html){var tmp=document.createElement("div");tmp.innerHTML=html;rec(t,tmp);}' +
+  'function rec(a,b){var an=a.childNodes,bn=b.childNodes,i;' +
+  'for(i=0;i<bn.length;i++){var x=an[i],y=bn[i];' +
+  'if(!x){a.appendChild(y.cloneNode(true));continue;}' +
+  'if(x.nodeType!==y.nodeType||(x.nodeType===1&&x.nodeName!==y.nodeName)){a.replaceChild(y.cloneNode(true),x);continue;}' +
+  'if(x.nodeType===3){if(x.data!==y.data)x.data=y.data;continue;}' +
+  'if(x.nodeType===1){var ca=x.getAttribute("class"),cb=y.getAttribute("class");' +
+  'if(ca!==cb){if(cb===null)x.removeAttribute("class");else x.setAttribute("class",cb);}rec(x,y);}}' +
+  'while(an.length>bn.length)a.removeChild(a.lastChild);}' +
   'addEventListener("message",function(e){var d=e.data;if(!d)return;' +
-  'if(d.t==="aura-sandbox-set"){b=b||document.getElementById("aura-body");if(b){b.innerHTML=d.html;r();tail();}}' +
+  'if(d.t==="aura-sandbox-set"){b=b||document.getElementById("aura-body");if(b){sync(b,d.html);r();tail();}}' +
   'else if(d.t==="aura-sandbox-fx"){fx(d.fx,d.ms);}});' +
   'document.addEventListener("click",function(e){var el=e.target.closest&&e.target.closest("[data-act]");if(!el)return;var a=el.getAttribute("data-act");' +
   'if(a==="toggle-text"){document.body.classList.toggle("aura-text-off");r();}' +
@@ -263,7 +279,14 @@ export const buildDoc = (o: DocOptions): string => {
     + "\n.card{max-height:100vh!important;max-width:100vw!important;overflow:auto!important}"
     // No real descendant may outgrow the stage — kills the horizontal/vertical
     // leak an over-eager AI scene can produce (giant type, off-frame elements).
-    + "\n.card *{max-width:100%!important;max-height:100vh}"
+    //
+    // NOT `!important` on max-width: that forces every descendant to exactly
+    // 100% and silently discards any NARROWER value, so a scene could never
+    // hold a readable column — a paragraph ran the full 1280px of the frame no
+    // matter what the stylesheet asked for. Containment is already guaranteed
+    // above by the page clamp plus `.card{max-width:100vw;overflow:auto}`; this
+    // line only needs to supply the default, not to win every cascade.
+    + "\n.card *{max-width:100%;max-height:100vh}"
     + "\n#aura-body,.body{overflow-wrap:break-word;word-break:break-word;max-width:100%}";
 
   return `<!doctype html><html><head><meta charset="utf-8">

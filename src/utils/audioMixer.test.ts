@@ -48,6 +48,26 @@ ok(near(audioMixer.volumeFor('voice'), CHANNEL_BASE.voice), 'modulation never to
 audioMixer.resetModulation();
 ok(near(audioMixer.volumeFor('ambience'), CHANNEL_BASE.ambience), 'resetModulation returns to neutral');
 
+// The reveal's performance envelope is a SECOND layer over the same beds — it
+// composes with the narrative modulation instead of overwriting it, so a hush
+// cue during an already-quiet passage doesn't fight the story's own volume cue.
+audioMixer.rampPerform(0.5, 0.9, 0);
+ok(near(audioMixer.volumeFor('ambience'), CHANNEL_BASE.ambience * 0.5), 'a cue hushes the beds');
+ok(near(audioMixer.volumeFor('voice'), CHANNEL_BASE.voice), 'a cue never touches the voice');
+ok(near(audioMixer.rate(), 0.9), 'the bed playback rate follows the cue');
+audioMixer.rampModulation(0.4, 0);
+ok(near(audioMixer.volumeFor('music'), CHANNEL_BASE.music * 0.4 * 0.5),
+  'the two envelopes multiply rather than replace each other');
+audioMixer.resetPerform(0);
+ok(near(audioMixer.volumeFor('music'), CHANNEL_BASE.music * 0.4),
+  'resetPerform leaves the narrative modulation alone');
+ok(near(audioMixer.rate(), 1), 'resetPerform returns the beds to normal speed');
+audioMixer.resetModulation();
+// Extremes are clamped so a bad strength can never mute or chipmunk the room.
+audioMixer.rampPerform(99, 99, 0);
+ok(audioMixer.rate() <= 1.6, 'the rate is clamped to a musical range');
+audioMixer.resetPerform(0);
+
 audioMixer.setMaster(1); audioMixer.setVoiceActive(false); // reset for other suites
 ok(true, 'reset mixer state');
 

@@ -1,13 +1,15 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import {
-  AppConfig, AppState, Chain, ChainStarSettings, Message, Story, StoryFormat, StoryTimeline,
+  AppConfig, AppState, Chain, ChainStarSettings, Message, Story, StoryFormat, StoryTimeline, UiMode,
 } from './types';
 import { ParsedCard, parseCompanionCard, parseFile } from './utils/parser';
 import { deleteStory, getAllStoryMetas, getStory, putStory } from './lib/storage';
 import {
   MIN_SHARED_PREFIX, groupBranchFamilies, timelineMessages, toTimeline,
 } from './utils/branchMerge';
+import { configForMode, nearestMode } from './utils/readingModes';
+import { VIEW_GROUP, VIEW_ORDER, moveView, resolveVisibleViews, toggleView } from './utils/viewBar';
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -104,12 +106,13 @@ const newId = () =>
 const CONFIG_KEYS: (keyof AppConfig)[] = [
   'theme', 'accentColor', 'fontFamily', 'fontSize', 'textColor', 'bgColor', 'animationStyle', 'streamEffect',
   'expressiveText', 'cinematicPacing', 'expressiveIntensity', 'dropCaps', 'sceneTheming',
-  'sceneSoundscapes', 'emotionalTts', 'sceneEmphasis', 'aiRepairFormatting',
-  'hideMetadata', 'showImages', 'autofocusAutoZoom',
+  'sceneSoundscapes', 'emotionalTts', 'sceneEmphasis', 'scenePerformance', 'aiRepairFormatting',
+  'hideMetadata', 'showImages', 'autofocusAutoZoom', 'focusMagnifier', 'askCharacter', 'onboarded',
   'playbackSpeed', 'autoStream', 'autoFormat', 'autoFormatRules', 'statRules',
   'paragraphSpacing', 'dialogueOwnLine', 'smartTypography',
   'styleQuotes', 'substituteNames', 'dialogueColor', 'dialogueStyle', 'dialogueAnimation',
   'contentWidth', 'oocHandling', 'phoneDialogueOnly', 'themeEffects', 'livingBackground',
+  'readingMode', 'visibleViews',
   'revealMode', 'messagePause', 'pauseAtPageEnd', 'ttsEnabled', 'ttsVoiceURI', 'ttsRate',
   'ttsPitch', 'ttsFollowSpeed', 'ttsMultiVoice', 'ttsDialogueOnly', 'aiBaseUrl', 'aiApiKey', 'aiModel', 'aiAdvanced',
   'ttsEngine', 'kokoroBaseUrl', 'kokoroApiKey', 'kokoroVoice', 'kokoroUserVoice', 'ttsVoiceByCharacter',
@@ -191,18 +194,22 @@ export const useAppStore = create<AppState>()(
         bgColor: '#111827',
         animationStyle: 'typewriter',
         streamEffect: 'none',
-        expressiveText: true,
-        cinematicPacing: true,
-        expressiveIntensity: 'expressive',
+        expressiveText: false,
+        cinematicPacing: false,
+        expressiveIntensity: 'subtle',
         dropCaps: false,
-        sceneTheming: true,
-        sceneSoundscapes: true,
-        emotionalTts: true,
+        sceneTheming: false,
+        sceneSoundscapes: false,
+        emotionalTts: false,
         sceneEmphasis: false,
+        scenePerformance: false,
         aiRepairFormatting: true,
         hideMetadata: true,
         showImages: true,
         autofocusAutoZoom: true,
+        focusMagnifier: false,
+        askCharacter: false,
+        onboarded: false,
         playbackSpeed: 50,
         autoStream: true,
         autoFormat: true,
@@ -244,7 +251,7 @@ export const useAppStore = create<AppState>()(
         ambientByTheme: {},
         dialogueColor: 'text-indigo-600 dark:text-indigo-300',
         dialogueStyle: 'normal',
-        dialogueAnimation: 'zoom',
+        dialogueAnimation: 'none',
         contentWidth: 0,
         oocHandling: 'show',
         phoneDialogueOnly: false,
@@ -287,7 +294,9 @@ export const useAppStore = create<AppState>()(
 
         /* ----- view ----- */
         viewMode: 'chat',
-        uiMode: 'all',
+        uiMode: 'read',
+        readingMode: 'plain',
+        visibleViews: null,
         layoutMode: 'continuous',
         searchQuery: '',
         isAutofocusMode: false,
@@ -628,6 +637,21 @@ export const useAppStore = create<AppState>()(
           }
         },
 
+        renameStory: async (id, title) => {
+          const name = title.trim();
+          if (!name) return;
+          // Written to the stored record AND to the in-memory copies, so the
+          // library card, the header and the next boot all agree at once.
+          const stored = await getStory(id);
+          if (stored) await putStory({ ...stored, title: name });
+          set({
+            library: get().library.map(m => (m.id === id ? { ...m, title: name } : m)),
+            currentStory: get().currentStory?.id === id
+              ? { ...get().currentStory!, title: name }
+              : get().currentStory,
+          });
+        },
+
         persistStoryState: () => schedulePersist(),
 
         /* ----- playback actions ----- */
@@ -902,6 +926,24 @@ export const useAppStore = create<AppState>()(
         setViewMode: (viewMode) => set({ viewMode }),
         setUiMode: (uiMode) => set({ uiMode }),
 
+        // Picking a mode WRITES its keys and records the choice. Everything it
+        // touches stays individually reachable in Advanced; changing one there
+        // leaves the intent alone and surfaces as "… · modified".
+        setReadingMode: (readingMode) => set({ ...configForMode(readingMode), readingMode }),
+
+        // The bar is the reader's from the first pin: `visibleViews` starts null
+        // (follow the preset) and any edit resolves it to an explicit list that
+        // the preset never overwrites again.
+        toggleVisibleView: (view) => {
+          const { visibleViews, uiMode, viewMode } = get();
+          set({ visibleViews: toggleView(resolveVisibleViews(visibleViews, uiMode, viewMode), view) });
+        },
+        moveVisibleView: (view, direction) => {
+          const { visibleViews, uiMode, viewMode } = get();
+          set({ visibleViews: moveView(resolveVisibleViews(visibleViews, uiMode, viewMode), view, direction) });
+        },
+        resetVisibleViews: () => set({ visibleViews: null }),
+
         setLayoutMode: (layoutMode) => {
           const { chains, currentChainIndex: ci, currentMessageIndex: mi, streamingMessage } = get();
           if (chains.length === 0) {
@@ -919,6 +961,9 @@ export const useAppStore = create<AppState>()(
         setAccentColor: (accentColor) => set({ accentColor }),
         setShowImages: (showImages) => set({ showImages }),
         setAutofocusAutoZoom: (autofocusAutoZoom) => set({ autofocusAutoZoom }),
+        setFocusMagnifier: (focusMagnifier) => set({ focusMagnifier }),
+        setAskCharacter: (askCharacter) => set({ askCharacter }),
+        setOnboarded: (onboarded) => set({ onboarded }),
         setFontFamily: (fontFamily) => set({ fontFamily }),
         setFontSize: (fontSize) => set({ fontSize }),
         setTextColor: (textColor) => set({ textColor, theme: 'custom' }),
@@ -933,6 +978,7 @@ export const useAppStore = create<AppState>()(
         setSceneSoundscapes: (sceneSoundscapes) => set({ sceneSoundscapes }),
         setEmotionalTts: (emotionalTts) => set({ emotionalTts }),
         setSceneEmphasis: (sceneEmphasis) => set({ sceneEmphasis }),
+        setScenePerformance: (scenePerformance) => set({ scenePerformance }),
         setAiRepairFormatting: (aiRepairFormatting) => set({ aiRepairFormatting }),
         setHideMetadata: (hideMetadata) => set({ hideMetadata }),
         setAutoStream: (autoStream) => set({ autoStream }),
@@ -1151,14 +1197,26 @@ export const useAppStore = create<AppState>()(
     },
     {
       name: 'aura-reader-settings',
-      version: 1,
-      // v0 → v1: 'sans' used to double as "follow the theme's font"; that
-      // meaning moved to the explicit 'theme' value, so old defaults keep
-      // their themed fonts.
+      version: 2,
       migrate: (persisted: unknown, version: number) => {
         const state = persisted as Record<string, unknown> | undefined;
-        if (state && version < 1 && state.fontFamily === 'sans') {
-          state.fontFamily = 'theme';
+        if (!state) return state as never;
+        // v0 → v1: 'sans' used to double as "follow the theme's font"; that
+        // meaning moved to the explicit 'theme' value, so old defaults keep
+        // their themed fonts.
+        if (version < 1 && state.fontFamily === 'sans') state.fontFamily = 'theme';
+        // v1 → v2: reading modes + the curated view bar. Both are labels put
+        // OVER an existing setup, never a rewrite of it — an existing reader
+        // must open on exactly the page they closed, not one pixel different.
+        if (version < 2) {
+          // Their config as-is decides the label; nothing is written back.
+          state.readingMode = nearestMode(state as never);
+          // Pin what their old preset was already showing, so the bar is
+          // unchanged on first launch. They can unpin from there.
+          const uiMode = (state.uiMode as UiMode) ?? 'all';
+          state.visibleViews = VIEW_ORDER.filter(
+            v => uiMode === 'all' || VIEW_GROUP[v] === 'read' || VIEW_GROUP[v] === uiMode,
+          );
         }
         return state as never;
       },

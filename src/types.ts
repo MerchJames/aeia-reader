@@ -381,6 +381,24 @@ export interface SceneEmphasis {
 }
 
 /**
+ * How a span should be PERFORMED as it streams in — the Director's text
+ * manipulation track. `slow`/`rush` bend the reveal rate, `stagger`/`drop` beat
+ * between words, `hold` pauses before the span lands, and `swell`/`tremble`/
+ * `fade` add a reveal-synced typographic treatment on top.
+ */
+export type ScenePerformKind =
+  | 'slow' | 'rush' | 'stagger' | 'hold' | 'swell' | 'tremble' | 'drop' | 'fade'
+  | 'cut' | 'unwrite';
+
+/** One performance direction over a verbatim substring of the passage. */
+export interface ScenePerformCue {
+  text: string;
+  kind: ScenePerformKind;
+  /** 0.25..1.5 — how hard to lean on it. Defaults to 1. */
+  strength?: number;
+}
+
+/**
  * The Director's cached read of one passage. Tiny (~200 bytes) and keyed by
  * message id per story. `hash` is the fingerprint of the content it was built
  * from — when the passage is edited/swiped the hash changes and the descriptor
@@ -389,6 +407,9 @@ export interface SceneEmphasis {
 export interface SceneDescriptor {
   messageId: string;
   hash: string;
+  /** Which generation of the Director produced this (see DESCRIPTOR_VERSION).
+   *  Absent = version 1, from a build before the performance/weather tracks. */
+  v?: number;
   mood: Mood;
   /** 0..1 — drives pacing lean + (later) score intensity. */
   tension: number;
@@ -401,8 +422,14 @@ export interface SceneDescriptor {
    *  is a verbatim quoted substring (no surrounding quote marks). */
   dialogue?: { text: string; speaker: string }[];
   emphasis?: SceneEmphasis[];
+  /** How to PERFORM chosen spans as they stream in — reveal pacing + kinetic
+   *  treatment, synced to the reveal (see utils/scenePerform.ts). */
+  perform?: ScenePerformCue[];
   /** Particle weather the prose clearly shows (fog, snowfall, floating ash…). */
-  fx?: 'smoke' | 'fog' | 'stars' | 'sparkles' | 'rain' | 'embers' | 'snow' | 'petals';
+  fx?: 'smoke' | 'fog' | 'stars' | 'sparkles' | 'rain' | 'embers' | 'snow' | 'petals'
+  | 'ash' | 'dust' | 'leaves' | 'fireflies' | 'bubbles' | 'sand' | 'steam' | 'pollen';
+  /** 0..1 — how hard it's coming down (a thin haze vs. a whiteout). */
+  fxLevel?: number;
   /**
    * The passage's signature framing for the VN camera — the compact form of a
    * "scene builder". One word the Director may emit to override the heuristic
@@ -608,6 +635,19 @@ export type RevealMode = 'character' | 'word';
 export interface AppConfig {
   /** Workspace preset gating which tools/views show (persisted). */
   uiMode: UiMode;
+  /**
+   * The reader's last explicitly chosen reading mode — a named bundle that
+   * writes the presentation keys (see `utils/readingModes.ts`). Stored as
+   * INTENT: whether the config still matches it is derived, so touching an
+   * advanced key shows as "Cinema · modified" instead of silently diverging.
+   */
+  readingMode: import('./utils/readingModes').ReadingMode;
+  /**
+   * Views pinned to the top bar, in the reader's own order. `null` = follow the
+   * workspace preset's seed; any explicit list outranks the preset permanently.
+   * Unpinned views are never gone — the overflow always lists all of them.
+   */
+  visibleViews: ViewMode[] | null;
   theme: Theme;
   accentColor: AccentColor;
   fontFamily: FontFamily;
@@ -634,6 +674,10 @@ export interface AppConfig {
   /** Style individual whisper/shout words the Director flagged (off by default —
    *  it reads as scattered italics/bold, so it's opt-in). */
   sceneEmphasis: boolean;
+  /** Let the Director bend the reveal itself — drag, rush, beat between words,
+   *  and swell/tremble spans as they stream in. Falls back to a punctuation
+   *  heuristic when a passage has no cues. */
+  scenePerformance: boolean;
   /** When the Director rereads a page, also ask the AI to fix passages with
    *  broken quote/emphasis markup (lands as an undoable Lens override). */
   aiRepairFormatting: boolean;
@@ -642,6 +686,13 @@ export interface AppConfig {
   showImages: boolean;
   /** In autofocus, keep the streaming line auto-zoomed and centered. */
   autofocusAutoZoom: boolean;
+  /** In autofocus, light a focus band around the words as they stream in. */
+  focusMagnifier: boolean;
+  /** True once the reader has seen (or skipped) the first-run tour. */
+  onboarded: boolean;
+  /** Offer "Ask <character>" — an interview with the character, anchored to the
+   *  beat you are reading. AI-only; nothing it produces is canon. */
+  askCharacter: boolean;
   playbackSpeed: number;
   autoStream: boolean;
   autoFormat: boolean;
@@ -797,6 +848,9 @@ export interface AppState extends AppConfig {
   openStory: (id: string) => Promise<void>;
   closeStory: () => void;
   deleteStoryById: (id: string) => Promise<void>;
+  /** Rename a chat. Imports take their title from the card, which for many
+   *  exports is a placeholder like "unused" — the reader needs a way out. */
+  renameStory: (id: string, title: string) => Promise<void>;
   persistStoryState: () => void;
 
   // Playback actions
@@ -826,11 +880,22 @@ export interface AppState extends AppConfig {
   // View / settings actions
   setViewMode: (mode: ViewMode) => void;
   setUiMode: (mode: UiMode) => void;
+  /** Pick a reading mode — writes its presentation keys and records the intent. */
+  setReadingMode: (mode: import('./utils/readingModes').ReadingMode) => void;
+  /** Pin/unpin a view on the top bar (never removes it from the overflow). */
+  toggleVisibleView: (view: ViewMode) => void;
+  /** Reorder a pinned view one slot left/right. */
+  moveVisibleView: (view: ViewMode, direction: -1 | 1) => void;
+  /** Drop the reader's custom bar and follow the workspace preset again. */
+  resetVisibleViews: () => void;
   setLayoutMode: (mode: LayoutMode) => void;
   setTheme: (theme: Theme) => void;
   setAccentColor: (accent: AccentColor) => void;
   setShowImages: (show: boolean) => void;
   setAutofocusAutoZoom: (on: boolean) => void;
+  setFocusMagnifier: (on: boolean) => void;
+  setAskCharacter: (on: boolean) => void;
+  setOnboarded: (on: boolean) => void;
   setFontFamily: (font: FontFamily) => void;
   setFontSize: (size: number) => void;
   setTextColor: (color: string) => void;
@@ -845,6 +910,7 @@ export interface AppState extends AppConfig {
   setSceneSoundscapes: (on: boolean) => void;
   setEmotionalTts: (on: boolean) => void;
   setSceneEmphasis: (on: boolean) => void;
+  setScenePerformance: (on: boolean) => void;
   setAiRepairFormatting: (on: boolean) => void;
   setHideMetadata: (hide: boolean) => void;
   setAutoStream: (autoStream: boolean) => void;

@@ -69,6 +69,28 @@ export const samplerParamsFrom = (a: AiAdvancedConfig): SamplerParams => {
   return p;
 };
 
+/**
+ * Layer the reader's explicit settings over a task's defaults.
+ *
+ * Plain object spread cannot do this. `samplerParamsFrom` returns every field —
+ * `{temperature: null, topP: null, …}` when the reader has set nothing — so
+ * `{...taskDefaults, ...readerParams}` overwrites a deliberate `temperature:
+ * 0.35` with `null`, `buildBody` then drops it, and the backend's own default
+ * applies. The task regime silently evaporates at the one call site that has a
+ * reader config, which is every call site in the app and none in the harness
+ * scripts — so it measures fixed and ships broken.
+ *
+ * A null here means "the reader did not choose", not "use the server default".
+ */
+export const mergeSamplers = (defaults: SamplerParams, reader?: SamplerParams): SamplerParams => {
+  const out: SamplerParams = { ...defaults };
+  for (const [k, v] of Object.entries(reader ?? {})) {
+    if (v == null || (typeof v === 'number' && Number.isNaN(v))) continue;
+    (out as Record<string, unknown>)[k] = v;
+  }
+  return out;
+};
+
 /** Candidate base URLs to try, most-likely first. */
 export const candidateBases = (raw: string): string[] => {
   let b = stripEnd((raw || '').trim());

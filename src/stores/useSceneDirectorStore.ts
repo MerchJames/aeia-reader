@@ -14,8 +14,11 @@ interface SceneDirectorState {
   done: number;
   /** Passages requested this run. */
   total: number;
+  /** Passages the model gave nothing usable for — a weak/overloaded model,
+   *  not restraint. Surfaced so a silent no-op is never mistaken for taste. */
+  unread: number;
   begin: (storyId: string, total: number) => void;
-  advance: (done: number) => void;
+  advance: (done: number, unread?: number) => void;
   end: () => void;
 }
 
@@ -24,7 +27,8 @@ export const useSceneDirectorStore = create<SceneDirectorState>((set) => ({
   storyId: null,
   done: 0,
   total: 0,
-  begin: (storyId, total) => set({ running: true, storyId, done: 0, total }),
-  advance: (done) => set({ done }),
+  unread: 0,
+  begin: (storyId, total) => set({ running: true, storyId, done: 0, total, unread: 0 }),
+  advance: (done, unread) => set(unread == null ? { done } : { done, unread }),
   end: () => set({ running: false }),
 }));
