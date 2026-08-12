@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArrowLeft, BookMarked, BookOpen, Bot, Clapperboard, Film, Focus, GitBranch, Highlighter,
-  Info, List, MessageSquare, Network, Pencil, Search, Settings, Table2, Wand2, X,
+  ArrowLeft, BookMarked, BookOpen, Bot, ChevronLeft, ChevronRight, Clapperboard, Film, Focus,
+  GitBranch, Highlighter, Info, List, MessageSquare, MoreHorizontal, Network, Pencil, Pin, PinOff,
+  Search, Settings, Table2, Wand2, X,
 } from 'lucide-react';
 import { useAppStore } from '../store';
 import { useAuraV2Store, committedCount, flatMessages } from '../stores/useAuraV2Store';
@@ -10,21 +11,20 @@ import { UiMode, ViewMode } from '../types';
 import { cn } from '../utils/cn';
 import { resolveContent } from '../utils/lens';
 import { buildSearchIndex, searchStory, SearchHit } from '../utils/storySearch';
+import { VIEW_HINT, VIEW_LABEL, overflowViews, resolveVisibleViews } from '../utils/viewBar';
 
-/** Which workspace group a view belongs to — gates its visibility per UiMode. */
-type ViewGroup = 'read' | 'cowrite' | 'scenes';
-
-const VIEW_BUTTONS: { mode: ViewMode; icon: React.ReactNode; label: string; group: ViewGroup }[] = [
-  { mode: 'storybook', icon: <BookOpen size={18} />, label: 'Storybook', group: 'read' },
-  { mode: 'book', icon: <BookMarked size={18} />, label: 'Book', group: 'read' },
-  { mode: 'stage', icon: <Clapperboard size={18} />, label: 'Stage', group: 'read' },
-  { mode: 'vn', icon: <Film size={18} />, label: 'Visual Novel', group: 'read' },
-  { mode: 'sandbox', icon: <Wand2 size={18} />, label: 'Sandbox', group: 'scenes' },
-  { mode: 'chat', icon: <MessageSquare size={18} />, label: 'Chat', group: 'cowrite' },
-  { mode: 'branches', icon: <GitBranch size={18} />, label: 'Branches', group: 'read' },
-  { mode: 'overview', icon: <List size={18} />, label: 'Overview', group: 'read' },
-  { mode: 'highlights', icon: <Highlighter size={18} />, label: 'Highlights', group: 'read' },
-];
+/** The one thing the bar owns that a pure module can't: the icons. */
+const VIEW_ICON: Record<ViewMode, React.ReactNode> = {
+  storybook: <BookOpen size={18} />,
+  book: <BookMarked size={18} />,
+  stage: <Clapperboard size={18} />,
+  vn: <Film size={18} />,
+  sandbox: <Wand2 size={18} />,
+  chat: <MessageSquare size={18} />,
+  branches: <GitBranch size={18} />,
+  overview: <List size={18} />,
+  highlights: <Highlighter size={18} />,
+};
 
 /** The workspace presets, in order, with a one-line "what this reveals" hint. */
 const UI_MODES: { mode: UiMode; label: string; hint: string }[] = [
@@ -34,17 +34,28 @@ const UI_MODES: { mode: UiMode; label: string; hint: string }[] = [
   { mode: 'all', label: 'All', hint: 'Everything, unfiltered.' },
 ];
 
-/** Is a view's group visible under the active workspace preset? Reading views
- *  are always on; 'all' shows every group; otherwise the mode name = the group. */
-const groupVisible = (group: ViewGroup, mode: UiMode): boolean =>
-  mode === 'all' || group === 'read' || group === mode;
-
 export const TopNavigation = () => {
   const currentStory = useAppStore(s => s.currentStory);
+  const renameStory = useAppStore(s => s.renameStory);
+  const [renaming, setRenaming] = useState(false);
+  const [draftTitle, setDraftTitle] = useState('');
+  const commitRename = () => {
+    setRenaming(false);
+    const next = draftTitle.trim();
+    if (currentStory && next && next !== currentStory.title) {
+      void renameStory(currentStory.id, next);
+    }
+  };
   const viewMode = useAppStore(s => s.viewMode);
   const setViewMode = useAppStore(s => s.setViewMode);
   const uiMode = useAppStore(s => s.uiMode);
   const setUiMode = useAppStore(s => s.setUiMode);
+  const visibleViews = useAppStore(s => s.visibleViews);
+  const toggleVisibleView = useAppStore(s => s.toggleVisibleView);
+  const moveVisibleView = useAppStore(s => s.moveVisibleView);
+  const resetVisibleViews = useAppStore(s => s.resetVisibleViews);
+  const [viewMenuOpen, setViewMenuOpen] = useState(false);
+  const viewsRef = useRef<HTMLDivElement>(null);
   const searchQuery = useAppStore(s => s.searchQuery);
   const setSearchQuery = useAppStore(s => s.setSearchQuery);
   const isAutofocusMode = useAppStore(s => s.isAutofocusMode);
@@ -74,6 +85,16 @@ export const TopNavigation = () => {
   const searchRef = useRef<HTMLDivElement>(null);
   const [searchFocused, setSearchFocused] = useState(false);
   const [debouncedQuery, setDebouncedQuery] = useState('');
+
+  // Close the view menu on an outside click.
+  useEffect(() => {
+    if (!viewMenuOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (viewsRef.current && !viewsRef.current.contains(e.target as Node)) setViewMenuOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [viewMenuOpen]);
 
   // Close the lens manager when clicking outside it.
   useEffect(() => {
@@ -158,17 +179,18 @@ export const TopNavigation = () => {
 
   const showResults = searchFocused && debouncedQuery.trim().length >= 2;
 
-  // Views visible under the active preset; the AI assistant is a Cowrite tool.
-  const visibleViews = VIEW_BUTTONS.filter(v => groupVisible(v.group, uiMode));
+  // The bar the reader actually sees: their pins if they've made any, the
+  // preset's seed otherwise. The view they're ON is always shown, pinned or not.
+  const shownViews = resolveVisibleViews(visibleViews, uiMode, viewMode);
+  const hiddenViews = overflowViews(shownViews);
   const aiToolVisible = uiMode === 'all' || uiMode === 'cowrite';
   const activeMode = UI_MODES.find(m => m.mode === uiMode) ?? UI_MODES[3];
 
-  // Switching preset: if it hides the view you're on, land on a visible one,
-  // and close the AI assistant if the new preset no longer offers it.
+  // Switching preset re-seeds the bar only while it's still ours to seed —
+  // once the reader has pinned anything, the preset stops touching it. The
+  // AI assistant still closes when the new preset no longer offers it.
   const changeMode = (m: UiMode) => {
     setUiMode(m);
-    const nextViews = VIEW_BUTTONS.filter(v => groupVisible(v.group, m));
-    if (!nextViews.some(v => v.mode === viewMode)) setViewMode(nextViews[0].mode);
     if (aiOpen && m !== 'all' && m !== 'cowrite') setAiOpen(false);
   };
 
@@ -186,7 +208,34 @@ export const TopNavigation = () => {
         </button>
         {currentStory && (
           <div className="min-w-0 hidden md:block">
-            <h1 className="font-bold truncate leading-tight">{currentStory.title}</h1>
+            {/* Click to rename. Imports take their title from the card, which in
+              * a lot of exports is a placeholder ("unused"), so there has to be
+              * a way to name the chat — and the title itself is the obvious
+              * place to look for it. */}
+            {renaming ? (
+              <input
+                autoFocus
+                value={draftTitle}
+                onChange={e => setDraftTitle(e.target.value)}
+                onBlur={commitRename}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') commitRename();
+                  if (e.key === 'Escape') { setRenaming(false); e.currentTarget.blur(); }
+                }}
+                aria-label="Chat name"
+                data-testid="story-title-input"
+                className="font-bold leading-tight bg-transparent border-b border-accent/60 outline-none w-48"
+              />
+            ) : (
+              <h1
+                onClick={() => { setDraftTitle(currentStory.title); setRenaming(true); }}
+                title="Click to rename this chat"
+                data-testid="story-title"
+                className="font-bold truncate leading-tight cursor-text hover:text-accent transition-colors"
+              >
+                {currentStory.title}
+              </h1>
+            )}
             <p className="text-[11px] text-muted leading-tight">
               {currentStory.messageCount} messages
               {minutesLeft > 0 && ` · ~${minutesLeft} min left`}
@@ -214,12 +263,13 @@ export const TopNavigation = () => {
             </button>
           ))}
         </div>
-        <div className="flex bg-app-text/5 p-1 rounded-lg">
-          {visibleViews.map(({ mode, icon, label }) => (
+        <div className="flex bg-app-text/5 p-1 rounded-lg" ref={viewsRef}>
+          {shownViews.map(mode => (
             <button
               key={mode}
+              data-view={mode}
               onClick={() => setViewMode(mode)}
-              title={label}
+              title={VIEW_LABEL[mode]}
               className={cn(
                 'p-1.5 rounded-md transition-colors',
                 viewMode === mode
@@ -227,9 +277,36 @@ export const TopNavigation = () => {
                   : 'opacity-50 hover:opacity-100',
               )}
             >
-              {icon}
+              {VIEW_ICON[mode]}
             </button>
           ))}
+          <div className="relative">
+            <button
+              onClick={() => setViewMenuOpen(!viewMenuOpen)}
+              title="All views — pin the ones you use"
+              aria-label="All views"
+              aria-expanded={viewMenuOpen}
+              data-testid="view-overflow"
+              className={cn(
+                'p-1.5 rounded-md transition-colors',
+                viewMenuOpen ? 'bg-surface shadow-sm text-accent' : 'opacity-50 hover:opacity-100',
+              )}
+            >
+              <MoreHorizontal size={18} />
+            </button>
+            {viewMenuOpen && (
+              <ViewMenu
+                shown={shownViews}
+                hidden={hiddenViews}
+                active={viewMode}
+                customised={!!visibleViews}
+                onPick={(m) => { setViewMode(m); setViewMenuOpen(false); }}
+                onToggle={toggleVisibleView}
+                onMove={moveVisibleView}
+                onReset={resetVisibleViews}
+              />
+            )}
+          </div>
         </div>
       </div>
 
@@ -377,6 +454,104 @@ export const TopNavigation = () => {
             {' '}or switch presets above.
           </span>
         </div>
+      )}
+    </div>
+  );
+};
+
+interface ViewMenuProps {
+  shown: ViewMode[];
+  hidden: ViewMode[];
+  active: ViewMode;
+  customised: boolean;
+  onPick: (view: ViewMode) => void;
+  onToggle: (view: ViewMode) => void;
+  onMove: (view: ViewMode, direction: -1 | 1) => void;
+  onReset: () => void;
+}
+
+/**
+ * Every view, always — the pinned ones in the reader's order, then the rest.
+ * This list is where views are DISCOVERED, so it never filters and never hides
+ * a section: unpinning moves a view down the menu, it doesn't remove it.
+ */
+const ViewMenu = ({ shown, hidden, active, customised, onPick, onToggle, onMove, onReset }: ViewMenuProps) => {
+  const row = (view: ViewMode, pinned: boolean, idx: number) => (
+    <div
+      key={view}
+      className={cn(
+        'group flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-app-text/5 transition-colors',
+        active === view && 'bg-accent/10',
+      )}
+    >
+      <button
+        onClick={() => onPick(view)}
+        className="flex items-center gap-2 min-w-0 flex-1 text-left"
+      >
+        <span className={cn('shrink-0', active === view ? 'text-accent' : 'opacity-60')}>
+          {VIEW_ICON[view]}
+        </span>
+        <span className="min-w-0">
+          <span className={cn('block text-xs font-medium truncate', active === view && 'text-accent')}>
+            {VIEW_LABEL[view]}
+          </span>
+          <span className="block text-[10px] text-muted leading-tight truncate">{VIEW_HINT[view]}</span>
+        </span>
+      </button>
+      {pinned && (
+        <span className="flex opacity-0 group-hover:opacity-100 transition-opacity">
+          <button
+            onClick={() => onMove(view, -1)}
+            disabled={idx === 0}
+            title="Move left"
+            className="p-0.5 opacity-60 hover:opacity-100 disabled:opacity-20"
+          >
+            <ChevronLeft size={13} />
+          </button>
+          <button
+            onClick={() => onMove(view, 1)}
+            disabled={idx === shown.length - 1}
+            title="Move right"
+            className="p-0.5 opacity-60 hover:opacity-100 disabled:opacity-20"
+          >
+            <ChevronRight size={13} />
+          </button>
+        </span>
+      )}
+      <button
+        onClick={() => onToggle(view)}
+        title={pinned ? 'Unpin from the bar' : 'Pin to the bar'}
+        data-testid={`view-pin-${view}`}
+        className={cn(
+          'p-1 rounded shrink-0 transition-colors',
+          pinned ? 'text-accent hover:bg-accent/15' : 'opacity-40 hover:opacity-100 hover:bg-app-text/10',
+        )}
+      >
+        {pinned ? <Pin size={13} /> : <PinOff size={13} />}
+      </button>
+    </div>
+  );
+
+  return (
+    <div
+      data-testid="view-menu"
+      className="absolute right-0 top-full mt-2 w-72 max-h-[70vh] overflow-y-auto rounded-xl bg-surface border border-app-border shadow-2xl p-2 z-50"
+    >
+      <div className="px-2 pt-1 pb-2 text-[10px] uppercase tracking-wide text-muted">On the bar</div>
+      {shown.map((v, i) => row(v, true, i))}
+      {hidden.length > 0 && (
+        <>
+          <div className="px-2 pt-3 pb-2 text-[10px] uppercase tracking-wide text-muted">More views</div>
+          {hidden.map(v => row(v, false, -1))}
+        </>
+      )}
+      {customised && (
+        <button
+          onClick={onReset}
+          className="mt-2 w-full py-1.5 rounded-lg bg-app-text/5 text-[11px] text-muted hover:bg-app-text/10 hover:text-app-text transition-colors"
+        >
+          Reset to the workspace default
+        </button>
       )}
     </div>
   );

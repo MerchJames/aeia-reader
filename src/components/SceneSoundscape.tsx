@@ -118,10 +118,16 @@ export const SceneSoundscape = () => {
   useEffect(() => { ambPlayer.current!.setCeiling(ceil('ambience', amb)); ambPlayer.current!.play(amb ? audioAssetUrl(base, amb.id) : null); setActive(!!amb); }, [amb]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { musPlayer.current!.setCeiling(ceil('music', mus)); musPlayer.current!.play(mus ? audioAssetUrl(base, mus.id) : null); }, [mus]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Live ceiling updates: volume sliders, scene tension, and the mixer duck.
+  // Live ceiling updates: volume sliders, scene tension, the mixer duck — and
+  // the reveal's performance envelope, which also drags the beds' playback
+  // speed so a slowed line sags the room with it. `tick` fires on every mixer
+  // change, which is what carries the envelope here.
   useEffect(() => {
     ambPlayer.current!.setCeiling(ceil('ambience', amb));
     musPlayer.current!.setCeiling(ceil('music', mus));
+    const rate = audioMixer.rate();
+    ambPlayer.current!.setRate(rate);
+    musPlayer.current!.setRate(rate);
   }, [ambVol, musVol, tension, tick, amb, mus, loud]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => () => {

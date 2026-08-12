@@ -1,7 +1,7 @@
 import React, { useMemo, useRef, useState } from 'react';
 import {
-  AlignLeft, Clapperboard, Download, FileText, Focus, ImageIcon, LayoutTemplate, Loader2, MessageSquareQuote,
-  Music2, PauseCircle, Play, PlayCircle, Quote, RefreshCw, Save, Sparkles, Square, Terminal, Trash2, Type,
+  AlignLeft, ChevronDown, Clapperboard, Download, FileText, Focus, ImageIcon, LayoutTemplate, Loader2, MessageSquareQuote,
+  MessageCircle, Music2, PauseCircle, Play, PlayCircle, Quote, RefreshCw, Save, Sparkles, Square, Terminal, Trash2, Type,
   UserRound, Volume2, Wand2, X, Zap, ZoomIn,
 } from 'lucide-react';
 import { useAppStore } from '../store';
@@ -20,6 +20,7 @@ import {
   downloadBlob, downloadText, exportStoryWithEdits, safeFilename, storyToMarkdown,
 } from '../utils/exporter';
 import { cn } from '../utils/cn';
+import { READING_MODE_DEFS, modeDef, modeDiff, modeMatches } from '../utils/readingModes';
 
 const readImageFile = (file: File): Promise<string> =>
   new Promise((resolve, reject) => {
@@ -245,23 +246,100 @@ const Section = ({ title, children }: { title: string; children: React.ReactNode
   </div>
 );
 
+/**
+ * A collapsed drawer for the individual keys a reading mode owns. They are all
+ * still here and still reachable — they just stop being the front door, which is
+ * the whole point of the mode. Opens automatically once the reader has diverged,
+ * so a "· modified" badge always has something to explain it.
+ */
+const Advanced = ({
+  label = 'Advanced', open, children,
+}: { label?: string; open?: boolean; children: React.ReactNode }) => {
+  const [expanded, setExpanded] = useState(!!open);
+  return (
+    <div className="rounded-lg border border-app-border/60">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center justify-between px-2 py-1.5 text-[11px] text-muted hover:text-app-text transition-colors"
+      >
+        <span className="uppercase tracking-wide">{label}</span>
+        <ChevronDown size={13} className={cn('transition-transform', expanded && 'rotate-180')} />
+      </button>
+      {expanded && <div className="flex flex-col gap-2 px-2 pb-2">{children}</div>}
+    </div>
+  );
+};
+
+/**
+ * The front door. One choice that produces a coherent result, instead of a
+ * dozen switches the reader has to assemble into a taste.
+ */
+const ReadingModeSection = () => {
+  const store = useAppStore();
+  const mode = store.readingMode;
+  const matches = modeMatches(store, mode);
+  const diff = modeDiff(store, mode);
+  return (
+    <Section title="Reading mode">
+      <div className="grid grid-cols-2 gap-2">
+        {READING_MODE_DEFS.map(def => (
+          <button
+            key={def.mode}
+            onClick={() => store.setReadingMode(def.mode)}
+            data-testid={`reading-mode-${def.mode}`}
+            aria-pressed={mode === def.mode}
+            className={cn(
+              'py-1.5 text-xs rounded-md border transition-colors',
+              mode === def.mode
+                ? 'border-accent bg-accent/10 text-accent font-bold'
+                : 'border-transparent bg-app-text/5 hover:bg-app-text/10',
+            )}
+          >
+            {def.label}
+          </button>
+        ))}
+      </div>
+      <span className="text-[11px] text-muted" data-testid="reading-mode-hint">
+        {modeDef(mode).hint}
+      </span>
+      {!matches && (
+        <span className="text-[11px] text-amber-600 dark:text-amber-400" data-testid="reading-mode-modified">
+          {modeDef(mode).label} · modified — you've changed {diff.length} of its
+          settings by hand. Picking a mode again restores the whole set.
+        </span>
+      )}
+    </Section>
+  );
+};
+
 const Toggle = ({
-  icon, label, value, onChange, accent,
+  icon, label, value, onChange, accent, hint, testId,
 }: {
   icon: React.ReactNode;
   label: string;
   value: boolean;
   onChange: (v: boolean) => void;
   accent?: boolean;
+  /** One line explaining what the switch actually does, under the label. */
+  hint?: string;
+  testId?: string;
 }) => (
   <button
     onClick={() => onChange(!value)}
+    aria-pressed={value}
+    data-testid={testId}
     className={cn(
-      'flex items-center justify-between p-2 rounded-lg hover:bg-app-text/5 transition-colors text-sm',
+      'flex items-center justify-between p-2 rounded-lg hover:bg-app-text/5 transition-colors text-sm text-left',
       accent && 'font-bold text-amber-600 dark:text-amber-400 bg-amber-500/10',
     )}
   >
-    <div className="flex items-center gap-2">{icon}<span>{label}</span></div>
+    <div className="flex items-center gap-2 min-w-0">
+      {icon}
+      <span className="min-w-0">
+        <span className="block">{label}</span>
+        {hint && <span className="block text-xs font-normal text-app-text/45 leading-snug">{hint}</span>}
+      </span>
+    </div>
     <span className={cn(
       'w-9 h-5 rounded-full p-0.5 transition-colors',
       value ? 'bg-accent' : 'bg-app-text/20',
@@ -538,11 +616,18 @@ const SceneDirectorSection = () => {
   const setEmotionalTts = useAppStore(s => s.setEmotionalTts);
   const sceneEmphasis = useAppStore(s => s.sceneEmphasis);
   const setSceneEmphasis = useAppStore(s => s.setSceneEmphasis);
+  const scenePerformance = useAppStore(s => s.scenePerformance);
+  const setScenePerformance = useAppStore(s => s.setScenePerformance);
   const aiRepairFormatting = useAppStore(s => s.aiRepairFormatting);
+  const askCharacter = useAppStore(s => s.askCharacter);
+  const setAskCharacter = useAppStore(s => s.setAskCharacter);
   const setAiRepairFormatting = useAppStore(s => s.setAiRepairFormatting);
   const running = useSceneDirectorStore(s => s.running);
   const done = useSceneDirectorStore(s => s.done);
   const total = useSceneDirectorStore(s => s.total);
+  const unread = useSceneDirectorStore(s => s.unread);
+  // Open the drawer when these keys no longer agree with the chosen mode.
+  const diverged = useAppStore(s => !modeMatches(s, s.readingMode));
 
   const coverage = useMemo(
     () => (storyId ? directorCoverage(storyId) : { directed: 0, total: 0 }),
@@ -573,6 +658,14 @@ const SceneDirectorSection = () => {
               {running
                 ? `Reading… ${done}/${total}`
                 : `Directed ${coverage.directed}/${coverage.total} passages`}
+              {unread > 0 && (
+                <span
+                  className="ml-1.5 text-amber-400/90"
+                  title="The model returned nothing usable for these, even after retrying them in smaller groups. Usually means the model is too small for the job — try a larger one."
+                >
+                  · {unread} unreadable
+                </span>
+              )}
             </span>
             {running ? (
               <button
@@ -601,35 +694,51 @@ const SceneDirectorSection = () => {
               </div>
             )}
           </div>
-          <Toggle
-            icon={<Sparkles size={16} />}
-            label="Adaptive theming"
-            value={sceneTheming}
-            onChange={setSceneTheming}
-          />
-          <Toggle
-            icon={<Music2 size={16} />}
-            label="Adaptive soundscapes"
-            value={sceneSoundscapes}
-            onChange={setSceneSoundscapes}
-          />
-          <Toggle
-            icon={<Volume2 size={16} />}
-            label="Emotional narration (TTS)"
-            value={emotionalTts}
-            onChange={setEmotionalTts}
-          />
-          <Toggle
-            icon={<Sparkles size={16} />}
-            label="Emphasize whisper / shout words"
-            value={sceneEmphasis}
-            onChange={setSceneEmphasis}
-          />
+          <Advanced label="Set by your reading mode" open={diverged}>
+            <Toggle
+              icon={<Sparkles size={16} />}
+              label="Adaptive theming"
+              value={sceneTheming}
+              onChange={setSceneTheming}
+            />
+            <Toggle
+              icon={<Music2 size={16} />}
+              label="Adaptive soundscapes"
+              value={sceneSoundscapes}
+              onChange={setSceneSoundscapes}
+            />
+            <Toggle
+              icon={<Volume2 size={16} />}
+              label="Emotional narration (TTS)"
+              value={emotionalTts}
+              onChange={setEmotionalTts}
+            />
+            <Toggle
+              icon={<Sparkles size={16} />}
+              label="Emphasize whisper / shout words"
+              value={sceneEmphasis}
+              onChange={setSceneEmphasis}
+            />
+            <Toggle
+              icon={<Clapperboard size={16} />}
+              label="Perform the text (pacing + kinetics)"
+              value={scenePerformance}
+              onChange={setScenePerformance}
+            />
+          </Advanced>
           <Toggle
             icon={<Wand2 size={16} />}
             label="Repair broken formatting (AI)"
             value={aiRepairFormatting}
             onChange={setAiRepairFormatting}
+          />
+          <Toggle
+            icon={<MessageCircle size={16} />}
+            label="Ask the character (AI)"
+            hint="Interview them about the beat you’re on. They only know the story up to that point, and nothing they say becomes part of it."
+            value={askCharacter}
+            onChange={setAskCharacter}
+            testId="ask-character-toggle"
           />
           <span className="text-[11px] text-muted">
             The Director reads each passage's mood, location, and feeling so the
@@ -639,7 +748,15 @@ const SceneDirectorSection = () => {
             ambient bed from it (needs ambient audio on); emotional narration
             shapes the TTS voice by the speaker's feeling (needs TTS on). Word
             emphasis italicizes/bolds individual whispered or shouted words — it's
-            off by default because it can read as scattered styling. Formatting
+            off by default because it can read as scattered styling. Performing
+            the text lets the Director bend the reveal itself — dragging a line
+            out, rushing a panic, beating between words (“In. the. end.”), holding
+            a silence before a reveal, cutting speech off dead, swelling or
+            trembling the words as they arrive, or unwriting them off the page.
+            Strength follows the Expressive intensity preset, and with no AI read
+            it falls back to reading the cadence off the punctuation. You can also
+            direct any passage yourself: select the words and pick a direction —
+            your call always beats the Director's on the same span. Formatting
             repair asks the AI to close cut-off dialogue and emphasis where they
             naturally end; each fix is an undoable Lens edit, and only the
             markup characters can change — never the words.
@@ -663,6 +780,8 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
   if (!store.settingsOpen) return null;
 
   const close = () => store.setSettingsOpen(false);
+  // Reveal the mode's individual keys when they no longer agree with it.
+  const diverged = !modeMatches(store, store.readingMode);
 
   return (
     <div className="fixed inset-0 z-50">
@@ -671,12 +790,18 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
       <div className="absolute right-0 top-0 h-full w-full max-w-sm bg-surface text-app-text border-l border-app-border shadow-2xl flex flex-col">
         <div className="flex items-center justify-between px-5 py-4 border-b border-app-border">
           <h2 className="text-lg font-bold">Settings</h2>
-          <button onClick={close} className="p-2 rounded-full hover:bg-app-text/10 transition-colors">
+          <button
+            onClick={close}
+            aria-label="Close settings"
+            className="p-2 rounded-full hover:bg-app-text/10 transition-colors"
+          >
             <X size={18} />
           </button>
         </div>
 
         <div className="flex-1 overflow-y-auto px-5 py-5 space-y-6">
+          <ReadingModeSection />
+
           <Section title="Appearance">
             <SelectRow
               label="Theme"
@@ -827,17 +952,19 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
               value={store.themeEffects}
               onChange={store.setThemeEffects}
             />
-            <Toggle
-              icon={<Sparkles size={16} />}
-              label="Living background"
-              value={store.livingBackground}
-              onChange={store.setLivingBackground}
-            />
-            <span className="text-[11px] text-muted -mt-1">
-              A gentle animated backdrop suited to the theme — drifting motes,
-              embers, petals, stars, or rain. Needs ambient effects on; pauses
-              when your system prefers reduced motion.
-            </span>
+            <Advanced label="Set by your reading mode" open={diverged}>
+              <Toggle
+                icon={<Sparkles size={16} />}
+                label="Living background"
+                value={store.livingBackground}
+                onChange={store.setLivingBackground}
+              />
+              <span className="text-[11px] text-muted -mt-1">
+                A gentle animated backdrop suited to the theme — drifting motes,
+                embers, petals, stars, or rain. Needs ambient effects on; pauses
+                when your system prefers reduced motion.
+              </span>
+            </Advanced>
           </Section>
 
           <Section title="Reveal Animation">
@@ -861,76 +988,83 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
               Some themes bring their own signature reveal while ambient
               effects are on (e.g. Hacker decrypts, Grimoire inks in).
             </span>
-            <div className="pt-2">
-              <p className="text-xs font-medium mb-1.5 opacity-80">Streaming text effect</p>
-              <div className="grid grid-cols-3 gap-2">
-                {(['none', 'fade', 'blur', 'ink', 'glitch', 'rise'] as const).map(effect => (
-                  <button
-                    key={effect}
-                    onClick={() => store.setStreamEffect(effect)}
-                    className={cn(
-                      'py-1.5 text-xs rounded-md border capitalize transition-colors',
-                      store.streamEffect === effect
-                        ? 'border-accent bg-accent/10 text-accent font-bold'
-                        : 'border-transparent bg-app-text/5 hover:bg-app-text/10',
-                    )}
-                  >
-                    {effect === 'none' ? 'Off' : effect}
-                  </button>
-                ))}
-              </div>
-              <span className="text-[11px] text-muted">
-                Animates each word as it streams in — on top of (and independent
-                from) the block reveal above.
-              </span>
-            </div>
-            <div className="pt-2 flex flex-col gap-1">
-              <p className="text-xs font-medium mb-0.5 opacity-80">Expressive reading</p>
-              <Toggle
-                icon={<Type size={16} />}
-                label="Kinetic emphasis"
-                value={store.expressiveText}
-                onChange={store.setExpressiveText}
-              />
-              <Toggle
-                icon={<Sparkles size={16} />}
-                label="Cinematic pacing"
-                value={store.cinematicPacing}
-                onChange={store.setCinematicPacing}
-              />
-              {(store.expressiveText || store.cinematicPacing) && (
-                <div className="pt-1">
-                  <p className="text-xs font-medium mb-1.5 opacity-80">Intensity</p>
-                  <div className="grid grid-cols-3 gap-2">
-                    {(['subtle', 'expressive', 'cinematic'] as const).map(level => (
-                      <button
-                        key={level}
-                        onClick={() => store.setExpressiveIntensity(level)}
-                        className={cn(
-                          'py-1.5 text-xs rounded-md border capitalize transition-colors',
-                          store.expressiveIntensity === level
-                            ? 'border-accent bg-accent/10 text-accent font-bold'
-                            : 'border-transparent bg-app-text/5 hover:bg-app-text/10',
-                        )}
-                      >
-                        {level}
-                      </button>
-                    ))}
-                  </div>
+            <Advanced label="Set by your reading mode" open={diverged}>
+              <div className="pt-2">
+                <p className="text-xs font-medium mb-1.5 opacity-80">Streaming text effect</p>
+                <div className="grid grid-cols-3 gap-2">
+                  {(['none', 'fade', 'blur', 'ink', 'glitch', 'rise'] as const).map(effect => (
+                    <button
+                      key={effect}
+                      onClick={() => store.setStreamEffect(effect)}
+                      className={cn(
+                        'py-1.5 text-xs rounded-md border capitalize transition-colors',
+                        store.streamEffect === effect
+                          ? 'border-accent bg-accent/10 text-accent font-bold'
+                          : 'border-transparent bg-app-text/5 hover:bg-app-text/10',
+                      )}
+                    >
+                      {effect === 'none' ? 'Off' : effect}
+                    </button>
+                  ))}
                 </div>
-              )}
-              <Toggle
-                icon={<Type size={16} />}
-                label="Drop caps"
-                value={store.dropCaps}
-                onChange={store.setDropCaps}
-              />
-              <span className="text-[11px] text-muted">
-                Scales shouted <span className="expr-shout" style={{ fontSize: '1em' }}>WORDS</span>,
-                dresses scene breaks, and lets the reveal linger in dialogue and
-                beat on scene changes. Drop caps open each AI passage book-style.
-              </span>
-            </div>
+                <span className="text-[11px] text-muted">
+                  Animates each word as it streams in — on top of (and independent
+                  from) the block reveal above.
+                </span>
+              </div>
+              <div className="pt-2 flex flex-col gap-1">
+                <p className="text-xs font-medium mb-0.5 opacity-80">Expressive reading</p>
+                <Toggle
+                  icon={<Type size={16} />}
+                  label="Kinetic emphasis"
+                  value={store.expressiveText}
+                  onChange={store.setExpressiveText}
+                />
+                <Toggle
+                  icon={<Sparkles size={16} />}
+                  label="Cinematic pacing"
+                  value={store.cinematicPacing}
+                  onChange={store.setCinematicPacing}
+                />
+                {(store.expressiveText || store.cinematicPacing) && (
+                  <div className="pt-1">
+                    <p className="text-xs font-medium mb-1.5 opacity-80">Intensity</p>
+                    <div className="grid grid-cols-3 gap-2">
+                      {(['subtle', 'expressive', 'cinematic'] as const).map(level => (
+                        <button
+                          key={level}
+                          onClick={() => store.setExpressiveIntensity(level)}
+                          className={cn(
+                            'py-1.5 text-xs rounded-md border capitalize transition-colors',
+                            store.expressiveIntensity === level
+                              ? 'border-accent bg-accent/10 text-accent font-bold'
+                              : 'border-transparent bg-app-text/5 hover:bg-app-text/10',
+                          )}
+                        >
+                          {level}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <span className="text-[11px] text-muted">
+                  Scales shouted <span className="expr-shout" style={{ fontSize: '1em' }}>WORDS</span>,
+                  dresses scene breaks, and lets the reveal linger in dialogue and
+                  beat on scene changes.
+                </span>
+              </div>
+            </Advanced>
+            {/* Drop caps is typographic taste, not performance — the mode
+                doesn't own it, so it stays out on the surface. */}
+            <Toggle
+              icon={<Type size={16} />}
+              label="Drop caps"
+              value={store.dropCaps}
+              onChange={store.setDropCaps}
+            />
+            <span className="text-[11px] text-muted -mt-1">
+              Opens each AI passage with a large book-style initial.
+            </span>
           </Section>
 
           <SceneDirectorSection />
@@ -942,6 +1076,7 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
               value={store.isAutofocusMode}
               onChange={store.setIsAutofocusMode}
               accent
+              testId="autofocus-mode"
             />
             {store.isAutofocusMode && (
               <div className="ml-4 pl-3 border-l border-app-border flex flex-col gap-1">
@@ -953,6 +1088,14 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
                     store.setAutofocusAutoZoom(v);
                     store.setAutofocusZoom(v ? 1.4 : 1);
                   }}
+                />
+                <Toggle
+                  icon={<Focus size={15} />}
+                  label="Magnify the reading line"
+                  hint="Lights a band around the words as they arrive and softens the rest of the passage."
+                  value={store.focusMagnifier}
+                  onChange={store.setFocusMagnifier}
+                  testId="focus-magnifier"
                 />
                 <div className="flex gap-2 items-center text-sm px-2 py-1">
                   <span className="w-20 shrink-0">Zoom</span>

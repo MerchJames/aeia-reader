@@ -1,6 +1,25 @@
 import React, { useState } from 'react';
-import { Bot, MessageSquare, Pin, X, Volume2 } from 'lucide-react';
-import { HIGHLIGHT_COLORS } from '../types';
+import { Bot, Clapperboard, MessageSquare, Pin, X, Volume2 } from 'lucide-react';
+import { HIGHLIGHT_COLORS, ScenePerformKind } from '../types';
+
+/**
+ * The performance verbs a reader can put on a span by hand — the same
+ * vocabulary the Scene Director works in, so a hand-marked span plays exactly
+ * like a directed one. Each label says what the READER will see, not what the
+ * engine calls it.
+ */
+const PERFORM_CHOICES: { kind: ScenePerformKind; label: string; hint: string }[] = [
+  { kind: 'slow', label: 'Slow', hint: 'Drag the words out' },
+  { kind: 'rush', label: 'Rush', hint: 'Tumble them out fast' },
+  { kind: 'stagger', label: 'Stagger', hint: 'One. Word. At. A. Time.' },
+  { kind: 'hold', label: 'Hold', hint: 'A silence before this lands' },
+  { kind: 'swell', label: 'Swell', hint: 'Bloom larger, then settle back' },
+  { kind: 'tremble', label: 'Tremble', hint: 'Shaking — fear, fury' },
+  { kind: 'drop', label: 'Drop', hint: 'Each word lands heavy' },
+  { kind: 'fade', label: 'Fade', hint: 'Arrives faint, stays quiet' },
+  { kind: 'cut', label: 'Cut off', hint: 'Race at the break, then dead air' },
+  { kind: 'unwrite', label: 'Unwrite', hint: 'Written, then dissolves away' },
+];
 
 interface SelectionPopoverProps {
   sel: { x: number; y: number; text: string; messageId?: string };
@@ -13,12 +32,18 @@ interface SelectionPopoverProps {
   onPin: () => void;
   /** Attach a reader-authored SFX to the selected span (audio service on). */
   onSfx?: (prompt: string, slow: boolean) => void;
+  /** Direct how the selected span performs as it streams; null clears it. */
+  onPerform?: (kind: ScenePerformKind | null) => void;
+  /** The direction already on this span, if any (so it reads as selected). */
+  performKind?: ScenePerformKind | null;
 }
 
 export const SelectionPopover = ({
   sel, noteDraft, setNoteDraft, onClose, onHighlight, onNote, onAskAi, onPin, onSfx,
+  onPerform, performKind,
 }: SelectionPopoverProps) => {
   const [sfxOpen, setSfxOpen] = useState(false);
+  const [performOpen, setPerformOpen] = useState(false);
   const [sfxPrompt, setSfxPrompt] = useState('');
   const [sfxSlow, setSfxSlow] = useState(true);
   const commitSfx = () => {
@@ -88,6 +113,49 @@ export const SelectionPopover = ({
         <Bot size={13} /> Ask AI
       </button>
     </div>
+
+    {onPerform && (
+      performOpen ? (
+        <div className="flex flex-col gap-1.5 border-t border-app-border pt-2">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] text-muted">How should this read?</span>
+            {performKind && (
+              <button
+                onClick={() => { onPerform(null); setPerformOpen(false); }}
+                className="text-[11px] text-muted hover:text-app-text underline underline-offset-2"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+          <div className="grid grid-cols-2 gap-1">
+            {PERFORM_CHOICES.map(c => (
+              <button
+                key={c.kind}
+                title={c.hint}
+                onClick={() => { onPerform(c.kind); setPerformOpen(false); }}
+                className={`px-2 py-1 rounded-md text-[11px] text-left border transition-colors ${
+                  performKind === c.kind
+                    ? 'border-accent/60 bg-accent/15 text-accent font-medium'
+                    : 'border-app-border hover:bg-app-text/5'
+                }`}
+              >
+                {c.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <button
+          onClick={() => setPerformOpen(true)}
+          disabled={!sel.messageId}
+          className="flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg border border-app-border text-xs hover:bg-app-text/5 disabled:opacity-40"
+        >
+          <Clapperboard size={13} />
+          {performKind ? `Performing: ${PERFORM_CHOICES.find(c => c.kind === performKind)?.label}` : 'Perform this span'}
+        </button>
+      )
+    )}
 
     {onSfx && (
       sfxOpen ? (

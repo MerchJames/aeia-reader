@@ -3,7 +3,10 @@ import { Clapperboard, Loader2, Check, X, AlertTriangle, Film, Zap, Volume2, Ref
 import { useAppStore } from '../store';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { samplerParamsFrom } from '../utils/aiClient';
-import { generateScenePlan, generateSceneCue, CueGenInput, ScenePlanItem } from '../utils/sandboxDirector';
+import { generateScenePlan, generateSceneCue, BuildOrigin, CueGenInput, ScenePlanItem } from '../utils/sandboxDirector';
+import {
+  StylePacket, derivePacket, heuristicPacket, isPacketStale, packetLabel,
+} from '../utils/stylePacket';
 import { resolveAudioForBeat, searchAudioLibrary, AudioAsset } from '../utils/audioLibrary';
 import { SceneCue } from '../types';
 import { cn } from '../utils/cn';
@@ -17,7 +20,18 @@ import { cn } from '../utils/cn';
  */
 
 type Status = 'idle' | 'building' | 'done' | 'error';
-interface Shot extends ScenePlanItem { approved: boolean; status: Status; cue?: SceneCue; error?: string }
+interface Shot extends ScenePlanItem {
+  approved: boolean; status: Status; cue?: SceneCue; error?: string;
+  /** How the finished shot was arrived at, and what the critic scored it. */
+  origin?: BuildOrigin; score?: number;
+}
+
+/** What the reader is told about each outcome — plain language, no jargon. */
+const ORIGIN_BADGE: Record<BuildOrigin, { label: string; title: string; cls: string }> = {
+  ai: { label: 'designed', title: 'The model\u2019s scene passed the quality check as written.', cls: 'bg-emerald-400/10 text-emerald-500 border-emerald-400/25' },
+  repaired: { label: 'repaired', title: 'The first attempt missed part of the brief; it was sent back with the exact misses and improved.', cls: 'bg-amber-400/10 text-amber-500 border-amber-400/25' },
+  composed: { label: 'composed', title: 'The model couldn\u2019t hit the brief, so Aura built this shot from your style packet instead.', cls: 'bg-sky-400/10 text-sky-500 border-sky-400/25' },
+};
 
 const KIND = {
   scene: { icon: Film, label: 'Scene', hint: 'Swaps the whole presentation' },
@@ -46,6 +60,12 @@ export const SceneDirectorModal = ({ storyId, messageId, input, onClose }: Props
     return words || `${input.name}’s scene`;
   });
   const [guidance, setGuidance] = useState(() => v2.sandboxGuidanceByStory[storyId] ?? '');
+  // The resolved brief. Held in state (not read straight from the store) so the
+  // reader can see it settle, and re-derived only when the guidance moves.
+  const [packet, setPacket] = useState<StylePacket | null>(
+    () => v2.sandboxPacketByStory[storyId]?.packet ?? null);
+  const [packetBusy, setPacketBusy] = useState(false);
+  const [showPacket, setShowPacket] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const abort = useRef<AbortController | null>(null);
@@ -57,6 +77,7 @@ export const SceneDirectorModal = ({ storyId, messageId, input, onClose }: Props
   const genInput = (): CueGenInput => ({
     ...input,
     guidance: guidance.trim() || undefined,
+    packet: packet ?? undefined,
     audioLibrary: libraryRef.current.length
       ? libraryRef.current.map(a => ({ id: a.id, category: a.category, tags: a.tags, description: a.description }))
       : undefined,
@@ -100,7 +121,25 @@ export const SceneDirectorModal = ({ storyId, messageId, input, onClose }: Props
         try { libraryRef.current = await searchAudioLibrary(store.audioBaseUrl, {}, abort.current.signal); }
         catch { libraryRef.current = []; }
       }
-      const plan = await generateScenePlan(genInput(), cfg(), abort.current.signal);
+      // Resolve the direction into a packet FIRST — the plan and every build
+      // are then directed against one fixed brief instead of re-improvising the
+      // look per beat. Cheap (one small call), cached until the guidance moves,
+      // and it falls back to the built-in vocabulary rather than failing.
+      let brief = packet;
+      if (isPacketStale(v2.sandboxPacketByStory[storyId], guidance)) {
+        setPacketBusy(true);
+        brief = await derivePacket(
+          guidance,
+          [input.content.slice(0, 600)],
+          { base: store.aiBaseUrl, key: store.aiApiKey, model: store.aiModel },
+          abort.current.signal,
+        );
+        setPacket(brief);
+        v2.setSandboxPacket(storyId, brief, guidance);
+        setPacketBusy(false);
+      }
+      const plan = await generateScenePlan(
+        { ...genInput(), packet: brief ?? undefined }, cfg(), abort.current.signal);
       if (!plan.length) { setError('The director didn’t return a usable plan. Try again.'); setPhase('review'); return; }
       setShots(plan.map(p => ({ ...p, approved: true, status: 'idle' })));
       setPhase('review');
@@ -150,10 +189,16 @@ export const SceneDirectorModal = ({ storyId, messageId, input, onClose }: Props
             };
           }
         }
-        if (!cue) cue = await generateSceneCue(genInput(), shot, cfg(), signal);
+        let origin: BuildOrigin | undefined;
+        let score: number | undefined;
+        if (!cue) {
+          const out = await generateSceneCue(
+            genInput(), { ...shot, slice: coverage[shot.id] }, cfg(), signal);
+          if (out) { cue = out.cue; origin = out.origin; score = out.score; }
+        }
         if (cue) {
           built.push(cue);
-          patch(shot.id, { status: 'done', cue });
+          patch(shot.id, { status: 'done', cue, origin, score });
           v2.setSandboxCues(storyId, messageId, [...built]); // save as each lands
           v2.setSandboxScene(storyId, messageId, { name: name.trim() || `${input.name}’s scene`, enabled: true });
         } else {
@@ -208,6 +253,71 @@ export const SceneDirectorModal = ({ storyId, messageId, input, onClose }: Props
                     className="mt-1 w-full rounded-lg bg-app-bg border border-app-text/15 px-2.5 py-1.5 text-app-text text-sm resize-none focus:border-accent outline-none" />
                 </div>
               )}
+              {phase === 'review' && (packet || packetBusy) && (
+                <div className="rounded-xl border border-app-text/10 bg-app-bg/40 px-2.5 py-2">
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => setShowPacket(v => !v)} disabled={!packet}
+                      className="flex items-center gap-1.5 text-[11px] text-app-text/50 hover:text-app-text/80 disabled:opacity-50"
+                      title="The look every shot of this story is built against">
+                      <ChevronDown size={11} className={cn('shrink-0 transition-transform', showPacket && 'rotate-180')} />
+                      <span className="uppercase tracking-wide">Look</span>
+                    </button>
+                    {packetBusy ? (
+                      <span className="text-xs text-app-text/40 flex items-center gap-1.5">
+                        <Loader2 size={12} className="animate-spin" /> resolving your direction…
+                      </span>
+                    ) : packet && (
+                      <>
+                        <span className="flex gap-1" aria-hidden>
+                          {([packet.palette.bg, packet.palette.ink, packet.palette.accent, packet.palette.glow]).map((c, i) => (
+                            <span key={i} className="w-3.5 h-3.5 rounded-full border border-app-text/20" style={{ background: c }} />
+                          ))}
+                        </span>
+                        <span className="text-xs text-app-text/60 truncate flex-1" title={packet.look}>{packet.look}</span>
+                        <span className="text-[10px] text-app-text/30 shrink-0">{packetLabel(packet)}</span>
+                      </>
+                    )}
+                  </div>
+                  {showPacket && packet && (
+                    <div className="mt-2 space-y-1.5 text-[11px] text-app-text/50">
+                      <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+                        {(['bg', 'ink', 'accent', 'glow'] as const).map(k => (
+                          <label key={k} className="flex items-center gap-1.5">
+                            <span className="uppercase tracking-wide w-11 shrink-0">{k}</span>
+                            <input type="color" value={packet.palette[k]}
+                              onChange={e => {
+                                const next: StylePacket = {
+                                  ...packet, source: 'reader',
+                                  palette: { ...packet.palette, [k]: e.target.value },
+                                };
+                                setPacket(next);
+                                v2.setSandboxPacket(storyId, next, guidance);
+                              }}
+                              className="w-7 h-6 rounded border border-app-text/15 bg-transparent p-0" />
+                            <span className="font-mono text-[10px] text-app-text/40">{packet.palette[k]}</span>
+                          </label>
+                        ))}
+                      </div>
+                      <p><span className="text-app-text/35">light</span> {packet.light}</p>
+                      <p><span className="text-app-text/35">camera</span> {packet.camera.join(' · ')}</p>
+                      <p><span className="text-app-text/35">texture</span> {packet.texture.join(' · ')} · <span className="text-app-text/35">motion</span> {packet.motion}</p>
+                      <p><span className="text-app-text/35">never</span> {packet.forbid.join(' · ')}</p>
+                      <div className="flex gap-3 pt-0.5">
+                        <button onClick={() => { const p = heuristicPacket(guidance); setPacket(p); v2.setSandboxPacket(storyId, p, guidance); }}
+                          className="underline hover:text-app-text/80">Use the built-in look</button>
+                        <button disabled={!aiReady || packetBusy}
+                          onClick={async () => {
+                            setPacketBusy(true);
+                            const p = await derivePacket(guidance, [input.content.slice(0, 600)],
+                              { base: store.aiBaseUrl, key: store.aiApiKey, model: store.aiModel });
+                            setPacket(p); v2.setSandboxPacket(storyId, p, guidance); setPacketBusy(false);
+                          }}
+                          className="underline hover:text-app-text/80 disabled:opacity-40">Re-resolve with AI</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
               {phase === 'review' && shots.length > 0 && (
                 <label className="flex items-center gap-2 text-xs text-app-text/50">
                   <span className="uppercase tracking-wide">Scene name</span>
@@ -242,6 +352,12 @@ export const SceneDirectorModal = ({ storyId, messageId, input, onClose }: Props
                       {phase === 'review' && (
                         <input type="checkbox" checked={s.approved} onChange={e => patch(s.id, { approved: e.target.checked })}
                           title="Include this beat" className="accent-current text-accent" />
+                      )}
+                      {s.origin && (
+                        <span title={ORIGIN_BADGE[s.origin].title}
+                          className={cn('text-[10px] px-1.5 py-0.5 rounded-md border shrink-0', ORIGIN_BADGE[s.origin].cls)}>
+                          {ORIGIN_BADGE[s.origin].label}{s.score != null ? ` ${s.score}` : ''}
+                        </span>
                       )}
                       {s.status === 'building' && <Loader2 size={15} className="animate-spin text-accent" />}
                       {s.status === 'done' && <Check size={15} className="text-emerald-400" />}

@@ -1,8 +1,9 @@
 import React, { useRef, useState } from 'react';
-import { BookOpen, FileJson, FileText, Image, MessageSquare, Settings, Trash2, Upload, X } from 'lucide-react';
+import { BookOpen, FileJson, FileText, Image, MessageSquare, Settings, Sparkles, Trash2, Upload, X } from 'lucide-react';
 import { useAppStore } from '../store';
 import { StoryFormat, StoryMeta } from '../types';
 import { ImportModal } from './ImportModal';
+import { Onboarding } from './Onboarding';
 import { cn } from '../utils/cn';
 
 const FORMAT_LABEL: Record<StoryFormat, string> = {
@@ -41,6 +42,7 @@ const StoryCard = ({ story }: { story: StoryMeta }) => {
   return (
     <div
       onClick={() => void openStory(story.id)}
+      data-testid="story-card"
       className="group relative rounded-2xl border border-app-border bg-surface shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition-all cursor-pointer overflow-hidden"
     >
       <div className="flex items-stretch gap-0">
@@ -123,6 +125,12 @@ export const Library = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   const [importing, setImporting] = useState(false);
+  const onboarded = useAppStore(s => s.onboarded);
+  const setOnboarded = useAppStore(s => s.setOnboarded);
+  // Opens itself exactly once. Someone who has just installed this has no way to
+  // know nine views and a Scene Director are in here; someone on their tenth
+  // session should never see it again unless they ask.
+  const [tourOpen, setTourOpen] = useState(!onboarded);
   const [errors, setErrors] = useState<string[]>([]);
   const [notes, setNotes] = useState<string[]>([]);
   const [pending, setPending] = useState<{ stories: File[]; cards: File[] } | null>(null);
@@ -183,6 +191,16 @@ export const Library = () => {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {/* The tour is opt-in after the first run — it shows itself once, then
+            * lives here so it stays findable without nagging. */}
+          <button
+            onClick={() => setTourOpen(true)}
+            title="Take the tour — what Aura can do"
+            data-testid="tour-button"
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-app-border text-sm text-app-text/70 hover:text-app-text hover:bg-app-text/5 transition-colors"
+          >
+            <Sparkles size={15} /> Tour
+          </button>
           <button
             onClick={() => fileInputRef.current?.click()}
             disabled={importing}
@@ -256,6 +274,10 @@ export const Library = () => {
           </div>
         )}
       </main>
+
+      {tourOpen && (
+        <Onboarding onClose={() => { setTourOpen(false); if (!onboarded) setOnboarded(true); }} />
+      )}
 
       {pending && (
         <ImportModal

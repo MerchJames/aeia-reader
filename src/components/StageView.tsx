@@ -15,33 +15,43 @@ import { backdropForScene, useBackdropStore } from '../stores/useBackdropStore';
 import { SceneFx } from './SceneFx';
 import { SceneVfx } from './SceneVfx';
 import { deriveVfx, emoteFor, stickyWeather } from '../utils/sceneVfx';
-import { Message, SceneEmphasis } from '../types';
+import { resolveWeather } from '../utils/sceneWeather';
+import { Message, SceneEmphasis, ScenePerformCue } from '../types';
+import { mergePerformCues, PERFORM_VISUAL } from '../utils/scenePerform';
 import { latestSpeech } from '../utils/dialogueSegments';
 import { cn } from '../utils/cn';
 
 /**
- * Render a paragraph with the Director's emphasis spans woven in: the
- * verbatim substrings are fenced with private-use markers BEFORE the inline
- * markdown pass (so escaping can't break the match) and swapped for styled
- * spans after. Whispers shrink, shouts swell, beats pulse.
+ * Render a paragraph with the Director's emphasis + performance spans woven
+ * in: the verbatim substrings are fenced with private-use markers BEFORE the
+ * inline markdown pass (so escaping can't break the match) and swapped for
+ * styled spans after. Whispers shrink, shouts swell, beats pulse; performance
+ * cues swell/tremble/drop/fade the words they mark.
  */
 export const renderWithEmphasis = (
   para: string,
   emphasis: SceneEmphasis[] | undefined,
   images: boolean,
+  perform?: ScenePerformCue[],
 ): string => {
-  if (!emphasis?.length) return renderInline(para, { images });
+  const marks: { text: string; cls: string }[] = [
+    ...(emphasis ?? []).map(e => ({ text: e.text, cls: `stage-emk-${e.kind}` })),
+    ...(perform ?? [])
+      .filter(p => PERFORM_VISUAL.has(p.kind))
+      .map(p => ({ text: p.text, cls: `perf-${p.kind}` })),
+  ];
+  if (!marks.length) return renderInline(para, { images });
   let marked = para;
   const used: number[] = [];
-  emphasis.forEach((e, i) => {
-    if (!e.text || !marked.includes(e.text)) return;
-    marked = marked.replace(e.text, `\uE010${i}\uE011${e.text}\uE014${i}\uE015`);
+  marks.forEach((mk, i) => {
+    if (!mk.text || !marked.includes(mk.text)) return;
+    marked = marked.replace(mk.text, `\uE010${i}\uE011${mk.text}\uE014${i}\uE015`);
     used.push(i);
   });
   let html = renderInline(marked, { images });
   for (const i of used) {
     html = html
-      .replace(`\uE010${i}\uE011`, `<span class="stage-emk-${emphasis[i].kind}">`)
+      .replace(`\uE010${i}\uE011`, `<span class="${marks[i].cls}">`)
       .replace(`\uE014${i}\uE015`, '</span>');
   }
   return html;
@@ -157,14 +167,21 @@ export const StageView = () => {
   const emphasis = sfxMarks?.length
     ? [...(baseEmphasis ?? []), ...sfxMarks.map(m => ({ text: m.text, kind: 'sfx' as const }))]
     : baseEmphasis;
+  // The performance track's visual half — the pacing half is the streamer's.
+  const perform = store.scenePerformance && storyId && current
+    ? mergePerformCues(
+      v2.performMarksByStory[storyId]?.[current.id],
+      v2.sceneByStory[storyId]?.[current.id]?.perform,
+    )
+    : undefined;
   const bodyHtml = useMemo(
     () => rawText
       .split(/\n{2,}/)
       .map(p => p.trim())
       .filter(Boolean)
-      .map(p => `<p>${renderWithEmphasis(p, emphasis, false)}</p>`)
+      .map(p => `<p>${renderWithEmphasis(p, emphasis, false, perform)}</p>`)
       .join(''),
-    [rawText, emphasis],
+    [rawText, emphasis, perform],
   );
 
   // The stage CG: like a VN, the most recent image (attached OR inline in
@@ -211,8 +228,11 @@ export const StageView = () => {
   }, [vfx, current?.id]);
 
   // Weather lingers across the scene, then this passage's own fx wins.
-  const weather = stickyWeather(scene, current?.id, storyId ? v2.sceneByStory[storyId] : undefined)
-    ?? descriptor?.fx;
+  const weather = resolveWeather(
+    descriptor,
+    rawText,
+    stickyWeather(scene, current?.id, storyId ? v2.sceneByStory[storyId] : undefined),
+  );
   const sprites = useSpriteStore(s => s.sprites);
   const spriteUrls = useSpriteStore(s => s.urls);
 
@@ -312,7 +332,7 @@ export const StageView = () => {
           </div>
         )}
         {/* Director-called particle weather — lingers across the scene. */}
-        {store.themeEffects && <SceneFx fx={weather} />}
+        {store.themeEffects && <SceneFx fx={weather?.fx} level={weather?.level} />}
         {/* Screen special effect (flash / vignette / desaturate / glitch / bloom). */}
         <SceneVfx kind={vfx} beatKey={current?.id ?? 'x'} />
         {/* RPG HUD (game themes only, via CSS): the Director's read on screen. */}

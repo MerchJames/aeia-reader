@@ -7,6 +7,10 @@ import { cn } from '../utils/cn';
 import { HIGHLIGHT_COLORS, Message, PinFormat } from '../types';
 import { paintHighlights } from '../utils/highlightPaint';
 import { resolveContent } from '../utils/lens';
+import { mergePerformCues } from '../utils/scenePerform';
+import { resolveWeather } from '../utils/sceneWeather';
+import { stickyWeather } from '../utils/sceneVfx';
+import { SceneFx } from './SceneFx';
 import { useEntityHighlighter } from './EntityTooltip';
 import { useSceneDirector } from '../hooks/useSceneDirector';
 import { useScenes } from '../hooks/useScenes';
@@ -16,6 +20,46 @@ import { motion, AnimatePresence } from 'motion/react';
 import { MessageBlock } from './MessageBlock';
 import { SelectionPopover } from './SelectionPopover';
 import { AnnotationThread } from './AnnotationThread';
+import { AskCharacter } from './AskCharacter';
+import { FocusVars, focusMoved, focusVars } from '../utils/readingFocus';
+
+/**
+ * The rect of the newest revealed character — where the reader's eye is.
+ *
+ * The obvious version of this (a Range over the element, collapsed to the end)
+ * silently returns NO rects: the end boundary of a block element sits after its
+ * last child, not inside any text. That measured zero for every reader, and the
+ * magnifier only appeared to work because it fell through to a `.word-reveal`
+ * span — which exists only when the stream effect is on, so with default
+ * settings the feature did nothing at all. Select the final CHARACTER of the
+ * last text node instead: a non-collapsed range always has a real box, and its
+ * height is the line height the focus band is sized from.
+ */
+/**
+ * The rect of the newest revealed character — where the reader's eye is.
+ *
+ * The DOM of a streaming passage holds exactly the text revealed so far, so its
+ * last glyph IS the reveal edge. Measure it; never count words to find it (a
+ * derived index drifted behind by however many words the markdown renderer
+ * handled differently) and never search the whole message row (that finds
+ * trailing chrome — swipe controls, the caret — instead of the prose).
+ */
+const revealEdgeRect = (row: HTMLElement): DOMRect | undefined => {
+  const prose = (row.querySelector('.markdown-body') as HTMLElement | null) ?? row;
+  const walker = document.createTreeWalker(prose, NodeFilter.SHOW_TEXT);
+  let last: Text | null = null;
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    if ((n.textContent ?? '').trim()) last = n as Text;
+  }
+  if (!last?.data.length) return undefined;
+  const end = last.data.replace(/\s+$/, '').length || last.data.length;
+  const range = document.createRange();
+  range.setStart(last, Math.max(0, end - 1));
+  range.setEnd(last, end);
+  const rects = range.getClientRects();
+  const r = rects[rects.length - 1] ?? range.getBoundingClientRect();
+  return r.height > 0 ? r : undefined;
+};
 
 /** Themes that read better without chat bubbles. */
 const MINIMAL_BUBBLE_THEMES = new Set(['book', 'notebook', 'essay', 'newspaper']);
@@ -50,6 +94,24 @@ export const ReaderDisplay = () => {
   // Director only refines it. See SceneAtmosphere for the layers.
   const { scenes, active: scene, activeId: activeSceneId } = useScenes();
   const atmosphereOn = store.sceneTheming && store.themeEffects;
+
+  // Particle weather for the passage being read. The Director's call wins; with
+  // no read (or none named) the prose itself is enough — "snow was falling"
+  // should snow whether or not the AI ever looked at it. Falls back to whatever
+  // weather the scene already established, so fog doesn't blink out mid-scene.
+  const weather = React.useMemo(() => {
+    if (!atmosphereOn) return undefined;
+    const msg = store.streamingMessage
+      ?? [...store.visibleMessages].reverse().find(m => m.role !== 'user');
+    if (!msg) return undefined;
+    const d = storyId ? v2.sceneByStory[storyId]?.[msg.id] : undefined;
+    return resolveWeather(
+      d,
+      msg.content,
+      stickyWeather(scene, msg.id, storyId ? v2.sceneByStory[storyId] : undefined),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [atmosphereOn, store.streamingMessage?.id, store.visibleMessages, storyId, scene, v2.sceneByStory]);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   // The currently-streaming message element — the focus target that the
@@ -152,6 +214,38 @@ export const ReaderDisplay = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [store.isAutofocusMode]);
 
+  /* ── The reading magnifier ────────────────────────────────────────────────
+   * Autofocus scales the whole page; this lights the words as they arrive.
+   *
+   * The reveal edge is found with a collapsed Range at the end of the active
+   * message rather than by hunting for a `.word-reveal` span — those only exist
+   * while `streamEffect` is on, and the magnifier has to work regardless. The
+   * result is written to CSS custom properties, so the paint is a mask and no
+   * glyph ever moves (see utils/readingFocus for why that matters).
+   */
+  const focusRef = useRef<FocusVars | null>(null);
+  const spotRef = useRef<HTMLDivElement>(null);
+  const magnify = store.isAutofocusMode && store.focusMagnifier;
+
+  /* The spotlight. Measured off the reveal edge and written to the scrim's own
+   * custom properties — the text is never touched, which is what keeps this
+   * clear of the font-size zoom, the bubble chrome and every other view. */
+  useLayoutEffect(() => {
+    const spot = spotRef.current;
+    if (!magnify || !spot) return;
+    // The streaming passage while one is revealing; otherwise the last one the
+    // reader arrived at, so the light does not vanish the moment playback stops.
+    const row = activeRef.current
+      ?? (scrollRef.current?.querySelector('.message-block:last-of-type') as HTMLElement | null);
+    if (!row) return;
+    const edge = revealEdgeRect(row);
+    if (!edge) return;
+    const next = focusVars(edge);
+    if (!next || !focusMoved(focusRef.current, next)) return;
+    focusRef.current = next;
+    for (const [k, v] of Object.entries(next)) spot.style.setProperty(k, v);
+  });
+
   const handleScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
@@ -242,6 +336,11 @@ export const ReaderDisplay = () => {
   }, [annotations]);
 
   const openNotes = useCallback((id: string) => setThreadOpen({ messageId: id }), []);
+
+  /** The beat "Ask <character>" is anchored to: the one being revealed, else the
+   *  last one the reader has reached. */
+  const askAnchorId = store.streamingMessage?.id
+    ?? store.visibleMessages[store.visibleMessages.length - 1]?.id;
 
   // Hand a message off to the AI assistant's Lens-edit mode.
   const lensEdit = useCallback((id: string) => useAppStore.getState().setLensEditTarget(id), []);
@@ -382,6 +481,14 @@ export const ReaderDisplay = () => {
       ? [...(baseEmphasis ?? []), ...sfxMarks.map(m => ({ text: m.text, kind: 'sfx' as const }))]
       : baseEmphasis;
 
+    // Performance cues: the reader's hand-marked spans win over the Director's.
+    const perform = store.scenePerformance && storyId
+      ? mergePerformCues(
+        v2.performMarksByStory[storyId]?.[msg.id],
+        v2.sceneByStory[storyId]?.[msg.id]?.perform,
+      )
+      : undefined;
+
     return (
       <MessageBlock
         key={msg.id}
@@ -397,6 +504,7 @@ export const ReaderDisplay = () => {
         expressiveText={store.expressiveText}
         ttsReading={store.ttsEnabled && store.ttsPending && isStreamingMsg}
         emphasis={emphasis}
+        perform={perform}
         dialogue={storyId ? v2.sceneByStory[storyId]?.[msg.id]?.dialogue : undefined}
         isStreamingMsg={isStreamingMsg}
         revealComplete={isStreamingMsg && store.revealComplete}
@@ -446,6 +554,7 @@ export const ReaderDisplay = () => {
   return (
     <>
     <SceneAtmosphere scene={scene} activeId={activeSceneId} enabled={atmosphereOn} />
+    {weather && <SceneFx fx={weather.fx} level={weather.level} fixed />}
     {store.sceneTheming && !store.isAutofocusMode && (
       <SceneSpine scenes={scenes} activeSceneId={scene?.id} />
     )}
@@ -576,6 +685,19 @@ export const ReaderDisplay = () => {
           setSelPopover(null);
           setNoteDraft('');
         }}
+        onPerform={store.scenePerformance ? (kind) => {
+          if (storyId && selPopover.messageId) {
+            const text = selPopover.text.trim();
+            if (kind) v2.addPerformMark(storyId, selPopover.messageId, { text, kind });
+            else v2.clearPerformMarkFor(storyId, selPopover.messageId, text);
+          }
+          window.getSelection()?.removeAllRanges();
+          setSelPopover(null);
+        } : undefined}
+        performKind={storyId && selPopover.messageId
+          ? v2.performMarksByStory[storyId]?.[selPopover.messageId]
+            ?.find(m => m.text === selPopover.text.trim())?.kind ?? null
+          : null}
         onSfx={store.audioCuesEnabled ? (prompt, slow) => {
           if (storyId && selPopover.messageId) {
             v2.addSfxMark(storyId, selPopover.messageId, { text: selPopover.text.trim(), prompt, slow });
@@ -593,6 +715,20 @@ export const ReaderDisplay = () => {
         onClose={() => setThreadOpen(null)}
       />
     )}
+
+    {/* The reading spotlight: one fixed scrim with a hole where the words are
+      * arriving. It sits ABOVE the text and below the app's controls, and never
+      * touches the passage itself — which is why it works the same in every
+      * view and cannot interfere with the autofocus zoom. */}
+    {magnify && <div ref={spotRef} className="reading-spotlight" aria-hidden="true" />}
+
+    {/* Anchored to the beat on screen — the streaming one while it reads, else
+      * the last one the reader has arrived at. Scroll back and the interview you
+      * had at that beat is the one that reopens. */}
+    <AskCharacter
+      messageId={askAnchorId}
+      mood={storyId && askAnchorId ? v2.sceneByStory[storyId]?.[askAnchorId]?.mood : undefined}
+    />
 
     {toast && (
       <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[75] px-4 py-2 rounded-full bg-app-text text-app-bg text-sm font-medium shadow-xl pointer-events-none">

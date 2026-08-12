@@ -12,10 +12,12 @@ import { spriteFor, useSpriteStore } from '../stores/useSpriteStore';
 import { backdropForScene, useBackdropStore } from '../stores/useBackdropStore';
 import { reactionFor, renderWithEmphasis } from './StageView';
 import { latestSpeech } from '../utils/dialogueSegments';
+import { mergePerformCues } from '../utils/scenePerform';
 import { SceneFx } from './SceneFx';
 import { SceneVfx } from './SceneVfx';
 import { deriveStaging } from '../utils/vnStaging';
 import { deriveVfx, emoteFor, stickyWeather } from '../utils/sceneVfx';
+import { resolveWeather } from '../utils/sceneWeather';
 import { Message } from '../types';
 import { cn } from '../utils/cn';
 
@@ -101,9 +103,12 @@ export const VNView = () => {
     return { primary: dialogue, primaryIsSpeech: true, aside: aside || null };
   }, [rawText, dialogue]);
 
+  const perform = store.scenePerformance && storyId && current
+    ? mergePerformCues(v2.performMarksByStory[storyId]?.[current.id], descriptor?.perform)
+    : undefined;
   const primaryHtml = useMemo(
-    () => renderWithEmphasis(beat.primary, emphasis, false),
-    [beat.primary, emphasis],
+    () => renderWithEmphasis(beat.primary, emphasis, false, perform),
+    [beat.primary, emphasis, perform],
   );
 
   // ----- the cast on stage --------------------------------------------------
@@ -201,8 +206,11 @@ export const VNView = () => {
 
   // Weather lingers across a scene (Fablekin's stickyUntil), then the current
   // passage's own fx wins.
-  const weather = stickyWeather(scene, current?.id, storyId ? v2.sceneByStory[storyId] : undefined)
-    ?? descriptor?.fx;
+  const weather = resolveWeather(
+    descriptor,
+    rawText,
+    stickyWeather(scene, current?.id, storyId ? v2.sceneByStory[storyId] : undefined),
+  );
 
   // A VN emote pop over the lit sprite at a loud emotion.
   const emote = store.themeEffects ? emoteFor(descriptor?.speaker?.emotion) : null;
@@ -291,7 +299,7 @@ export const VNView = () => {
 
       {/* Director-called particle weather rides above the backdrop; it lingers
           across the scene until a new area or a fresh cue replaces it. */}
-      {store.themeEffects && <SceneFx fx={weather} />}
+      {store.themeEffects && <SceneFx fx={weather?.fx} level={weather?.level} />}
 
       {/* The camera: reframes per beat — push in on the talker, wide on arrival. */}
       <div
