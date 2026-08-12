@@ -1,83 +1,116 @@
 # Aura Reader
 
-An immersive local reader for reliving **SillyTavern** and **KoboldAI** stories —
-and for reading plain documents. Import your chat logs (or `.txt`/`.md`/`.docx`
-files) and replay them like a book — streaming text, dozens of themes, highlights
-with notes, a branch explorer, an optional AI reading & cowriting assistant, and
-a persistent library. Everything is stored on your device; there is no server and
-no account.
+A local-first reader for **SillyTavern** and **KoboldAI** stories. Import your
+chat logs and read them back as something made — the words arrive at reading
+speed, the page can take on the mood of the scene, and you can mark it up as you
+go. Everything is stored on your device: no account, no server, nothing
+uploaded.
 
-## Features
+AI is **optional everywhere**. Point Aura at any OpenAI-compatible endpoint
+(including a local one) and a few extra things wake up; leave it unset and every
+feature still works from a heuristic fallback.
 
-- **Library** — import multiple stories (drag & drop or file picker). Progress,
-  highlights, notes, and starred chains are saved per story in your browser
-  (IndexedDB); settings persist across sessions.
-- **Formats** — SillyTavern chats (`.jsonl`, including hidden/narrator lines),
-  KoboldAI/KoboldCpp saves (`.json`), TavernAI character cards (`.png`,
-  V1/V2/V3), and plain **documents** (`.txt`, `.md`, `.docx`) — smart-segmented
-  into pages by chapter/section headings (with a paragraph-based fallback) so any
-  prose reads like a story.
-- **Reading modes** — Storybook (prose) and Chat (bubbles), continuous scroll or
-  paginated book pages, resume where you left off.
-- **Streaming playback** — text reveals letter-by-letter or word-by-word (with a
-  WPM readout) using typewriter, smooth, magic, or fade animations, a
-  configurable pause between messages, and optional read-aloud **TTS** (voice,
-  rate, and pitch selectable; rate can follow the reading speed).
-- **Autofocus mode** — hands-free reading that auto-zooms and keeps the
-  streaming line centered, dimming everything else.
-- **Images** — inline and attached images render in both views, with a
-  click-to-zoom lightbox.
-- **Dialogue styling** — quoted speech is detected and styled apart from
-  narration, with colour options and one-shot reveal effects (zoom, pulse, wave,
-  glow, rise).
-- **Highlights & notes** — select text (or hold `F`) to highlight in five
-  colours and attach a note; highlights are painted back onto the text and
-  collected in a dedicated view you can export.
-- **Branches / What-Ifs** — browse SillyTavern swipes and Kobold alternates as
-  selectable alternate takes, and read on from any of them.
-- **AI reading assistant** (optional) — connect any **OpenAI-compatible**
-  endpoint (OpenAI, OpenRouter, LM Studio, Ollama, KoboldCpp…). It reads the
-  story with a selectable context scope (this page / up to here / whole story /
-  branchline), can fold in your highlights and notes, focus on a character, and
-  summarize, recap, synthesize, impersonate your persona, or discuss — with
-  Markdown and LaTeX rendering. Replies **stream token-by-token**, each answer can
-  be **regenerated and swiped** between takes, and conversations are saved as
-  named, switchable **chat branches** per story. An **Advanced** panel exposes
-  samplers (temperature, top_p, penalties, plus gated top_k/min_p/repetition for
-  local backends), max output tokens, context budget, a custom system prompt, and
-  a context template — tucked away since most readers never need it.
-- **Context Zones** — hand-pick an exact slice of the story to feed the AI: any
-  set of messages *plus* the full alternate versions (branchlines) of chosen
-  ones. Saved and named per story, and assembled with placement-aware structure
-  (index up top, curated material in the high-attention tail).
-- **Lens Edit** — have the assistant rewrite any passage into a private "Lens"
-  layer (translate it, tighten it, change the tone…). The draft streams in, is
-  applied over the original in the reader, and you can swipe between drafts or
-  regenerate — the underlying story is never touched.
-- **Pin Sets** — capture the AI's charts, stat tables, and summaries as pinned
-  visuals in the margin, then save named **sets** of them (which pins are shown
-  and which are fed to the AI) and swap between sets in one click.
-- **Cowrite presets** — one-click recipes for drafting with the AI: rank the
-  alternate versions of a beat, blend the best of them, or check them against an
-  earlier passage. Reference context grounds the request while the candidate
-  branches and your instruction ride the high-attention tail, and you can save
-  your own presets.
-- **Themes** — 26 of them, from Light/Dark/Sepia to Terminal (CRT), Windows 98,
-  Aero Glass, Fantasy Scroll, Synthwave, Grimoire, Cyberpunk, E-Ink, Game Boy,
-  Starlight, Manga, and more — each with fitting fonts and optional ambient
-  effects (scanlines, embers, petals, starfields…). Ambient effects can be
-  toggled off in Settings, and they respect `prefers-reduced-motion`.
-- **Customisation** — accent colours, an expanded font set, adjustable font size
-  and content width, `[OOC: …]` handling (show / dim / hide), profile pictures
-  for the character and your persona, and a Phone-Chat "dialogue only" texting
-  mode (hover a bubble to reveal the narration around it).
-- **Auto-formatter** — regex find/replace rules with flags, per-role targeting
-  (AI/user), ordering, live preview, JSON import/export, and one-click presets
-  (strip `<think>` blocks and OOC comments, HTML tags, smart typography,
-  anti-slop cliché/phrase cleanup, and more), plus toggles for paragraph
-  spacing, stray-bullet prevention, and dialogue layout.
-- **Tools** — search, chain reordering, per-chain star settings,
-  `{{user}}`/`{{char}}` substitution, and Markdown export.
+---
+
+## What it does
+
+### Read
+
+- **Nine views of the same story.** Storybook (prose), Chat (bubbles), Book
+  (real two-page spreads with page-flips), Stage (RPG dialogue box with
+  portraits), VN (visual-novel staging with sprites, backdrops and camera
+  moves), Sandbox (AI-designed presentation), plus Overview, Highlights and
+  Branches. Only the views you pin sit on the bar; the rest live under "…".
+- **Reading modes** — one switch for how much the app performs the text:
+  **Plain** (just the words) → **Lit** (the page takes the scene's mood) →
+  **Cinema** (motion, weather, emphasis) → **Performance** (and it reads aloud).
+  Change anything underneath and the label says so — "Cinema · modified".
+- **Streaming playback** — letter- or word-by-word reveal with a WPM readout,
+  configurable pause between messages, speed controls, and **TTS** (browser
+  voices or a local Kokoro server, with per-character voice casting).
+- **Autofocus** — hands-free reading that dims everything but the passage in
+  hand, with an optional **magnifier** that lights the words as they arrive.
+- **Book pagination**, chapter openings, drop caps, running heads, bookmarks.
+
+### Mark it up
+
+- **Highlights & notes** — hold `F` and select to highlight in five colours;
+  attach notes to any passage. Highlights are painted back onto the text and
+  collected in their own view.
+- **Branches / What-Ifs** — SillyTavern swipes and Kobold alternates are
+  readable as alternate takes. Multi-file branch exports are detected on import
+  and attached to the story they forked from instead of landing as duplicates.
+- **Pins & Sheets** — pin a passage, an AI table or a chart to a side dock;
+  keep trackers as editable tables.
+- **Codex** — people, places and things are extracted as you read, with hover
+  tooltips on their mentions.
+- **Lens** — a per-message override layer for rewrites and formatting. The
+  source JSON is never touched; exporting with your edits is an explicit choice.
+
+### Make it yours
+
+- **30+ themes**, from Light/Dark/Sepia to Terminal (CRT), Windows 98, Aero
+  Glass, Synthwave, Grimoire, Cyberpunk, E-Ink, Game Boy, RPG Quest, Pixel Chat
+  and MGS-style Codec — each with fitting fonts and optional ambient effects.
+- **Custom fonts** (upload your own), accent colours, font size, content width,
+  paragraph spacing, dialogue styling and `[OOC: …]` handling.
+- **Auto-formatter** — regex find/replace with per-role targeting, live preview,
+  import/export and one-click presets (strip `<think>` blocks, OOC comments,
+  HTML, anti-slop cleanup).
+- **Stage assets** — per-chat character sprites (six expressions), backdrops by
+  keyword, and profile pictures.
+- Everything honours `prefers-reduced-motion` and a global effects kill-switch.
+
+### With an AI endpoint (all optional)
+
+- **Scene Director** — a cheap cached read of each passage's mood, tension,
+  location and weather, which drives adaptive theming, soundscapes, emotional
+  TTS, VN camera work and screen effects. Decoded greedily, so re-reading a page
+  gives the same performance twice.
+- **Scene performance** — the Director can bend the reveal itself: drag a line
+  out, rush a panic, beat between words, hold a silence, cut speech off dead.
+- **Sandbox** — the model designs the *presentation* for a beat (never the
+  words) as sanitised CSS in a locked-down iframe. A resolved **Style Packet**
+  keeps every shot of a story in one look, a critic scores each result, and a
+  composed floor takes over when the model cannot hit the brief.
+- **Ask a character** — interview anyone in the cast about the beat you just
+  read. Their knowledge is hard-clamped to what has actually happened by that
+  point, so they cannot spoil what you have not reached. In group chats the
+  subject follows whoever is on screen, and characters can see and react to what
+  the others said. Nothing said in an interview is canon.
+- **Assistant, Cowrite, Summarize** — scoped Q&A over the story, alternate-beat
+  ranking and fusion, and agentic map-reduce summaries saved as versioned pins.
+- **Narrative Refinery** — extract and restyle prose with a fidelity check.
+
+### Formats
+
+SillyTavern chats (`.jsonl`, including hidden/narrator lines) · KoboldAI and
+KoboldCpp saves (`.json`) · TavernAI character cards (`.png`, V1/V2/V3) ·
+documents (`.txt`, `.md`, `.docx`). Export back to Markdown.
+
+---
+
+## Getting started
+
+```bash
+npm install
+npm run dev
+```
+
+Open the URL shown in the terminal (usually `http://localhost:3000`), then drop
+a `.jsonl` onto the library. A short tour runs the first time; you can reopen it
+any time from **Tour** in the library header.
+
+### Connecting an AI endpoint (optional)
+
+Settings → AI. Paste any OpenAI-compatible base URL — Aura probes for the right
+prefix, so `http://localhost:5001` and `http://localhost:5001/v1` both work.
+Tested against OpenAI, OpenRouter, LM Studio, Ollama, llama.cpp and KoboldCpp.
+
+> Running Aura in WSL against a server on Windows? `localhost` will not reach
+> it — use the default gateway from `ip route show default`.
+
+---
 
 ## Keyboard shortcuts
 
@@ -88,58 +121,58 @@ no account.
 | `Q` / `E` tap | Slower / faster |
 | `E` hold | 3× speed while held |
 | `Q` hold | Rewind while held |
-| `W` / `S`, `A` / `D` | Zoom / pan (autofocus mode) |
-| `F` hold + select | Highlight the selected text |
+| `W` / `S`, `A` / `D` | Zoom / pan (autofocus) |
+| `F` hold + select | Highlight the selection |
 | `Ctrl`/`Cmd` + `F` | Focus search |
-| `Esc` | Close settings / exit autofocus |
+| `C` / `M` / `S` | Codex / Multiverse / Sheets |
+| `Esc` | Close a panel, exit autofocus |
 
-## Getting started (development)
-
-```bash
-npm install
-npm run dev
-```
-
-Open the URL shown in the terminal (usually `http://localhost:3000`).
+---
 
 ## Building
 
 **Web (static site):**
 
 ```bash
-npm run build
+npm run build          # → dist/, serve with any static file server
 ```
 
-Static files are emitted to `dist/` — serve with any static file server
-(`npx serve dist`) or host them anywhere.
+**Desktop app:** Aura ships as a native app via Tauri v2 — see
+[`BUILD.md`](./BUILD.md) for prerequisites and the `npm run app:build` steps
+that produce a Windows `.msi`/`.exe`, macOS `.dmg` or Linux `.AppImage`.
 
-**Desktop app (installer):** Aura Reader also ships as a native desktop app via
-**Tauri v2** (the shell lives in `src-tauri/`).
+---
 
-Prerequisites (one-time): [Rust](https://rustup.rs) with the platform toolchain,
-a C/C++ build environment (on Windows: **Visual Studio Build Tools** with the
-"Desktop development with C++" workload; on Linux: `libwebkit2gtk-4.1-dev` and
-`librsvg2-dev`), and the **WebView2** runtime on Windows (preinstalled on
-Windows 11).
+## Development
 
 ```bash
-npm install
-npm run app:build      # runs the web build, compiles the Rust shell, bundles installers
+npx tsc --noEmit                      # typecheck
+npx tsx src/utils/<name>.test.ts      # a unit suite (pure modules, no runner)
+npm run test:e2e                      # build + Playwright
 ```
 
-Installers land in `src-tauri/target/release/bundle/` — a Windows
-`.exe` (NSIS) and `.msi`, a macOS `.dmg`, or a Linux `.AppImage`/`.deb`,
-depending on the OS you build **on** (Tauri does not cross-compile, so build the
-Windows `.exe` from Windows). Use `npm run app:dev` for a live desktop window
-with hot reload.
+Unit tests are plain `tsx` scripts over the pure modules in `src/utils` — no
+test framework. End-to-end tests run Playwright against `vite preview`, which
+serves the **last build**, so run `npm run build` before an E2E run or you are
+testing a stale bundle.
 
-> Icons in `src-tauri/icons/` are placeholders — run
-> `npx tauri icon path/to/icon.png` with a square source image to regenerate the
-> full set before shipping.
+Visual features are screenshot-verified. If you are changing anything that
+paints — a theme, a scene effect, the reading spotlight — look at the render
+before believing a green suite; several bugs in this codebase passed every
+assertion and were obvious the moment someone opened a screenshot.
 
 ## Tech
 
-Vite 6 · React 19 · TypeScript · Zustand · Tailwind CSS v4 · react-markdown +
-KaTeX · Tauri 2. Stories live in IndexedDB; settings in localStorage. The AI
-assistant talks to whatever OpenAI-compatible endpoint you configure and nothing
-else leaves your machine.
+Vite 6 · React 19 · TypeScript 5.8 · Zustand 5 · Tailwind CSS v4 ·
+react-markdown + KaTeX · Tauri 2.
+
+Stories, sprites, backdrops and fonts live in IndexedDB; settings in
+localStorage. The v2 store shards its state per slice and per story so touching
+one chat does not rewrite the whole library. The only thing that ever leaves
+your machine is a request to the AI endpoint you configured yourself.
+
+## License & credits
+
+Aura Reader is written from scratch. Bundled Press Start 2P is SIL OFL (licence
+in `public/fonts/`). Design inspiration is credited in the plan documents; no
+third-party application code is vendored.
