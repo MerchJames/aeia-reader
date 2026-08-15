@@ -7,6 +7,7 @@
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
     "preview": "vite preview",
+    "mobile": "npm run build && (npx vite preview --port 4173 & sleep 5 && npx tsx scripts/mobile-audit.ts; kill %1)",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "e2e:libs": "bash scripts/stage-browser-libs.sh || true",
