@@ -98,8 +98,12 @@ const SandboxCard = ({ doc, title, toolbar, liveHtml, fill, minHeight = 120, fx 
 const ToolBtn = ({ onClick, title, disabled, children }: {
   onClick: () => void; title: string; disabled?: boolean; children: React.ReactNode;
 }) => (
-  <button onClick={onClick} title={title} disabled={disabled}
+  <button onClick={onClick} title={title} aria-label={title} disabled={disabled}
     className={cn('p-1.5 rounded-md bg-app-bg/80 backdrop-blur border border-app-text/15 text-app-text/80',
+      // These float over the message, so they are small on purpose on a
+      // desktop; on a touch screen that trades a little cover for being
+      // hittable at all.
+      'touch:min-h-10 touch:min-w-10 touch:flex touch:items-center touch:justify-center',
       'hover:text-accent hover:border-accent/50 disabled:opacity-40 disabled:cursor-not-allowed')}>
     {children}
   </button>
@@ -406,21 +410,21 @@ export const SandboxView = () => {
     <div className="flex items-center gap-2 px-4 py-2 border-b border-app-text/10 bg-app-surface/50 backdrop-blur z-20">
       <button onClick={() => storyId && v2.setSandboxEnabled(storyId, !enabled)}
         title={enabled ? 'Sandbox styling on' : 'Sandbox styling off'}
-        className={cn('flex items-center gap-1.5 text-xs px-2 py-1 rounded-md border',
+        className={cn('flex items-center gap-1.5 text-xs px-2 min-h-10 rounded-md border shrink-0',
           enabled ? 'text-accent border-accent/40 bg-accent/10' : 'text-app-text/50 border-app-text/15')}>
         <Sparkles size={13} /> {enabled ? 'On' : 'Off'}
       </button>
 
       <div className="flex items-center gap-1 overflow-x-auto flex-1">
         <button onClick={() => applyChat(null)}
-          className={cn('text-xs px-2 py-1 rounded-md whitespace-nowrap border',
+          className={cn('text-xs px-2 min-h-10 shrink-0 rounded-md whitespace-nowrap border',
             !activeId ? 'bg-accent/15 text-accent border-accent/40' : 'text-app-text/60 border-transparent hover:border-app-text/15')}>
           Plain
         </button>
         {chips.map(c => (
           <span key={c.id} className={cn('group/chip flex items-center rounded-md border whitespace-nowrap',
             activeId === c.id ? 'bg-accent/15 text-accent border-accent/40' : 'text-app-text/70 border-transparent hover:border-app-text/15')}>
-            <button onClick={() => applyChat(c.id)} className="text-xs pl-2 py-1" title={c.intent || c.name}>
+            <button onClick={() => applyChat(c.id)} className="text-xs pl-2 min-h-10" title={c.intent || c.name}>
               {c.kind === 'shell' ? '▦ ' : ''}{c.name}{c.scope === 'chain' ? ' ·ch' : c.scope === 'message' ? ' ·msg' : ''}
             </button>
             <button onClick={() => setModal({ scope: c.scope, editConfig: c })}
@@ -445,12 +449,13 @@ export const SandboxView = () => {
 
       <button onClick={() => store.setLayoutMode(paged ? 'continuous' : 'paginated')}
         title={paged ? 'Paginated by chapter — click for one long scroll' : 'Continuous — click to paginate by chapter'}
-        className="p-1.5 rounded-md border border-app-text/15 text-app-text/60 hover:text-accent hover:border-accent/40">
+        aria-label={paged ? 'Switch to one long scroll' : 'Paginate by chapter'}
+        className="flex items-center justify-center min-h-10 min-w-10 shrink-0 rounded-md border border-app-text/15 text-app-text/60 hover:text-accent hover:border-accent/40">
         {paged ? <BookOpen size={15} /> : <ScrollText size={15} />}
       </button>
       <div className="relative">
-        <button onClick={e => { e.stopPropagation(); setShowColors(s => !s); }} title="Recolour"
-          className={cn('p-1.5 rounded-md border', hasPalette ? 'text-accent border-accent/40' : 'text-app-text/60 border-app-text/15 hover:text-accent hover:border-accent/40')}>
+        <button onClick={e => { e.stopPropagation(); setShowColors(s => !s); }} title="Recolour" aria-label="Recolour"
+          className={cn('flex items-center justify-center min-h-10 min-w-10 rounded-md border', hasPalette ? 'text-accent border-accent/40' : 'text-app-text/60 border-app-text/15 hover:text-accent hover:border-accent/40')}>
           <Palette size={15} />
         </button>
         {showColors && (
@@ -460,14 +465,14 @@ export const SandboxView = () => {
                 {label}
                 <span className="flex items-center gap-2">
                   <input type="color" value={(palette as any)[k] || (k === 'text' ? baseVars.text : k === 'accent' ? baseVars.accent : baseVars.bg)}
-                    onChange={e => setColor(k, e.target.value)} className="h-6 w-8 rounded cursor-pointer bg-transparent" />
-                  {(palette as any)[k] && <button onClick={() => setColor(k, undefined)} className="text-app-text/40 hover:text-app-text"><X size={12} /></button>}
+                    onChange={e => setColor(k, e.target.value)} className="h-9 w-11 rounded cursor-pointer bg-transparent" />
+                  {(palette as any)[k] && <button onClick={() => setColor(k, undefined)} aria-label={`Reset ${label.toLowerCase()}`} className="flex items-center justify-center min-h-10 min-w-8 text-app-text/40 hover:text-app-text"><X size={12} /></button>}
                 </span>
               </label>
             ))}
             {hasPalette && (
               <button onClick={() => storyId && v2.setSandboxPalette(storyId, { text: undefined, accent: undefined, bg: undefined })}
-                className="w-full text-xs text-app-text/60 hover:text-app-text pt-1">Reset colours</button>
+                className="w-full min-h-10 text-xs text-app-text/60 hover:text-app-text">Reset colours</button>
             )}
           </div>
         )}
@@ -479,19 +484,19 @@ export const SandboxView = () => {
           <button onClick={() => setDirectorOpen(true)} disabled={!aiReady}
             title={!aiReady ? 'Connect an AI endpoint in Settings'
               : currentCues.length ? 'Re-direct this beat' : 'Direct this beat — plan & stage scenes as it reads'}
-            className={cn('flex items-center gap-1 text-xs px-2 py-1 disabled:opacity-40',
+            className={cn('flex items-center gap-1 text-xs px-2 min-h-10 disabled:opacity-40',
               currentCues.length ? '' : 'text-app-text/70 hover:text-accent')}>
             <Clapperboard size={13} />
             {currentCues.length ? `${currentCues.length} cue${currentCues.length > 1 ? 's' : ''}` : 'Direct beat'}
           </button>
           {currentCues.length > 0 && (
-            <button onClick={clearCues} title="Clear cues" className="pr-1.5 pl-0.5 opacity-60 hover:opacity-100"><X size={11} /></button>
+            <button onClick={clearCues} title="Clear cues" aria-label="Clear cues" className="flex items-center justify-center min-h-10 min-w-8 opacity-60 hover:opacity-100"><X size={11} /></button>
           )}
         </span>
       )}
 
       <button onClick={() => setModal({ scope: 'chat' })} title="New style"
-        className="flex items-center gap-1 text-xs px-2 py-1 rounded-md bg-accent text-white hover:bg-accent/90">
+        className="flex items-center gap-1 text-xs px-2 min-h-10 shrink-0 rounded-md bg-accent text-white hover:bg-accent/90">
         <Plus size={13} /> New style
       </button>
     </div>

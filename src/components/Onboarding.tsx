@@ -75,7 +75,7 @@ const CustomizeDemo = () => {
                 onClick={() => setTheme(id)}
                 data-testid={`tour-theme-${id}`}
                 className={cn(
-                  'rounded-lg border px-2 py-1.5 text-[11px] text-left transition-colors',
+                  'rounded-lg border px-2 min-h-11 text-[11px] text-left transition-colors',
                   theme === id ? 'border-accent' : 'border-app-text/10 hover:border-app-text/30',
                 )}
                 style={{ background: def.vars.bg, color: def.vars.text }}
@@ -94,7 +94,12 @@ const CustomizeDemo = () => {
               key={a.id}
               onClick={() => setAccentColor(a.id as AccentColor)}
               aria-label={a.label}
-              className={cn('w-5 h-5 rounded-full border-2 transition-transform',
+              className={cn(
+                'w-5 h-5 rounded-full border-2 transition-transform',
+                // An invisible 40px box around a 20px dot: a colour swatch is
+                // the wrong size to hit with a thumb, and growing the dot
+                // would wreck the row.
+                'relative before:absolute before:-inset-2.5 before:content-[\'\']',
                 accent === a.id ? 'border-app-text scale-110' : 'border-transparent')}
               style={{ background: a.hex }}
             />
@@ -108,7 +113,7 @@ const CustomizeDemo = () => {
             <button
               key={m}
               onClick={() => setReadingMode(m)}
-              className={cn('flex-1 rounded-lg border px-2 py-1.5 text-[11px] transition-colors',
+              className={cn('flex-1 rounded-lg border px-2 min-h-11 text-[11px] transition-colors',
                 readingMode === m
                   ? 'border-accent bg-accent/10 text-app-text'
                   : 'border-app-text/10 text-app-text/50 hover:text-app-text/80')}
@@ -185,7 +190,7 @@ const SandboxDemo = () => {
           <button
             key={l}
             onClick={() => setLook(l)}
-            className={cn('rounded-full border px-2.5 py-0.5 text-[11px] capitalize transition-colors',
+            className={cn('rounded-full border px-2.5 min-h-10 text-[11px] capitalize transition-colors',
               look === l ? 'border-accent text-app-text' : 'border-app-text/15 text-app-text/50 hover:text-app-text/80')}
           >
             {l}
@@ -412,7 +417,7 @@ const AudioDemo = () => {
                 key={c.kind}
                 onClick={() => setCue(i)}
                 data-testid={`tour-audio-${c.kind}`}
-                className={cn('rounded-full border px-2 py-0.5 text-[10px] capitalize transition-colors',
+                className={cn('rounded-full border px-2 min-h-10 min-w-10 text-[10px] capitalize transition-colors',
                   i === cue ? 'border-accent text-app-text' : 'border-app-text/15 text-app-text/45')}
               >
                 {c.kind}
@@ -426,7 +431,7 @@ const AudioDemo = () => {
             onClick={playing ? stop : hear}
             data-testid="tour-audio-play"
             aria-label={playing ? 'Stop' : `Hear the ${active.kind}`}
-            className="shrink-0 w-7 h-7 rounded-full bg-accent/15 border border-accent/40 text-accent grid place-items-center hover:bg-accent/25"
+            className="shrink-0 w-10 h-10 rounded-full bg-accent/15 border border-accent/40 text-accent grid place-items-center hover:bg-accent/25"
           >
             {playing ? <Square size={11} /> : <Play size={12} className="ml-px" />}
           </button>
@@ -607,9 +612,9 @@ export const Onboarding = ({ onClose }: Props) => {
     >
       <div
         onClick={e => e.stopPropagation()}
-        className="w-full max-w-lg rounded-2xl bg-app-surface border border-app-text/10 shadow-2xl overflow-hidden flex flex-col"
+        className="w-full max-w-lg max-h-[calc(100dvh-2rem)] rounded-2xl bg-app-surface border border-app-text/10 shadow-2xl overflow-hidden flex flex-col"
       >
-        <div className="flex items-start justify-between gap-4 px-6 pt-6 pb-3">
+        <div className="flex items-start justify-between gap-4 px-6 pt-6 pb-3 shrink-0">
           <div className="min-w-0">
             <div className="flex items-center gap-2 text-[11px] uppercase tracking-wider text-app-text/35">
               <Sparkles size={12} className="text-accent" />
@@ -626,13 +631,13 @@ export const Onboarding = ({ onClose }: Props) => {
             onClick={onClose}
             aria-label="Close the tour"
             data-testid="onboarding-close"
-            className="p-1.5 -mr-1.5 rounded-lg text-app-text/40 hover:text-app-text shrink-0"
+            className="flex items-center justify-center min-h-11 min-w-11 -mr-2 -mt-1 rounded-lg text-app-text/40 hover:text-app-text shrink-0"
           >
             <X size={18} />
           </button>
         </div>
 
-        <div className="px-6 pb-5 space-y-4">
+        <div className="px-6 pb-5 space-y-4 flex-1 min-h-0 overflow-y-auto">
           <p className="text-sm text-app-text/70 leading-relaxed">{current.body}</p>
 
           {/* Showing beats describing — every step that can carries a concrete
@@ -705,7 +710,7 @@ export const Onboarding = ({ onClose }: Props) => {
                       key={m}
                       onClick={() => setUiMode(m)}
                       data-testid={`tour-uimode-${m}`}
-                      className={cn('flex-1 rounded-lg border px-2 py-1.5 text-[11px] capitalize transition-colors',
+                      className={cn('flex-1 rounded-lg border px-2 min-h-11 text-[11px] capitalize transition-colors',
                         uiMode === m
                           ? 'border-accent bg-accent/10 text-app-text'
                           : 'border-app-text/10 text-app-text/50 hover:text-app-text/80')}
@@ -719,8 +724,16 @@ export const Onboarding = ({ onClose }: Props) => {
           )}
         </div>
 
-        <div className="flex items-center gap-2 px-6 py-4 border-t border-app-text/10">
-          <div className="flex gap-1.5 mr-auto" aria-hidden>
+        {/* The dot strip is thirteen targets wide and, next to Back/Skip/Next,
+          * does not fit a phone. It used to force this row past the modal's
+          * width, which pushed the whole dialog off BOTH screen edges — so on a
+          * narrow screen it becomes a plain counter and the buttons keep the
+          * room. */}
+        <div className="flex items-center gap-2 px-4 sm:px-6 py-3 sm:py-4 border-t border-app-text/10 shrink-0">
+          <span className="sm:hidden mr-auto text-xs tabular-nums text-app-text/40">
+            {step + 1} / {ONBOARDING_STEPS.length}
+          </span>
+          <div className="hidden sm:flex gap-1.5 mr-auto" aria-hidden>
             {ONBOARDING_STEPS.map((s, i) => (
               <button
                 key={s.id}
@@ -728,6 +741,8 @@ export const Onboarding = ({ onClose }: Props) => {
                 aria-label={`Go to step ${i + 1}`}
                 className={cn(
                   'h-1.5 rounded-full transition-all',
+                  // The dot stays small; the tappable box around it does not.
+                  'before:absolute before:inset-x-0 before:-inset-y-3 before:content-[\'\'] relative',
                   i === step ? 'w-5 bg-accent' : 'w-1.5 bg-app-text/20 hover:bg-app-text/40',
                 )}
               />
@@ -737,16 +752,17 @@ export const Onboarding = ({ onClose }: Props) => {
           {step > 0 && (
             <button
               onClick={() => setStep(s => s - 1)}
-              className="flex items-center gap-1 px-3 py-2 rounded-lg text-sm text-app-text/60 hover:text-app-text"
+              aria-label="Back"
+              className="flex items-center justify-center gap-1 px-3 min-h-10 min-w-10 rounded-lg text-sm text-app-text/60 hover:text-app-text shrink-0"
             >
-              <ArrowLeft size={15} /> Back
+              <ArrowLeft size={15} /> <span className="hidden sm:inline">Back</span>
             </button>
           )}
           {!last && (
             <button
               onClick={onClose}
               data-testid="onboarding-skip"
-              className="px-3 py-2 rounded-lg text-sm text-app-text/50 hover:text-app-text"
+              className="px-3 min-h-10 rounded-lg text-sm text-app-text/50 hover:text-app-text shrink-0"
             >
               Skip
             </button>
@@ -754,7 +770,7 @@ export const Onboarding = ({ onClose }: Props) => {
           <button
             onClick={() => (last ? onClose() : setStep(s => s + 1))}
             data-testid="onboarding-next"
-            className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-accent text-white text-sm font-medium hover:opacity-90"
+            className="flex items-center justify-center gap-1.5 px-4 min-h-10 rounded-lg bg-accent text-white text-sm font-medium hover:opacity-90 shrink-0"
           >
             {last ? <><Check size={15} /> Start reading</> : <>Next <ArrowRight size={15} /></>}
           </button>

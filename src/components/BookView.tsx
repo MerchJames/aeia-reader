@@ -374,7 +374,9 @@ export const BookView = () => {
   return (
     <div
       ref={containerRef}
-      className="relative z-10 flex-1 min-h-0 flex items-center justify-center pb-24 pt-2"
+      // pb-36 on a phone: the playback bar is ~134px tall with its offset, and
+      // pb-24 left it sitting on top of the last lines of the page.
+      className="relative z-10 flex-1 min-h-0 flex items-center justify-center pb-36 sm:pb-24 pt-2"
     >
       <SceneAtmosphere scene={scene} activeId={activeSceneId} enabled={atmosphereOn} />
       {store.sceneTheming && <SceneSpine scenes={scenes} activeSceneId={scene?.id} />}

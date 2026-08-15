@@ -185,7 +185,7 @@ export const AnnotationThread = ({ messageId, anchorText, onClose }: {
   return (
     <div className="fixed inset-0 z-[75] flex items-end sm:items-center justify-center p-0 sm:p-6">
       <div className="absolute inset-0 bg-black/40 backdrop-blur-[2px]" onClick={onClose} />
-      <div className="relative w-full sm:w-[28rem] max-h-[80vh] bg-surface border border-app-border shadow-2xl rounded-t-2xl sm:rounded-2xl flex flex-col">
+      <div className="relative w-full sm:w-[28rem] max-h-[80dvh] bg-surface border border-app-border shadow-2xl rounded-t-2xl sm:rounded-2xl flex flex-col">
         <div className="flex items-center gap-2 px-4 py-3 border-b border-app-border">
           <MessageSquare size={17} className="text-accent" />
           <h3 className="font-bold text-sm">Scoped thread</h3>

@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft, BookMarked, BookOpen, Bot, ChevronLeft, ChevronRight, Clapperboard, Film, Focus,
-  GitBranch, Highlighter, Info, List, MessageSquare, MoreHorizontal, Network, Pencil, Pin, PinOff,
-  Search, Settings, Table2, Wand2, X,
+  GitBranch, Highlighter, Info, List, MessageSquare, MoreHorizontal, MoreVertical, Network, Pencil,
+  Pin, PinOff, Search, Settings, Table2, Wand2, X,
 } from 'lucide-react';
+import { useIsMobile, useIsTouch } from '../hooks/useMediaQuery';
 import { useAppStore } from '../store';
 import { useAuraV2Store, committedCount, flatMessages } from '../stores/useAuraV2Store';
 import { wordsPerSecond } from '../hooks/useStreamer';
@@ -56,6 +57,13 @@ export const TopNavigation = () => {
   const resetVisibleViews = useAppStore(s => s.resetVisibleViews);
   const [viewMenuOpen, setViewMenuOpen] = useState(false);
   const viewsRef = useRef<HTMLDivElement>(null);
+  const isMobile = useIsMobile();
+  // Width decides the LAYOUT; the input device decides the SIZE. A landscape
+  // phone and a tablet are wide enough for the desktop header and still have
+  // no mouse — sizing off `isMobile` alone left them with 30px icon targets.
+  const touchSized = useIsTouch() || isMobile;
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const toolsRef = useRef<HTMLDivElement>(null);
   const searchQuery = useAppStore(s => s.searchQuery);
   const setSearchQuery = useAppStore(s => s.setSearchQuery);
   const isAutofocusMode = useAppStore(s => s.isAutofocusMode);
@@ -95,6 +103,34 @@ export const TopNavigation = () => {
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, [viewMenuOpen]);
+
+  // Same for the phone's tool menu.
+  useEffect(() => {
+    if (!toolsOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (toolsRef.current && !toolsRef.current.contains(e.target as Node)) setToolsOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [toolsOpen]);
+
+  // Escape closes whichever header menu is open. Every other panel in Aura
+  // does this; these two were only dismissible by clicking away.
+  useEffect(() => {
+    if (!toolsOpen && !viewMenuOpen) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();      // don't also exit autofocus / close the reader
+      setToolsOpen(false);
+      setViewMenuOpen(false);
+    };
+    document.addEventListener('keydown', handler, true);
+    return () => document.removeEventListener('keydown', handler, true);
+  }, [toolsOpen, viewMenuOpen]);
+
+  // A menu built for the phone layout must not survive a rotation to landscape
+  // or a window resize — its button stops rendering and the panel would orphan.
+  useEffect(() => { if (!isMobile) setToolsOpen(false); }, [isMobile]);
 
   // Close the lens manager when clicking outside it.
   useEffect(() => {
@@ -194,20 +230,190 @@ export const TopNavigation = () => {
     if (aiOpen && m !== 'all' && m !== 'cowrite') setAiOpen(false);
   };
 
+  /**
+   * The header's tools, declared once.
+   *
+   * A desktop renders them as icons in the bar; a phone renders them as
+   * labelled rows in a menu. Same list either way — the two presentations
+   * cannot drift, and adding a tool needs one entry, not two.
+   *
+   * `warm` marks the tools that use the amber "this is altering your reading"
+   * treatment rather than the accent, matching what shipped.
+   */
+  const tools: {
+    id: string; label: string; hint: string; icon: React.ReactNode;
+    active?: boolean; warm?: boolean; onClick: () => void;
+  }[] = [
+    {
+      id: 'multiverse', label: 'Multiverse', hint: 'Multiverse — story map & timelines (M)',
+      icon: <Network size={18} />, onClick: () => setMultiverseOpen(true),
+    },
+    {
+      id: 'codex', label: 'Codex', hint: "Codex — everything you've met so far (C)",
+      icon: <BookMarked size={18} />, active: codexOpen, onClick: () => setCodexOpen(!codexOpen),
+    },
+    {
+      id: 'sheets', label: 'Sheets', hint: 'Sheets — pinnable tables (S)',
+      icon: <Table2 size={18} />, active: sheetsOpen, onClick: () => setSheetsOpen(!sheetsOpen),
+    },
+    ...(aiToolVisible ? [{
+      id: 'ai', label: 'Assistant', hint: 'Reading assistant (AI)',
+      icon: <Bot size={18} />, active: aiOpen, onClick: () => setAiOpen(!aiOpen),
+    }] : []),
+    {
+      id: 'autofocus', label: 'Autofocus', hint: 'Autofocus handsfree mode',
+      icon: <Focus size={18} />, active: isAutofocusMode, warm: true,
+      onClick: () => setIsAutofocusMode(!isAutofocusMode),
+    },
+    {
+      id: 'settings', label: 'Settings', hint: 'Settings',
+      icon: <Settings size={18} />, onClick: () => setSettingsOpen(true),
+    },
+  ];
+
+  /** The phone's tool menu: labels, and targets a thumb can actually hit. */
+  const toolsMenu = (
+    <div className="absolute right-0 top-full mt-2 w-60 rounded-xl bg-surface border border-app-border shadow-2xl p-1 z-50">
+      {tools.map(t => (
+        <button
+          key={t.id}
+          onClick={() => { t.onClick(); setToolsOpen(false); }}
+          className={cn(
+            'w-full flex items-center gap-3 px-3 min-h-11 rounded-lg text-sm text-left transition-colors',
+            t.active ? (t.warm ? 'text-amber-500' : 'text-accent') : 'hover:bg-app-text/5',
+          )}
+        >
+          <span className="shrink-0 opacity-80">{t.icon}</span>
+          <span className="min-w-0 truncate">{t.label}</span>
+          {t.active && <span className="ml-auto text-[10px] uppercase tracking-wide opacity-70">on</span>}
+        </button>
+      ))}
+      {hasOverrides && storyId && (
+        <button
+          onClick={() => { setLensOn(storyId, !lensOn); setToolsOpen(false); }}
+          className={cn(
+            'w-full flex items-center gap-3 px-3 min-h-11 rounded-lg text-sm text-left transition-colors',
+            lensOn ? 'text-amber-500' : 'hover:bg-app-text/5',
+          )}
+        >
+          <span className="shrink-0 opacity-80"><Pencil size={18} /></span>
+          <span className="min-w-0 truncate">Lens edits ({overrides.length})</span>
+          <span className="ml-auto text-[10px] uppercase tracking-wide opacity-70">
+            {lensOn ? 'shown' : 'hidden'}
+          </span>
+        </button>
+      )}
+      {/* Search is an input, not a row — a phone has no room for it in the bar,
+        * so it lives at the foot of this menu where it can be full width. */}
+      <div className="border-t border-app-border/60 mt-1 pt-1 px-1 pb-1">
+        <input
+          type="text"
+          placeholder="Search story…"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          onFocus={() => setSearchFocused(true)}
+          aria-label="Search story"
+          className="w-full min-h-10 px-3 text-sm bg-app-text/5 border border-transparent rounded-lg focus:outline-none focus:border-accent/50"
+        />
+      </div>
+    </div>
+  );
+
+  /**
+   * Built once and PLACED, not rendered twice.
+   *
+   * On a phone this sits in its own row under the title; on a desktop it sits
+   * inline in the header. Rendering two copies behind `hidden sm:flex` would
+   * give `viewsRef` two candidate nodes — React would attach it to whichever
+   * mounted last, and the outside-click that closes the overflow menu would
+   * silently stop working on one of them.
+   */
+  const viewButtons = shownViews.map(mode => (
+    <button
+      key={mode}
+      data-view={mode}
+      onClick={() => setViewMode(mode)}
+      title={VIEW_LABEL[mode]}
+      aria-label={VIEW_LABEL[mode]}
+      className={cn(
+        'rounded-md transition-colors shrink-0 flex items-center justify-center',
+        touchSized ? 'min-h-10 min-w-10' : 'p-1.5',
+        viewMode === mode
+          ? 'bg-surface shadow-sm text-accent'
+          : 'opacity-50 hover:opacity-100',
+      )}
+    >
+      {VIEW_ICON[mode]}
+    </button>
+  ));
+
+  const viewBar = (
+    <div
+      className="flex min-w-0 flex-1 bg-app-text/5 p-1 rounded-lg"
+      ref={viewsRef}
+    >
+      {/* The strip scrolls rather than shrinking its buttons past the point of
+        * being tappable, at every width — nine icons do not fit a phone, and
+        * they do not fit beside the presets, search and six tools on a
+        * landscape phone or a half-width desktop window either.
+        *
+        * The scroller wraps ONLY the buttons: `overflow-x` establishes a
+        * clipping context in BOTH axes, so an absolutely-positioned menu
+        * inside it is invisible — which is exactly what happened when the
+        * overflow button lived in here. It stays outside, pinned to the end,
+        * where it is also always reachable without scrolling. */}
+      <div className="flex min-w-0 flex-1 overflow-x-auto no-scrollbar">{viewButtons}</div>
+      <div className="relative shrink-0">
+        <button
+          onClick={() => setViewMenuOpen(!viewMenuOpen)}
+          title="All views — pin the ones you use"
+          aria-label="All views"
+          aria-expanded={viewMenuOpen}
+          data-testid="view-overflow"
+          className={cn(
+            'rounded-md transition-colors flex items-center justify-center',
+            touchSized ? 'min-h-10 min-w-10' : 'p-1.5',
+            viewMenuOpen ? 'bg-surface shadow-sm text-accent' : 'opacity-50 hover:opacity-100',
+          )}
+        >
+          <MoreHorizontal size={18} />
+        </button>
+        {viewMenuOpen && (
+          <ViewMenu
+            shown={shownViews}
+            hidden={hiddenViews}
+            active={viewMode}
+            customised={!!visibleViews}
+            onPick={(m) => { setViewMode(m); setViewMenuOpen(false); }}
+            onToggle={toggleVisibleView}
+            onMove={moveVisibleView}
+            onReset={resetVisibleViews}
+          />
+        )}
+      </div>
+    </div>
+  );
+
   return (
     <div className="sticky top-0 z-40 border-b border-app-border bg-surface/85 backdrop-blur-md">
-    <div className="flex items-center justify-between gap-3 px-4 py-3">
-      <div className="flex items-center gap-3 min-w-0">
+    <div className="flex items-center justify-between gap-2 sm:gap-3 px-2 sm:px-4 py-1.5 sm:py-3">
+      <div className="flex items-center gap-1 sm:gap-3 min-w-0 flex-1 sm:flex-none">
         <button
           onClick={() => closeStory()}
           title="Back to library"
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm hover:bg-app-text/5 transition-colors shrink-0"
+          aria-label="Back to library"
+          className={cn(
+            'flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm hover:bg-app-text/5 transition-colors shrink-0',
+            touchSized && 'min-h-11 min-w-11',
+          )}
         >
           <ArrowLeft size={17} />
           <span className="hidden sm:inline">Library</span>
         </button>
         {currentStory && (
-          <div className="min-w-0 hidden md:block">
+          // The title earns its space on a phone now that the tool cluster has
+          // collapsed into a menu — without it the bar is anonymous icons.
+          <div className="min-w-0 block">
             {/* Click to rename. Imports take their title from the card, which in
               * a lot of exports is a placeholder ("unused"), so there has to be
               * a way to name the chat — and the title itself is the obvious
@@ -244,71 +450,31 @@ export const TopNavigation = () => {
         )}
       </div>
 
-      <div className="flex items-center gap-2 shrink-0">
-        {/* Workspace preset — gates how much of the app is on screen. */}
-        <div className="hidden md:flex bg-app-text/5 p-1 rounded-lg" role="tablist" aria-label="Workspace mode">
-          {UI_MODES.map(({ mode, label, hint }) => (
-            <button
-              key={mode}
-              role="tab"
-              aria-selected={uiMode === mode}
-              onClick={() => changeMode(mode)}
-              title={hint}
-              className={cn(
-                'px-2.5 py-1 rounded-md text-xs font-medium transition-colors',
-                uiMode === mode ? 'bg-surface shadow-sm text-accent' : 'opacity-50 hover:opacity-100',
-              )}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-        <div className="flex bg-app-text/5 p-1 rounded-lg" ref={viewsRef}>
-          {shownViews.map(mode => (
-            <button
-              key={mode}
-              data-view={mode}
-              onClick={() => setViewMode(mode)}
-              title={VIEW_LABEL[mode]}
-              className={cn(
-                'p-1.5 rounded-md transition-colors',
-                viewMode === mode
-                  ? 'bg-surface shadow-sm text-accent'
-                  : 'opacity-50 hover:opacity-100',
-              )}
-            >
-              {VIEW_ICON[mode]}
-            </button>
-          ))}
-          <div className="relative">
-            <button
-              onClick={() => setViewMenuOpen(!viewMenuOpen)}
-              title="All views — pin the ones you use"
-              aria-label="All views"
-              aria-expanded={viewMenuOpen}
-              data-testid="view-overflow"
-              className={cn(
-                'p-1.5 rounded-md transition-colors',
-                viewMenuOpen ? 'bg-surface shadow-sm text-accent' : 'opacity-50 hover:opacity-100',
-              )}
-            >
-              <MoreHorizontal size={18} />
-            </button>
-            {viewMenuOpen && (
-              <ViewMenu
-                shown={shownViews}
-                hidden={hiddenViews}
-                active={viewMode}
-                customised={!!visibleViews}
-                onPick={(m) => { setViewMode(m); setViewMenuOpen(false); }}
-                onToggle={toggleVisibleView}
-                onMove={moveVisibleView}
-                onReset={resetVisibleViews}
-              />
-            )}
+      {/* On a phone the view bar drops to its own row below — see `viewBar`. */}
+      {!isMobile && (
+        <div className="flex items-center gap-2 min-w-0 flex-1 justify-end">
+          {/* Workspace preset — gates how much of the app is on screen. */}
+          <div className="hidden lg:flex shrink-0 bg-app-text/5 p-1 rounded-lg" role="tablist" aria-label="Workspace mode">
+            {UI_MODES.map(({ mode, label, hint }) => (
+              <button
+                key={mode}
+                role="tab"
+                aria-selected={uiMode === mode}
+                onClick={() => changeMode(mode)}
+                title={hint}
+                className={cn(
+                  'px-2.5 rounded-md text-xs font-medium transition-colors',
+                  touchSized ? 'min-h-10' : 'py-1',
+                  uiMode === mode ? 'bg-surface shadow-sm text-accent' : 'opacity-50 hover:opacity-100',
+                )}
+              >
+                {label}
+              </button>
+            ))}
           </div>
+          {viewBar}
         </div>
-      </div>
+      )}
 
       <div className="flex items-center gap-2 shrink-0">
         <div className="relative hidden sm:block" ref={searchRef}>
@@ -321,7 +487,10 @@ export const TopNavigation = () => {
             onChange={(e) => setSearchQuery(e.target.value)}
             onFocus={() => setSearchFocused(true)}
             onKeyDown={(e) => { if (e.key === 'Escape') { setSearchFocused(false); (e.target as HTMLInputElement).blur(); } }}
-            className="pl-8 pr-3 py-1.5 text-sm bg-app-text/5 border border-transparent rounded-full focus:outline-none focus:border-accent/50 w-40 focus:w-64 transition-all"
+            className={cn(
+              'pl-8 pr-3 text-sm bg-app-text/5 border border-transparent rounded-full focus:outline-none focus:border-accent/50 w-40 focus:w-64 transition-all',
+              touchSized ? 'min-h-11' : 'py-1.5',
+            )}
           />
           {showResults && (
             <div className="absolute right-0 top-full mt-2 w-[22rem] max-h-[65vh] overflow-y-auto rounded-xl bg-surface border border-app-border shadow-2xl z-50">
@@ -353,44 +522,37 @@ export const TopNavigation = () => {
             </div>
           )}
         </div>
-        <button
-          onClick={() => setMultiverseOpen(true)}
-          title="Multiverse — story map & timelines (M)"
-          className="p-2 rounded-lg opacity-60 hover:opacity-100 hover:bg-app-text/5 transition-colors"
-        >
-          <Network size={18} />
-        </button>
-        <button
-          onClick={() => setCodexOpen(!codexOpen)}
-          title="Codex — everything you've met so far (C)"
-          className={cn(
-            'p-2 rounded-lg transition-colors',
-            codexOpen
-              ? 'bg-accent/20 text-accent'
-              : 'opacity-60 hover:opacity-100 hover:bg-app-text/5',
-          )}
-        >
-          <BookMarked size={18} />
-        </button>
-        <button
-          onClick={() => setSheetsOpen(!sheetsOpen)}
-          title="Sheets — pinnable tables (S)"
-          className={cn(
-            'p-2 rounded-lg transition-colors',
-            sheetsOpen
-              ? 'bg-accent/20 text-accent'
-              : 'opacity-60 hover:opacity-100 hover:bg-app-text/5',
-          )}
-        >
-          <Table2 size={18} />
-        </button>
-        {hasOverrides && storyId && (
+        {/* Desktop: the tools as bare icons. Phone: one button, a labelled
+          * menu behind it — see `toolsMenu`. Both read from `tools`, so a tool
+          * added in one place cannot go missing in the other. */}
+        {!isMobile && tools.map(t => (
+          <button
+            key={t.id}
+            onClick={t.onClick}
+            title={t.hint}
+            // The hint, not the short label: an icon-only button's accessible
+            // name is all a screen reader gets, and "Assistant" does not say
+            // what it assists with.
+            aria-label={t.hint}
+            className={cn(
+              'rounded-lg transition-colors',
+              touchSized ? 'flex items-center justify-center min-h-11 min-w-11' : 'p-2',
+              t.active
+                ? (t.warm ? 'bg-amber-500/20 text-amber-500' : 'bg-accent/20 text-accent')
+                : 'opacity-60 hover:opacity-100 hover:bg-app-text/5',
+            )}
+          >
+            {t.icon}
+          </button>
+        ))}
+        {!isMobile && hasOverrides && storyId && (
           <div className="relative" ref={managerRef}>
             <button
               onClick={() => setLensManagerOpen(!lensManagerOpen)}
               title={`Lens — ${lensOn ? 'edits visible' : 'edits hidden'} (${overrides.length})`}
               className={cn(
-                'p-2 rounded-lg transition-colors',
+                'rounded-lg transition-colors',
+                touchSized ? 'flex items-center justify-center min-h-11 min-w-11' : 'p-2',
                 lensOn || lensManagerOpen
                   ? 'bg-amber-500/20 text-amber-500'
                   : 'opacity-60 hover:opacity-100 hover:bg-app-text/5',
@@ -408,41 +570,35 @@ export const TopNavigation = () => {
             )}
           </div>
         )}
-        {aiToolVisible && (
-          <button
-            onClick={() => setAiOpen(!aiOpen)}
-            title="Reading assistant (AI)"
-            className={cn(
-              'p-2 rounded-lg transition-colors',
-              aiOpen
-                ? 'bg-accent/20 text-accent'
-                : 'opacity-60 hover:opacity-100 hover:bg-app-text/5',
-            )}
-          >
-            <Bot size={18} />
-          </button>
+        {isMobile && (
+          <div className="relative shrink-0" ref={toolsRef}>
+            <button
+              onClick={() => setToolsOpen(!toolsOpen)}
+              aria-label="Tools"
+              aria-expanded={toolsOpen}
+              data-testid="tools-menu"
+              className={cn(
+                'min-h-11 min-w-11 flex items-center justify-center rounded-lg transition-colors',
+                toolsOpen ? 'bg-accent/20 text-accent' : 'opacity-70 hover:bg-app-text/5',
+              )}
+            >
+              <MoreVertical size={20} />
+            </button>
+            {toolsOpen && toolsMenu}
+          </div>
         )}
-        <button
-          onClick={() => setIsAutofocusMode(!isAutofocusMode)}
-          title="Autofocus handsfree mode"
-          className={cn(
-            'p-2 rounded-lg transition-colors',
-            isAutofocusMode
-              ? 'bg-amber-500/20 text-amber-500'
-              : 'opacity-60 hover:opacity-100 hover:bg-app-text/5',
-          )}
-        >
-          <Focus size={18} />
-        </button>
-        <button
-          onClick={() => setSettingsOpen(true)}
-          title="Settings"
-          className="p-2 rounded-lg opacity-60 hover:opacity-100 hover:bg-app-text/5 transition-colors"
-        >
-          <Settings size={18} />
-        </button>
       </div>
     </div>
+
+    {/* Phone: the view bar gets its own row rather than fighting the title for
+      * space. Nine icons will not fit beside a title at 390px, and squeezing
+      * them was what pushed the whole header to 592px and knocked the fixed
+      * playback bar off the centre of the screen. */}
+    {isMobile && (
+      <div className="flex items-center gap-2 px-2 pb-1.5">
+        {viewBar}
+      </div>
+    )}
 
       {/* Guided assistance: what the active preset shows, and how to see more. */}
       {uiMode !== 'all' && (
@@ -480,13 +636,13 @@ const ViewMenu = ({ shown, hidden, active, customised, onPick, onToggle, onMove,
     <div
       key={view}
       className={cn(
-        'group flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-app-text/5 transition-colors',
+        'group flex items-center gap-1 rounded-lg px-2 py-1.5 min-h-11 hover:bg-app-text/5 transition-colors',
         active === view && 'bg-accent/10',
       )}
     >
       <button
         onClick={() => onPick(view)}
-        className="flex items-center gap-2 min-w-0 flex-1 text-left"
+        className="flex items-center gap-2 min-w-0 flex-1 self-stretch text-left"
       >
         <span className={cn('shrink-0', active === view ? 'text-accent' : 'opacity-60')}>
           {VIEW_ICON[view]}
@@ -504,7 +660,8 @@ const ViewMenu = ({ shown, hidden, active, customised, onPick, onToggle, onMove,
             onClick={() => onMove(view, -1)}
             disabled={idx === 0}
             title="Move left"
-            className="p-0.5 opacity-60 hover:opacity-100 disabled:opacity-20"
+            aria-label="Move left"
+            className="flex items-center justify-center min-h-10 min-w-10 opacity-60 hover:opacity-100 disabled:opacity-20"
           >
             <ChevronLeft size={13} />
           </button>
@@ -512,7 +669,8 @@ const ViewMenu = ({ shown, hidden, active, customised, onPick, onToggle, onMove,
             onClick={() => onMove(view, 1)}
             disabled={idx === shown.length - 1}
             title="Move right"
-            className="p-0.5 opacity-60 hover:opacity-100 disabled:opacity-20"
+            aria-label="Move right"
+            className="flex items-center justify-center min-h-10 min-w-10 opacity-60 hover:opacity-100 disabled:opacity-20"
           >
             <ChevronRight size={13} />
           </button>
@@ -523,7 +681,7 @@ const ViewMenu = ({ shown, hidden, active, customised, onPick, onToggle, onMove,
         title={pinned ? 'Unpin from the bar' : 'Pin to the bar'}
         data-testid={`view-pin-${view}`}
         className={cn(
-          'p-1 rounded shrink-0 transition-colors',
+          'flex items-center justify-center min-h-10 min-w-10 rounded shrink-0 transition-colors',
           pinned ? 'text-accent hover:bg-accent/15' : 'opacity-40 hover:opacity-100 hover:bg-app-text/10',
         )}
       >
@@ -548,7 +706,7 @@ const ViewMenu = ({ shown, hidden, active, customised, onPick, onToggle, onMove,
       {customised && (
         <button
           onClick={onReset}
-          className="mt-2 w-full py-1.5 rounded-lg bg-app-text/5 text-[11px] text-muted hover:bg-app-text/10 hover:text-app-text transition-colors"
+          className="mt-2 w-full min-h-10 rounded-lg bg-app-text/5 text-[11px] text-muted hover:bg-app-text/10 hover:text-app-text transition-colors"
         >
           Reset to the workspace default
         </button>

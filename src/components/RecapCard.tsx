@@ -137,7 +137,7 @@ export const RecapCard = () => {
   return (
     <div className="fixed inset-0 z-[55] flex items-center justify-center p-6">
       <div className="absolute inset-0 bg-black/50 backdrop-blur-[3px]" onClick={() => dismiss(false)} />
-      <div className="relative w-full max-w-md rounded-2xl bg-surface border border-app-border shadow-2xl p-6 space-y-4">
+      <div className="relative w-full max-w-md max-h-[calc(100dvh-3rem)] overflow-y-auto rounded-2xl bg-surface border border-app-border shadow-2xl p-6 space-y-4">
         <button
           onClick={() => dismiss(false)}
           className="absolute top-3 right-3 p-2 rounded-full hover:bg-app-text/10 transition-colors"

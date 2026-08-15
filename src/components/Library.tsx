@@ -183,8 +183,8 @@ export const Library = () => {
         }}
       />
 
-      <header className="flex items-center justify-between px-6 sm:px-10 pt-8 pb-6 max-w-5xl w-full mx-auto">
-        <div>
+      <header className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 px-5 sm:px-10 pt-6 sm:pt-8 pb-5 sm:pb-6 max-w-5xl w-full mx-auto">
+        <div className="min-w-0">
           <h1 className="text-3xl font-serif font-bold">Aura Reader</h1>
           <p className="text-sm text-muted mt-1">
             Relive your SillyTavern &amp; Kobold stories.
@@ -197,14 +197,14 @@ export const Library = () => {
             onClick={() => setTourOpen(true)}
             title="Take the tour — what Aura can do"
             data-testid="tour-button"
-            className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-app-border text-sm text-app-text/70 hover:text-app-text hover:bg-app-text/5 transition-colors"
+            className="flex items-center justify-center gap-1.5 px-3 min-h-11 rounded-lg border border-app-border text-sm text-app-text/70 hover:text-app-text hover:bg-app-text/5 transition-colors"
           >
             <Sparkles size={15} /> Tour
           </button>
           <button
             onClick={() => fileInputRef.current?.click()}
             disabled={importing}
-            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-accent text-white text-sm font-medium hover:opacity-90 disabled:opacity-50 transition-opacity shadow-sm"
+            className="flex items-center justify-center gap-2 px-4 min-h-11 flex-1 sm:flex-none rounded-lg bg-accent text-white text-sm font-medium hover:opacity-90 disabled:opacity-50 transition-opacity shadow-sm"
           >
             <Upload size={16} />
             {importing ? 'Importing…' : 'Import'}
@@ -212,7 +212,7 @@ export const Library = () => {
           <button
             onClick={() => setSettingsOpen(true)}
             title="Settings"
-            className="p-2.5 rounded-lg border border-app-border hover:bg-app-text/5 transition-colors"
+            className="flex items-center justify-center min-h-11 min-w-11 rounded-lg border border-app-border hover:bg-app-text/5 transition-colors"
           >
             <Settings size={18} />
           </button>

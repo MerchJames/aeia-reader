@@ -67,7 +67,11 @@ export const ImportModal = ({
       }}
     >
       <div className="absolute inset-0 bg-black/50 backdrop-blur-[3px]" onClick={onCancel} />
-      <div className="relative w-full max-w-md rounded-2xl bg-surface border border-app-border shadow-2xl p-6 space-y-4">
+      {/* max-h + scroll: a centred panel taller than the screen overflows in
+        * BOTH directions, so its buttons end up above and below the viewport
+        * with no way to scroll to them. On a phone that made importing — the
+        * first thing anyone does — impossible. */}
+      <div className="relative w-full max-w-md max-h-[calc(100dvh-3rem)] overflow-y-auto rounded-2xl bg-surface border border-app-border shadow-2xl p-6 space-y-4">
         <button
           onClick={onCancel}
           className="absolute top-3 right-3 p-2 rounded-full hover:bg-app-text/10 transition-colors"

@@ -364,7 +364,7 @@ export const AutoFormatModal = ({ onClose }: { onClose: () => void }) => {
 
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-      <div className="bg-surface text-app-text rounded-2xl w-full max-w-3xl max-h-[85vh] flex flex-col shadow-2xl border border-app-border">
+      <div className="bg-surface text-app-text rounded-2xl w-full max-w-3xl max-h-[85dvh] flex flex-col shadow-2xl border border-app-border">
         <div className="flex items-center justify-between p-5 border-b border-app-border">
           <div>
             <h2 className="text-xl font-bold">Formatting Studio</h2>

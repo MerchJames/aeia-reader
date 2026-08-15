@@ -534,7 +534,7 @@ const MessageContent = React.memo(({
                   <button
                     onClick={(e) => { e.stopPropagation(); onPinContent(msg.id, src, 'markdown'); }}
                     title="Pin this table to the side"
-                    className="absolute top-1 right-1 z-10 p-1.5 rounded-lg bg-surface/95 border border-app-border shadow-sm opacity-0 group-hover/pin:opacity-100 transition-opacity"
+                    className="absolute top-1 right-1 z-10 p-1.5 touch:min-h-10 touch:min-w-10 touch:inline-flex touch:items-center touch:justify-center rounded-lg bg-surface/95 border border-app-border shadow-sm opacity-0 group-hover/pin:opacity-100 transition-opacity"
                   >
                     <PinIcon size={12} />
                   </button>
@@ -560,7 +560,7 @@ const MessageContent = React.memo(({
                       );
                     }}
                     title={isHtml ? 'Pin as a live visual' : 'Pin this block to the side'}
-                    className="absolute top-1.5 right-1.5 z-10 p-1.5 rounded-lg bg-surface/95 border border-app-border shadow-sm opacity-0 group-hover/pin:opacity-100 transition-opacity"
+                    className="absolute top-1.5 right-1.5 z-10 p-1.5 touch:min-h-10 touch:min-w-10 touch:inline-flex touch:items-center touch:justify-center rounded-lg bg-surface/95 border border-app-border shadow-sm opacity-0 group-hover/pin:opacity-100 transition-opacity"
                   >
                     <PinIcon size={12} />
                   </button>
@@ -813,7 +813,7 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
           <button
             onClick={(e) => { e.stopPropagation(); onPinContent(msg.id, displayContent, 'markdown'); }}
             title="Pin this whole message to the side dock"
-            className="float-right ml-2 mt-1 p-1 rounded-full text-app-text/50 hover:text-accent hover:bg-accent/10 opacity-0 group-hover:opacity-100 transition-opacity"
+            className="float-right ml-2 mt-1 p-1 touch:min-h-10 touch:min-w-10 touch:inline-flex touch:items-center touch:justify-center rounded-full text-app-text/50 hover:text-accent hover:bg-accent/10 opacity-0 group-hover:opacity-100 transition-opacity"
           >
             <PinIcon size={12} />
           </button>
@@ -879,7 +879,7 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
                 <button
                   onClick={(e) => { e.stopPropagation(); onLensEdit(msg.id); }}
                   title="Lens edit — have the AI rewrite this message"
-                  className="p-1 rounded-full text-app-text/50 hover:text-accent hover:bg-accent/10 opacity-0 group-hover:opacity-100 transition-opacity"
+                  className="p-1 touch:min-h-10 touch:min-w-10 touch:inline-flex touch:items-center touch:justify-center rounded-full text-app-text/50 hover:text-accent hover:bg-accent/10 opacity-0 group-hover:opacity-100 transition-opacity"
                 >
                   <Wand2 size={12} />
                 </button>
@@ -888,7 +888,7 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
                 <button
                   onClick={(e) => { e.stopPropagation(); onPinContent(msg.id, displayContent, 'markdown'); }}
                   title="Pin this whole message to the side dock"
-                  className="p-1 rounded-full text-app-text/50 hover:text-accent hover:bg-accent/10 opacity-0 group-hover:opacity-100 transition-opacity"
+                  className="p-1 touch:min-h-10 touch:min-w-10 touch:inline-flex touch:items-center touch:justify-center rounded-full text-app-text/50 hover:text-accent hover:bg-accent/10 opacity-0 group-hover:opacity-100 transition-opacity"
                 >
                   <PinIcon size={12} />
                 </button>

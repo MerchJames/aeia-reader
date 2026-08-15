@@ -123,7 +123,7 @@ export const RefineModal = ({ onClose }: { onClose: () => void }) => {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
       onClick={() => { if (!busy) onClose(); }}>
-      <div className="w-full max-w-2xl rounded-2xl bg-app-surface border border-app-text/10 shadow-2xl flex flex-col max-h-[88vh]"
+      <div className="w-full max-w-2xl rounded-2xl bg-app-surface border border-app-text/10 shadow-2xl flex flex-col max-h-[88dvh]"
         onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between px-5 py-4 border-b border-app-text/10">
           <div className="flex items-center gap-2 font-semibold text-app-text">

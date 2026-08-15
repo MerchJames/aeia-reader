@@ -65,8 +65,9 @@ const Row = ({
         </span>
         <button
           onClick={() => storyId && removeEntity(storyId, entity.id)}
-          className="opacity-0 group-hover:opacity-60 hover:!opacity-100 transition-opacity shrink-0"
+          className="opacity-0 group-hover:opacity-60 hover:!opacity-100 transition-opacity shrink-0 flex items-center justify-center min-h-10 min-w-10 rounded"
           title="Remove entry"
+          aria-label="Remove entry"
         >
           <X size={12} />
         </button>
@@ -161,8 +162,9 @@ export const CodexSidebar = () => {
         </div>
         <button
           onClick={() => setOpen(false)}
-          className="ml-auto p-2 rounded-full hover:bg-app-text/10 transition-colors"
+          className="ml-auto flex items-center justify-center min-h-11 min-w-11 rounded-full hover:bg-app-text/10 transition-colors"
           title="Close codex"
+          aria-label="Close codex"
         >
           <X size={16} />
         </button>
@@ -174,7 +176,7 @@ export const CodexSidebar = () => {
             key={kind}
             onClick={() => setTab(kind)}
             className={cn(
-              'flex-1 py-1.5 rounded-md transition-colors font-medium',
+              'flex-1 py-1.5 min-h-10 rounded-md transition-colors font-medium',
               tab === kind ? 'bg-surface shadow-sm text-accent' : 'opacity-60 hover:opacity-100',
             )}
           >
@@ -191,7 +193,7 @@ export const CodexSidebar = () => {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search the codex…"
-          className="w-full pl-8 pr-3 py-1.5 text-sm bg-app-text/5 border border-transparent rounded-full focus:outline-none focus:border-accent/50"
+          className="w-full pl-8 pr-3 min-h-10 text-sm bg-app-text/5 border border-transparent rounded-full focus:outline-none focus:border-accent/50"
         />
       </div>
 
@@ -222,7 +224,8 @@ export const CodexSidebar = () => {
                 </div>
                 <button
                   onClick={() => story && removeAnnotation(story.id, a.id)}
-                  className="opacity-0 group-hover:opacity-60 hover:!opacity-100 p-1 rounded hover:bg-red-500/10 text-red-500 shrink-0"
+                  className="opacity-0 group-hover:opacity-60 hover:!opacity-100 flex items-center justify-center min-h-10 min-w-10 rounded hover:bg-red-500/10 text-red-500 shrink-0"
+                  aria-label="Delete note"
                 >
                   <Trash2 size={12} />
                 </button>
@@ -253,7 +256,7 @@ export const CodexSidebar = () => {
       </div>
 
       <div className="border-t border-app-border p-3 space-y-1 text-xs">
-        <label className="flex items-center gap-2 p-1.5 rounded-lg hover:bg-app-text/5 cursor-pointer">
+        <label className="flex items-center gap-2 p-1.5 min-h-11 rounded-lg hover:bg-app-text/5 cursor-pointer">
           <input
             type="checkbox"
             checked={codexEnabled}
@@ -263,7 +266,7 @@ export const CodexSidebar = () => {
           <BookMarked size={13} className="opacity-70" />
           Build codex while reading
         </label>
-        <label className="flex items-center gap-2 p-1.5 rounded-lg hover:bg-app-text/5 cursor-pointer">
+        <label className="flex items-center gap-2 p-1.5 min-h-11 rounded-lg hover:bg-app-text/5 cursor-pointer">
           <input
             type="checkbox"
             checked={codexHighlight}
@@ -275,7 +278,7 @@ export const CodexSidebar = () => {
         </label>
         <label
           className={cn(
-            'flex items-center gap-2 p-1.5 rounded-lg hover:bg-app-text/5 cursor-pointer',
+            'flex items-center gap-2 p-1.5 min-h-11 rounded-lg hover:bg-app-text/5 cursor-pointer',
             !aiConfigured && 'opacity-50 cursor-not-allowed',
           )}
           title={aiConfigured ? undefined : 'Set an AI endpoint in Settings → AI assistant first'}
@@ -298,7 +301,7 @@ export const CodexSidebar = () => {
               codexToWorldInfo(known),
             )}
             disabled={known.length === 0}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg hover:bg-app-text/5 disabled:opacity-40 transition-colors"
+            className="flex items-center gap-1.5 px-2.5 min-h-10 rounded-lg hover:bg-app-text/5 disabled:opacity-40 transition-colors"
             title="Export as SillyTavern World Info (lorebook) JSON"
           >
             <Download size={13} /> Lorebook
@@ -306,7 +309,7 @@ export const CodexSidebar = () => {
           <button
             onClick={() => clearCodex(story.id)}
             disabled={!allEntities?.length}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg hover:bg-app-text/5 disabled:opacity-40 transition-colors"
+            className="flex items-center gap-1.5 px-2.5 min-h-10 rounded-lg hover:bg-app-text/5 disabled:opacity-40 transition-colors"
             title="Clear and rebuild from the start"
           >
             <Eraser size={13} /> Rebuild

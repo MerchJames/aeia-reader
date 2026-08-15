@@ -1,7 +1,7 @@
 import React from 'react';
 import { useAppStore } from '../store';
 import { cn } from '../utils/cn';
-import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
+import { DndContext, closestCenter, KeyboardSensor, MouseSensor, TouchSensor, useSensor, useSensors } from '@dnd-kit/core';
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { GripVertical, PlayCircle, Settings, Star } from 'lucide-react';
@@ -40,7 +40,12 @@ const SortableChainItem = ({ chain, index }: SortableChainItemProps) => {
       )}
     >
       <div className="flex items-start gap-4">
-        <div {...attributes} {...listeners} className="mt-1 cursor-grab active:cursor-grabbing opacity-50 hover:opacity-100">
+        <div
+          {...attributes}
+          {...listeners}
+          aria-label="Reorder chain"
+          className="mt-1 -ml-1 flex items-center justify-center min-h-11 min-w-11 shrink-0 touch-none cursor-grab active:cursor-grabbing opacity-50 hover:opacity-100"
+        >
           <GripVertical size={20} />
         </div>
 
@@ -52,21 +57,23 @@ const SortableChainItem = ({ chain, index }: SortableChainItemProps) => {
 
             <div className="flex items-center gap-2">
               {chain.starred && (
-                <button onClick={() => setShowSettings(!showSettings)} className="p-1 opacity-50 hover:opacity-100" title="Star settings">
+                <button onClick={() => setShowSettings(!showSettings)} className="flex items-center justify-center min-h-10 min-w-10 opacity-50 hover:opacity-100" title="Star settings" aria-label="Star settings">
                   <Settings size={16} />
                 </button>
               )}
               <button
                 onClick={() => store.toggleStarChain(chain.id)}
                 title="Star this chain"
-                className={cn('p-1 transition-colors', chain.starred ? 'text-yellow-500' : 'opacity-30 hover:opacity-100')}
+                aria-label="Star this chain"
+                className={cn('flex items-center justify-center min-h-10 min-w-10 transition-colors', chain.starred ? 'text-yellow-500' : 'opacity-30 hover:opacity-100')}
               >
                 <Star size={18} fill={chain.starred ? 'currentColor' : 'none'} />
               </button>
               <button
                 onClick={() => store.restreamFromId(chain.messages[0].id)}
                 title="Play from here"
-                className="p-1 opacity-50 hover:opacity-100 text-accent"
+                aria-label="Play from here"
+                className="flex items-center justify-center min-h-10 min-w-10 opacity-50 hover:opacity-100 text-accent"
               >
                 <PlayCircle size={18} />
               </button>
@@ -121,8 +128,14 @@ const SortableChainItem = ({ chain, index }: SortableChainItemProps) => {
 export const OverviewMode = () => {
   const store = useAppStore();
 
+  // A bare PointerSensor begins the drag on the first touch, which means a
+  // finger laid on the handle to SCROLL the list starts reordering instead —
+  // the list becomes unscrollable on a phone. Splitting mouse from touch is
+  // dnd-kit's own answer: the mouse drags after a few pixels of travel, and
+  // touch requires a short press-and-hold, so an ordinary scroll passes through.
   const sensors = useSensors(
-    useSensor(PointerSensor),
+    useSensor(MouseSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 220, tolerance: 8 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 

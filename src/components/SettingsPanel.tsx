@@ -84,7 +84,7 @@ const ExportWithEditsButton = ({ story }: { story: import('../types').Story }) =
         const blob = new Blob([text], { type: 'application/json;charset=utf-8' });
         downloadBlob(`${safeFilename(story.title)}-edited.${ext}`, blob);
       }}
-      className="flex items-center gap-2 p-2 rounded-lg hover:bg-app-text/5 transition-colors text-sm"
+      className="flex items-center gap-2 p-2 min-h-11 rounded-lg hover:bg-app-text/5 transition-colors text-sm"
     >
       <Download size={16} />
       <span>Export with edits applied ({overrides.length})</span>
@@ -117,12 +117,12 @@ const BackdropSection = () => {
           value={keyword}
           onChange={(e) => setKeyword(e.target.value)}
           placeholder="location word… (forest, tavern, default)"
-          className="flex-1 min-w-0 bg-app-text/5 border border-app-border rounded-md px-2 py-1.5 outline-none focus:border-accent/50"
+          className="flex-1 min-w-0 bg-app-text/5 border border-app-border rounded-md px-2 min-h-10 outline-none focus:border-accent/50"
         />
         <button
           onClick={() => { if (keyword.trim()) fileRef.current?.click(); }}
           disabled={!keyword.trim()}
-          className="px-2.5 py-1.5 rounded-md bg-accent/15 text-accent font-medium hover:bg-accent/25 disabled:opacity-40"
+          className="px-2.5 min-h-10 rounded-md bg-accent/15 text-accent font-medium hover:bg-accent/25 disabled:opacity-40"
         >
           Upload
         </button>
@@ -202,6 +202,7 @@ const ExpressionStrip = ({ character, spriteKey }: { character: string; spriteKe
               onContextMenu={(e) => { e.preventDefault(); if (sprite) void removeSprite(sprite.id); }}
               className={cn(
                 'w-6 h-6 rounded-md overflow-hidden border flex items-center justify-center text-[8px]',
+                'relative before:absolute before:-inset-1.5 before:content-[\'\']',
                 sprite ? 'border-accent/60' : 'border-app-border border-dashed opacity-50 hover:opacity-100',
               )}
             >
@@ -260,7 +261,7 @@ const Advanced = ({
     <div className="rounded-lg border border-app-border/60">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center justify-between px-2 py-1.5 text-[11px] text-muted hover:text-app-text transition-colors"
+        className="w-full flex items-center justify-between px-2 min-h-10 text-[11px] text-muted hover:text-app-text transition-colors"
       >
         <span className="uppercase tracking-wide">{label}</span>
         <ChevronDown size={13} className={cn('transition-transform', expanded && 'rotate-180')} />
@@ -289,7 +290,7 @@ const ReadingModeSection = () => {
             data-testid={`reading-mode-${def.mode}`}
             aria-pressed={mode === def.mode}
             className={cn(
-              'py-1.5 text-xs rounded-md border transition-colors',
+              'py-1.5 min-h-11 text-xs rounded-md border transition-colors',
               mode === def.mode
                 ? 'border-accent bg-accent/10 text-accent font-bold'
                 : 'border-transparent bg-app-text/5 hover:bg-app-text/10',
@@ -329,7 +330,7 @@ const Toggle = ({
     aria-pressed={value}
     data-testid={testId}
     className={cn(
-      'flex items-center justify-between p-2 rounded-lg hover:bg-app-text/5 transition-colors text-sm text-left',
+      'flex items-center justify-between gap-2 p-2 min-h-11 rounded-lg hover:bg-app-text/5 transition-colors text-sm text-left',
       accent && 'font-bold text-amber-600 dark:text-amber-400 bg-amber-500/10',
     )}
   >
@@ -365,7 +366,7 @@ const SelectRow = ({
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className="flex-1 bg-app-text/5 border border-app-border rounded-md px-2 py-1.5 outline-none min-w-0"
+      className="flex-1 bg-app-text/5 border border-app-border rounded-md px-2 min-h-10 outline-none min-w-0"
     >
       {options.map(o => (
         <option key={o.value} value={o.value} className="text-black bg-white">
@@ -428,7 +429,7 @@ const KokoroSettings = () => {
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="flex-1 bg-app-text/5 border border-app-border rounded-md px-2 py-1.5 outline-none min-w-0"
+        className="flex-1 bg-app-text/5 border border-app-border rounded-md px-2 min-h-10 outline-none min-w-0"
       >
         {voiceOptions(defaultLabel).map(o => (
           <option key={o.value || 'default'} value={o.value} className="text-black bg-white">{o.label}</option>
@@ -552,7 +553,7 @@ const AmbientSettings = () => {
         <select
           value={selectValue}
           onChange={(e) => onSelect(e.target.value)}
-          className="flex-1 bg-app-text/5 border border-app-border rounded-md px-2 py-1.5 outline-none min-w-0"
+          className="flex-1 bg-app-text/5 border border-app-border rounded-md px-2 min-h-10 outline-none min-w-0"
         >
           <option value="none" className="text-black bg-white">None (silent)</option>
           {AMBIENT_SOUNDS.map(s => (
@@ -793,7 +794,7 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
           <button
             onClick={close}
             aria-label="Close settings"
-            className="p-2 rounded-full hover:bg-app-text/10 transition-colors"
+            className="flex items-center justify-center min-h-11 min-w-11 rounded-full hover:bg-app-text/10 transition-colors"
           >
             <X size={18} />
           </button>
@@ -841,6 +842,7 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
                     onClick={() => store.setAccentColor(a.id)}
                     className={cn(
                       'w-6 h-6 rounded-full border transition-transform hover:scale-110',
+                      'relative before:absolute before:-inset-2 before:content-[\'\']',
                       store.accentColor === a.id ? 'ring-2 ring-offset-2 ring-offset-surface ring-app-text scale-110' : 'border-app-border',
                     )}
                     style={a.hex
@@ -883,7 +885,7 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
               />
               <button
                 onClick={() => fontInputRef.current?.click()}
-                className="self-start flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg border border-app-border hover:bg-app-text/5 transition-colors"
+                className="self-start flex items-center gap-1.5 text-xs px-2.5 min-h-11 rounded-lg border border-app-border hover:bg-app-text/5 transition-colors"
               >
                 <Type size={13} /> Upload font (.ttf/.otf/.woff)
               </button>
@@ -898,8 +900,9 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
                           if (store.fontFamily === `custom:${f.id}`) store.setFontFamily('theme');
                           void removeFont(f.id);
                         }}
-                        className="p-1 rounded hover:bg-red-500/10 text-muted hover:text-red-500 transition-colors shrink-0"
+                        className="flex items-center justify-center min-h-10 min-w-10 rounded hover:bg-red-500/10 text-muted hover:text-red-500 transition-colors shrink-0"
                         title={`Remove ${f.name}`}
+                        aria-label={`Remove ${f.name}`}
                       >
                         <Trash2 size={13} />
                       </button>
@@ -913,14 +916,16 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
               <div className="flex items-center gap-3">
                 <button
                   onClick={() => store.setFontSize(Math.max(12, store.fontSize - 1))}
-                  className="w-6 h-6 rounded hover:bg-app-text/10"
+                  aria-label="Smaller text"
+                  className="flex items-center justify-center min-h-10 min-w-10 rounded hover:bg-app-text/10"
                 >
                   −
                 </button>
                 <span className="font-mono w-6 text-center">{store.fontSize}</span>
                 <button
                   onClick={() => store.setFontSize(Math.min(32, store.fontSize + 1))}
-                  className="w-6 h-6 rounded hover:bg-app-text/10"
+                  aria-label="Larger text"
+                  className="flex items-center justify-center min-h-10 min-w-10 rounded hover:bg-app-text/10"
                 >
                   +
                 </button>
@@ -974,7 +979,7 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
                   key={style}
                   onClick={() => store.setAnimationStyle(style)}
                   className={cn(
-                    'py-1.5 text-xs rounded-md border capitalize transition-colors',
+                    'py-1.5 min-h-11 text-xs rounded-md border capitalize transition-colors',
                     store.animationStyle === style
                       ? 'border-accent bg-accent/10 text-accent font-bold'
                       : 'border-transparent bg-app-text/5 hover:bg-app-text/10',
@@ -997,7 +1002,7 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
                       key={effect}
                       onClick={() => store.setStreamEffect(effect)}
                       className={cn(
-                        'py-1.5 text-xs rounded-md border capitalize transition-colors',
+                        'py-1.5 min-h-11 text-xs rounded-md border capitalize transition-colors',
                         store.streamEffect === effect
                           ? 'border-accent bg-accent/10 text-accent font-bold'
                           : 'border-transparent bg-app-text/5 hover:bg-app-text/10',
@@ -1035,7 +1040,7 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
                           key={level}
                           onClick={() => store.setExpressiveIntensity(level)}
                           className={cn(
-                            'py-1.5 text-xs rounded-md border capitalize transition-colors',
+                            'py-1.5 min-h-11 text-xs rounded-md border capitalize transition-colors',
                             store.expressiveIntensity === level
                               ? 'border-accent bg-accent/10 text-accent font-bold'
                               : 'border-transparent bg-app-text/5 hover:bg-app-text/10',
@@ -1140,7 +1145,7 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
                     key={mode}
                     onClick={() => store.setRevealMode(mode)}
                     className={cn(
-                      'flex-1 py-1 text-xs rounded-md transition-colors',
+                      'flex-1 py-1 min-h-10 text-xs rounded-md transition-colors',
                       store.revealMode === mode
                         ? 'bg-surface shadow-sm text-accent font-bold'
                         : 'opacity-60 hover:opacity-100',
@@ -1567,7 +1572,7 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
                 placeholder="Config name…"
                 value={configName}
                 onChange={(e) => setConfigName(e.target.value)}
-                className="flex-1 bg-app-text/5 border border-app-border rounded-md px-2 py-1.5 text-sm outline-none min-w-0"
+                className="flex-1 bg-app-text/5 border border-app-border rounded-md px-2 min-h-10 text-sm outline-none min-w-0"
               />
               <button
                 onClick={() => {
@@ -1577,7 +1582,8 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
                   }
                 }}
                 title="Save current settings"
-                className="p-2 bg-accent text-white rounded-md hover:opacity-90"
+                aria-label="Save current settings"
+                className="flex items-center justify-center min-h-10 min-w-11 bg-accent text-white rounded-md hover:opacity-90"
               >
                 <Save size={16} />
               </button>
@@ -1607,7 +1613,7 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
                   const story = store.currentStory!;
                   downloadText(`${safeFilename(story.title)}.md`, storyToMarkdown(story));
                 }}
-                className="flex items-center gap-2 p-2 rounded-lg hover:bg-app-text/5 transition-colors text-sm"
+                className="flex items-center gap-2 p-2 min-h-11 rounded-lg hover:bg-app-text/5 transition-colors text-sm"
               >
                 <Download size={16} />
                 <span>Export story as Markdown</span>

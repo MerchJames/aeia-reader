@@ -131,7 +131,7 @@ export const ContextZoneBuilder = ({
   return (
     <div className="fixed inset-0 z-[80] flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/50 backdrop-blur-[3px]" onClick={() => close(false)} />
-      <div className="relative w-full max-w-2xl h-[min(80vh,680px)] flex flex-col rounded-2xl bg-surface border border-app-border shadow-2xl overflow-hidden">
+      <div className="relative w-full max-w-2xl h-[min(80dvh,680px)] flex flex-col rounded-2xl bg-surface border border-app-border shadow-2xl overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-3.5 border-b border-app-border bg-app-text/5">
           <div className="flex items-center gap-2 font-bold text-sm">

@@ -46,9 +46,11 @@ export const PlaybackControls = () => {
   if (store.controlsMinimized) {
     return (
       <div
-        className="fixed bottom-6 left-6 z-40 p-2.5 rounded-full shadow-lg border border-app-border bg-surface/90 backdrop-blur-md cursor-pointer hover:scale-105 transition-transform"
+        className="fixed bottom-safe left-6 z-40 flex items-center justify-center min-h-11 min-w-11 rounded-full shadow-lg border border-app-border bg-surface/90 backdrop-blur-md cursor-pointer hover:scale-105 transition-transform"
         onClick={() => store.setControlsMinimized(false)}
         title="Restore controls"
+        role="button"
+        aria-label="Restore controls"
       >
         <Maximize2 size={20} />
       </div>
@@ -56,20 +58,25 @@ export const PlaybackControls = () => {
   }
 
   return (
-    <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 flex flex-col items-center gap-2 p-3 rounded-2xl shadow-xl border border-app-border bg-surface/90 backdrop-blur-md w-[min(420px,90vw)]">
+    <div
+      data-testid="playback-bar"
+      className="fixed bottom-safe left-1/2 -translate-x-1/2 z-40 flex flex-col items-center gap-2 p-3 rounded-2xl shadow-xl border border-app-border bg-surface/90 backdrop-blur-md w-[min(420px,90vw)]"
+    >
       <button
         onClick={() => store.setControlsMinimized(true)}
-        className="absolute top-2 right-2 p-1 opacity-50 hover:opacity-100 rounded-full transition-colors"
+        className="absolute top-0.5 right-0.5 min-h-10 min-w-10 flex items-center justify-center opacity-50 hover:opacity-100 rounded-full transition-colors"
         title="Minimize"
+        aria-label="Minimize controls"
       >
         <Minimize2 size={14} />
       </button>
 
-      <div className="flex items-center gap-4 px-6 pt-1">
+      <div className="flex items-center gap-2 sm:gap-4 px-2 sm:px-6 pt-1">
         <button
           onClick={() => store.resetPlayback()}
-          className="p-2 hover:bg-app-text/10 rounded-full transition-colors"
+          className="p-2 min-h-11 min-w-11 flex items-center justify-center hover:bg-app-text/10 rounded-full transition-colors"
           title="Restart"
+          aria-label="Restart"
         >
           <RotateCcw size={20} />
         </button>
@@ -89,8 +96,9 @@ export const PlaybackControls = () => {
 
         <button
           onClick={() => store.fastForward()}
-          className="p-2 hover:bg-app-text/10 rounded-full transition-colors"
+          className="p-2 min-h-11 min-w-11 flex items-center justify-center hover:bg-app-text/10 rounded-full transition-colors"
           title="Show everything instantly"
+          aria-label="Show everything instantly"
         >
           <FastForward size={20} />
         </button>
@@ -99,20 +107,29 @@ export const PlaybackControls = () => {
           <button
             onClick={() => store.setTtsEnabled(!store.ttsEnabled)}
             className={cn(
-              'p-2 rounded-full transition-colors',
+              'p-2 min-h-11 min-w-11 flex items-center justify-center rounded-full transition-colors',
               store.ttsEnabled ? 'text-accent bg-accent/10' : 'opacity-60 hover:opacity-100 hover:bg-app-text/10',
             )}
             title={store.ttsEnabled ? 'Read aloud: on' : 'Read aloud: off'}
+            aria-label={store.ttsEnabled ? 'Read aloud: on' : 'Read aloud: off'}
           >
             {store.ttsEnabled ? <Volume2 size={20} /> : <VolumeX size={20} />}
           </button>
         )}
       </div>
 
+      {/* The visible bar stays thin, but the thing you PRESS is the padded
+        * wrapper — a 6px target is unhittable with a thumb, and the
+        * grow-on-hover that made it easier does not exist on a touch screen. */}
       <div
-        className="w-full px-2 group cursor-pointer"
+        className="w-full px-2 py-2 -my-1 group cursor-pointer touch-manipulation"
         onClick={scrubTo}
         title="Jump to position"
+        role="slider"
+        aria-label="Jump to position"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(progress * 100)}
       >
         <div className="h-1.5 rounded-full bg-app-text/10 overflow-hidden group-hover:h-2.5 transition-all">
           <div
