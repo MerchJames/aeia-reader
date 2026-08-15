@@ -47,6 +47,75 @@ body {
   color: var(--app-text, #e2e8f0);
 }
 
+/* --- Mobile ---------------------------------------------------------- */
+
+/* `touch:` — styles that apply on a device with no mouse, whatever its width.
+   Distinct from `sm:`/`md:`, which are about how much ROOM there is: a landscape
+   phone and a tablet are wide enough for the desktop layout and still have only
+   a thumb to hit it with, so sizing keys off this and layout keys off width. */
+@custom-variant touch (@media (hover: none) and (pointer: coarse));
+
+/* A bar that scrolls sideways under a thumb should not also show a scrollbar
+   track — on a phone it is pure noise, and on desktop this class is unused. */
+@utility no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  &::-webkit-scrollbar { display: none; }
+}
+
+/* Keep the fixed furniture clear of the home indicator / gesture bar. Resolves
+   to 0px on anything without safe-area insets, so it is inert on desktop. */
+@utility pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+@utility bottom-safe {
+  bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px));
+}
+
+/* Touch devices: stop iOS inflating text in landscape, and kill the grey tap
+   flash on our own controls, which reads as a rendering glitch over themes. */
+@media (hover: none) and (pointer: coarse) {
+  html { -webkit-text-size-adjust: 100%; }
+  button, [role="button"], a { -webkit-tap-highlight-color: transparent; }
+
+  /* Reveal-on-hover controls — pin, edit, delete — on devices that cannot
+     hover. `opacity: 0` does NOT stop an element receiving taps, so on a
+     phone these were invisible but still live: you could delete a sheet or a
+     saved style by brushing where its X happened to be, and you could never
+     find one on purpose.
+
+     Matched by the class attribute rather than per-component: the pattern is
+     `opacity-0 group-hover/*:opacity-*` in seventeen places across six files,
+     and Tailwind ships no coarse-pointer variant. If the pattern is ever
+     renamed this rule stops matching and the controls go back to being
+     hidden — a quiet failure, not a broken layout. */
+  [class*="opacity-0"][class*="group-hover"] {
+    opacity: 0.6;
+  }
+
+  /* Native checkboxes render at 13px. They almost always sit inside a label
+     that is the real target, but aiming at the box itself should still work. */
+  input[type="checkbox"], input[type="radio"] {
+    width: 1.15rem;
+    height: 1.15rem;
+  }
+
+  /* Range inputs — playback speed, volumes — ship a ~16px track. Give the
+     thumb something a finger can actually catch without changing the visual
+     track height. */
+  input[type="range"] {
+    height: 2.5rem;
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    width: 1.25rem;
+    height: 1.25rem;
+  }
+  input[type="range"]::-moz-range-thumb {
+    width: 1.25rem;
+    height: 1.25rem;
+  }
+}
+
 /* --- Theme decorations ---------------------------------------------- */
 
 .theme-notebook .reader-page {
@@ -1604,6 +1673,24 @@ body {
 .book-nav-r { right: -44px; }
 .book-single .book-nav-l { left: -38px; }
 .book-single .book-nav-r { right: -38px; }
+
+/* A phone has no outer margin to hang the page-turns in, so they come inside
+   the page and grow to a thumb-sized target. Sitting outside was what widened
+   the document to 417px on a 390px screen.
+
+   Keyed on the pointer as well as the width: a landscape phone is 844px wide
+   and still has no mouse, so it wants the same treatment. */
+@media (max-width: 639px), (hover: none) and (pointer: coarse) {
+  .book-nav,
+  .book-single .book-nav {
+    padding: 14px 10px;
+    opacity: 0.5;
+    background: color-mix(in srgb, var(--app-surface) 70%, transparent);
+    backdrop-filter: blur(4px);
+  }
+  .book-nav-l, .book-single .book-nav-l { left: 2px; }
+  .book-nav-r, .book-single .book-nav-r { right: 2px; }
+}
 
 /* Magical ink: freshly streamed words condense out of thin air. */
 .book-ink {

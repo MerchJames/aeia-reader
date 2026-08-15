@@ -100,7 +100,11 @@ export default function App() {
   return (
     <div
       className={cn(
-        'h-screen flex flex-col bg-app-bg text-app-text transition-colors duration-500',
+        // h-dvh, not h-screen: on mobile browsers 100vh is the viewport with the
+        // URL bar RETRACTED, so the bottom of the app — where the playback bar
+        // lives — sits under the browser chrome until you scroll. dvh tracks the
+        // visible viewport. Falls back to vh on anything that lacks it.
+        'h-dvh flex flex-col bg-app-bg text-app-text transition-colors duration-500',
         customFamily ? 'font-sans' : (FONT_CLASS[effectiveFont] ?? 'font-sans'),
         // Marks "reader follows the theme" — lets themes with a strong
         // identity (pixel faces) apply their own without fighting a choice.
