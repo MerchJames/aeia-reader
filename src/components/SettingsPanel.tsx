@@ -1,13 +1,14 @@
 import React, { useMemo, useRef, useState } from 'react';
 import {
   AlignLeft, ChevronDown, Clapperboard, Download, FileText, Focus, ImageIcon, LayoutTemplate, Loader2, MessageSquareQuote,
-  MessageCircle, Music2, PauseCircle, Play, PlayCircle, Quote, RefreshCw, Save, Sparkles, Square, Terminal, Trash2, Type,
-  UserRound, Volume2, Wand2, X, Zap, ZoomIn,
+  Headphones, MessageCircle, Music2, PauseCircle, Play, PlayCircle, Quote, RefreshCw, Save, Sparkles, Square, Terminal, Trash2, Type,
+  Pause, Popcorn, UserRound, Volume2, Wand2, X, Zap, ZoomIn,
 } from 'lucide-react';
+import { castOf } from '../utils/askCharacter';
 import { useAppStore } from '../store';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { useSceneDirectorStore } from '../stores/useSceneDirectorStore';
-import { useFontStore } from '../stores/useFontStore';
+import { customFamilyFor, useFontStore } from '../stores/useFontStore';
 import { useSpriteStore } from '../stores/useSpriteStore';
 import { useBackdropStore } from '../stores/useBackdropStore';
 import { EMOTION_BUCKETS, EmotionBucket } from '../lib/spriteStorage';
@@ -19,6 +20,16 @@ import { ACCENTS, THEMES } from '../themes';
 import {
   downloadBlob, downloadText, exportStoryWithEdits, safeFilename, storyToMarkdown,
 } from '../utils/exporter';
+import { exportStoryHtml } from '../utils/htmlExport';
+import { embedFontsFor, resolveExportFont } from '../utils/fontEmbed';
+import { AudiobookModal } from './AudiobookModal';
+import { AudioLibraryModal } from './AudioLibraryModal';
+import { ServiceDot, ServicesSection } from './ServiceStatus';
+import { SceneImageSettings } from './SceneImageSettings';
+import { useService } from '../services/useService';
+import { attachSceneArt, walkStory } from '../utils/storyWalk';
+import { artDataUri } from '../lib/artStorage';
+import { resolveTheme, accentHex } from '../themes';
 import { cn } from '../utils/cn';
 import { READING_MODE_DEFS, modeDef, modeDiff, modeMatches } from '../utils/readingModes';
 
@@ -89,6 +100,162 @@ const ExportWithEditsButton = ({ story }: { story: import('../types').Story }) =
       <Download size={16} />
       <span>Export with edits applied ({overrides.length})</span>
     </button>
+  );
+};
+
+/** Opens the audiobook renderer for the current story. */
+const AudiobookButton = () => {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button
+        onClick={() => setOpen(true)}
+        data-testid="open-audiobook"
+        className="flex items-center gap-2 p-2 min-h-11 rounded-lg hover:bg-app-text/5 transition-colors text-sm"
+      >
+        <Headphones size={16} />
+        <span>Render as an audiobook (.mp3)</span>
+      </button>
+      {open && <AudiobookModal onClose={() => setOpen(false)} />}
+    </>
+  );
+};
+
+/**
+ * Opens the generated-sound library. The clips were searchable by the Director
+ * and invisible to the reader — no way to hear what you had, or throw away a
+ * miss, or ask for one thing in particular.
+ */
+const AudioLibraryButton = () => {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button
+        onClick={() => setOpen(true)}
+        data-testid="open-audio-library"
+        className="flex items-center gap-2 p-2 min-h-11 rounded-lg hover:bg-app-text/5 transition-colors text-sm"
+      >
+        <Music2 size={16} />
+        <span>Browse the sound library…</span>
+        <ServiceDot id="audio" />
+      </button>
+      {open && <AudioLibraryModal onClose={() => setOpen(false)} />}
+    </>
+  );
+};
+
+/**
+ * Export the story as one self-contained HTML page.
+ *
+ * Everything the reader configured comes along — theme, accent, the Lens layer,
+ * name substitution, their highlights, and the Director's per-scene mood — so
+ * the file reads the way the app does. It is the one export that is meant to be
+ * handed to somebody else, which is why it embeds rather than links: a file
+ * that fetches anything when opened is a file that leaks who opened it.
+ */
+const ExportAsPageButton = () => {
+  const store = useAppStore();
+  const v2 = useAuraV2Store();
+  const customFonts = useFontStore(f => f.fonts);
+  const [note, setNote] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const story = store.currentStory;
+  if (!story) return null;
+
+  const run = async () => {
+    setBusy(true);
+    setNote(null);
+    try {
+      const themeDef = resolveTheme(store.theme, store.bgColor, store.textColor);
+      const font = resolveExportFont(
+        store.theme,
+        themeDef.font,
+        store.fontFamily,
+        customFamilyFor(store.fontFamily, customFonts),
+      );
+      // Fetched once, HERE — the export may use the network; the exported file
+      // never may. A failure drops back to the stack rather than failing.
+      const walked = await attachSceneArt(
+        walkStory(story, store.chains, {
+          overrides: v2.overridesByStory[story.id],
+          lensOn: !!v2.lensOnByStory[story.id],
+          hideMetadata: store.hideMetadata,
+          substituteNames: store.substituteNames,
+          oocHandling: store.oocHandling,
+          smartTypography: store.smartTypography,
+        }),
+        v2.artByStory[story.id],
+        artDataUri,
+      );
+      // The story's own text decides which character subsets are worth
+      // embedding — a Latin chat has no use for the Cyrillic ones.
+      // A bounded sample: enough prose to see every alphabet the story uses,
+      // without building a second copy of the whole thing in memory.
+      let sample = story.title;
+      for (const m of walked.messages) {
+        sample += ` ${m.name} ${m.text}`;
+        if (sample.length > 200_000) break;
+      }
+      const fonts = await embedFontsFor(font, sample);
+
+      const { html, droppedImages } = exportStoryHtml(walked, {
+        theme: themeDef,
+        accent: accentHex(store.accentColor) || undefined,
+        typography: {
+          stack: font.stack,
+          fontSize: store.fontSize,
+          contentWidth: store.contentWidth,
+          paragraphSpacing: store.paragraphSpacing,
+          faceCss: fonts.css,
+        },
+        // Opens in whichever reading layout you are in; the page can switch.
+        layout: store.viewMode === 'chat' ? 'chat' : 'storybook',
+        scenes: v2.sceneByStory[story.id],
+        // The reader's own marking of the page travels with it.
+        readerMarks: {
+          emphasis: v2.emphasisMarksByStory[story.id],
+          sfx: v2.sfxMarksByStory[story.id],
+          perform: v2.performMarksByStory[story.id],
+        },
+        highlights: story.highlights,
+        sceneMood: store.sceneTheming,
+        streaming: true,
+      });
+
+      downloadBlob(
+        `${safeFilename(story.title)}.html`,
+        new Blob([html], { type: 'text/html;charset=utf-8' }),
+      );
+
+      const bits = [
+        fonts.faces > 0 ? `${fonts.faces} font file${fonts.faces === 1 ? '' : 's'} embedded` : null,
+        fonts.incomplete ? 'some fonts could not be fetched, so the page falls back to a similar face' : null,
+        droppedImages > 0 ? `${droppedImages} linked image${droppedImages === 1 ? '' : 's'} left out` : null,
+      ].filter(Boolean);
+      setNote(bits.length
+        ? `Exported — ${bits.join('; ')}.`
+        : 'Exported — one file, nothing loaded from the network.');
+    } catch (e) {
+      setNote(`Export failed: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <button
+        onClick={() => void run()}
+        disabled={busy}
+        data-testid="export-html"
+        className="flex items-center gap-2 p-2 min-h-11 rounded-lg hover:bg-app-text/5 transition-colors text-sm disabled:opacity-50"
+      >
+        {busy ? <Loader2 size={16} className="animate-spin" /> : <FileText size={16} />}
+        <span>{busy ? 'Embedding fonts…' : 'Export as a readable page (.html)'}</span>
+      </button>
+      {note && <p className="text-[11px] text-muted px-2 leading-snug">{note}</p>}
+    </>
   );
 };
 
@@ -448,7 +615,9 @@ const KokoroSettings = () => {
   return (
     <div className="ml-1 pl-3 border-l border-app-border flex flex-col gap-2">
       <label className="block">
-        <span className="text-xs font-bold uppercase tracking-wider text-muted">Kokoro server URL</span>
+        <span className="text-xs font-bold uppercase tracking-wider text-muted flex items-center gap-1.5">
+          Kokoro server URL <ServiceDot id="kokoro" />
+        </span>
         <input
           type="text"
           value={store.kokoroBaseUrl}
@@ -597,6 +766,109 @@ const AmbientSettings = () => {
 };
 
 /**
+ * Live Reaction — reading with someone beside you.
+ *
+ * Sits under Ask Character because it is the same idea inverted: there you ask
+ * and they answer, here they speak and you read. Everything about the boundary
+ * is the same — anchored, clamped, reader-only, never canon.
+ *
+ * The two knobs that are not obvious both get a line of their own, because they
+ * change what the feature IS rather than how loud it is: how much of the
+ * passage they can see when they speak, and whether the page waits for them.
+ */
+const LiveReactionControls = () => {
+  const storyId = useAppStore(s => s.currentStory?.id);
+  const story = useAppStore(s => s.currentStory);
+  const chains = useAppStore(s => s.chains);
+  const on = useAppStore(s => s.liveReaction);
+  const setOn = useAppStore(s => s.setLiveReaction);
+  const reactor = useAppStore(s => s.liveReactor);
+  const setReactor = useAppStore(s => s.setLiveReactor);
+  const visibility = useAppStore(s => s.liveReactionVisibility);
+  const setVisibility = useAppStore(s => s.setLiveReactionVisibility);
+  const freeze = useAppStore(s => s.liveReactionFreeze);
+  const setFreeze = useAppStore(s => s.setLiveReactionFreeze);
+  const frame = useAppStore(s => s.liveReactionFrame);
+  const setFrame = useAppStore(s => s.setLiveReactionFrame);
+  const visitors = useAuraV2Store(s => (storyId ? s.visitorsByStory[storyId] : undefined));
+
+  // Everyone who could watch with you: the cast, plus anyone brought in.
+  const who = useMemo(() => {
+    const cast = castOf(chains.flatMap(c => c.messages), story?.userName);
+    const guests = (visitors ?? []).map(v => v.name);
+    return [...new Set([...cast, ...guests])];
+  }, [chains, story?.userName, visitors]);
+
+  const field = 'w-full bg-app-text/5 border border-app-border rounded-md px-2 py-1.5 '
+    + 'text-xs outline-none focus:border-accent/50 min-h-9';
+
+  return (
+    <>
+      <Toggle
+        icon={<Popcorn size={16} />}
+        label="Read with someone (AI)"
+        hint="They watch it with you and react as it lands — one or two lines, in their voice. Nothing they say becomes part of the story."
+        value={on}
+        onChange={setOn}
+        testId="live-reaction-toggle"
+      />
+      {on && (
+        <div className="flex flex-col gap-1.5 px-2 pb-1">
+          <label className="text-[11px] text-muted">Who is watching</label>
+          <select
+            className={field}
+            value={reactor}
+            onChange={(e) => setReactor(e.target.value)}
+            data-testid="live-reactor"
+          >
+            <option value="">{story?.characterName || 'The character'}</option>
+            {who.map(n => <option key={n} value={n}>{n}</option>)}
+          </select>
+
+          <label className="text-[11px] text-muted mt-1">How much they can see</label>
+          <select
+            className={field}
+            value={visibility}
+            onChange={(e) => setVisibility(e.target.value as 'upTo' | 'whole')}
+            data-testid="live-visibility"
+          >
+            <option value="upTo">Only what you've uncovered</option>
+            <option value="whole">The whole passage</option>
+          </select>
+
+          <select
+            className={field}
+            value={frame}
+            onChange={(e) => setFrame(e.target.value as 'room' | 'phone')}
+          >
+            <option value="room">Beside you</option>
+            <option value="phone">On the phone</option>
+          </select>
+
+          <Toggle
+            icon={<Pause size={16} />}
+            label="Wait for them"
+            value={freeze}
+            onChange={setFreeze}
+          />
+          <span className="text-[11px] text-muted leading-snug">
+            The AI first picks the moments <b>this</b> person would break in on — no
+            two companions stop at the same words — then speaks when the reveal
+            reaches one, so the reaction lands mid-sentence instead of arriving
+            at the end like a review. Moments and lines are cached per passage,
+            so re-reading replays them rather than asking again. “Only what
+            you've uncovered” is the point of it: they don't know how the
+            sentence ends either. Show them the whole passage and the reaction
+            comes back knowing. Off by default, they stay quiet on most passages,
+            and none of it reaches the story, the Lens, or an export.
+          </span>
+        </div>
+      )}
+    </>
+  );
+};
+
+/**
  * Scene Director controls (per open story). Hybrid pass: while enabled it
  * auto-reads the current page (see useSceneDirector); "Enrich all" reads the
  * rest on demand. Descriptors cache + invalidate by content hash, so edited
@@ -606,6 +878,9 @@ const SceneDirectorSection = () => {
   const storyId = useAppStore(s => s.currentStory?.id);
   const chains = useAppStore(s => s.chains);
   const aiReady = useAppStore(s => !!s.aiBaseUrl && !!s.aiModel);
+  const aiBase = useAppStore(s => s.aiBaseUrl);
+  const ai = useService('ai', aiBase);
+  const aiDown = ai.state === 'down' ? ai.blockedReason : null;
   const enabled = useAuraV2Store(s => (storyId ? !!s.directorEnabledByStory[storyId] : false));
   const setDirectorEnabled = useAuraV2Store(s => s.setDirectorEnabled);
   const sceneCache = useAuraV2Store(s => (storyId ? s.sceneByStory[storyId] : undefined));
@@ -654,6 +929,15 @@ const SceneDirectorSection = () => {
         </span>
       ) : (
         <>
+          {/* Configured is not the same question as answering. Enablement still
+            * keys off config — a probe that is slow or flaps must never make a
+            * button disappear under the reader's cursor — but a dead endpoint
+            * says so here instead of failing silently on the first run. */}
+          {aiDown && (
+            <span className="text-[11px] text-amber-400/90 px-2" data-testid="ai-endpoint-down">
+              {aiDown}
+            </span>
+          )}
           <div className="flex items-center justify-between text-xs px-2">
             <span className="opacity-70">
               {running
@@ -741,6 +1025,7 @@ const SceneDirectorSection = () => {
             onChange={setAskCharacter}
             testId="ask-character-toggle"
           />
+          <LiveReactionControls />
           <span className="text-[11px] text-muted">
             The Director reads each passage's mood, location, and feeling so the
             reader can adapt to the scene. The current page reads automatically;
@@ -1286,7 +1571,9 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
             />
             {store.audioCuesEnabled && (
               <div className="flex flex-col gap-1.5 pl-1">
-                <label className="text-xs text-muted">Audio service URL</label>
+                <label className="text-xs text-muted flex items-center gap-1.5">
+                  Audio service URL <ServiceDot id="audio" />
+                </label>
                 <input
                   type="text"
                   value={store.audioBaseUrl}
@@ -1300,6 +1587,7 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
                   scenes, and while reading the scene ambience bed is drawn from the generated library
                   (reused when it fits). Off → scenes use built-in procedural sounds. The reader works either way.
                 </p>
+                <AudioLibraryButton />
                 <Toggle
                   icon={<Sparkles size={16} />}
                   label="Offer to generate scene audio"
@@ -1565,6 +1853,14 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
             </Section>
           )}
 
+          <Section title="Scene images">
+            <SceneImageSettings />
+          </Section>
+
+          <Section title="Services">
+            <ServicesSection />
+          </Section>
+
           <Section title="Saved Configurations">
             <div className="flex gap-2">
               <input
@@ -1618,6 +1914,8 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
                 <Download size={16} />
                 <span>Export story as Markdown</span>
               </button>
+              <ExportAsPageButton />
+              <AudiobookButton />
               <ExportWithEditsButton story={store.currentStory} />
             </Section>
           )}

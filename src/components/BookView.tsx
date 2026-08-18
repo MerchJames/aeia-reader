@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { useAppStore } from '../store';
+import { emphasisWordKinds, markSceneHtml, readerEmphasis } from '../utils/performMarkup';
+import { RunMatcher, mergePerformCues, performMatcher, performWordKinds } from '../utils/scenePerform';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { resolveContent } from '../utils/lens';
 import { useScenes } from '../hooks/useScenes';
@@ -134,6 +136,52 @@ export const BookView = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [store.chains, store.currentChainIndex, store.currentMessageIndex, !!store.streamingMessage]);
 
+  /**
+   * The Director's performance cues, per message.
+   *
+   * Marked HERE rather than at render: a page is paginated from many messages,
+   * so by the time `renderBody` sees it the words have lost the message they
+   * came from — and a cue on one passage would mark words in another. At this
+   * point identity is still known, and the marked spans survive pagination
+   * because pagination only measures and splits blocks, never rewrites them.
+   */
+  /** See markSceneHtml: a cue animates once per word, not once per reveal tick. */
+  const livePlayed = useRef<{ key: string; set: Set<string> }>({ key: '', set: new Set() });
+
+  /** The word map AND this message's cadence matcher — see performMatcher. */
+  const performFor = (messageId: string): { kinds: ReturnType<typeof performWordKinds>; match?: RunMatcher } => {
+    if (!store.scenePerformance || !storyId) return { kinds: null };
+    const cues = mergePerformCues(
+      v2.performMarksByStory[storyId]?.[messageId],
+      v2.sceneByStory[storyId]?.[messageId]?.perform,
+    );
+    return { kinds: performWordKinds(cues), match: performMatcher(cues) };
+  };
+
+  /**
+   * The Director's EMPHASIS cues, per message — shouts, whispers, sfx marks.
+   *
+   * Book had the performance track and not this one. Storybook, Chat, Stage and
+   * VN all dress emphasised words; Book alone left them plain, which made the
+   * same reading mode look like a different feature depending on which view you
+   * happened to be in. Gated on `sceneEmphasis` and `expressiveText` exactly as
+   * the React path is, so Book never dresses a word Storybook leaves alone.
+   */
+  const emphasisFor = (messageId: string) => {
+    if (!storyId) return null;
+    // Reader-authored marks are not gated on `sceneEmphasis`: that setting says
+    // whether the DIRECTOR may dress the page, and it was never a reason to
+    // hide something the reader marked themselves.
+    return emphasisWordKinds(
+      readerEmphasis(
+        store.sceneEmphasis ? v2.sceneByStory[storyId]?.[messageId]?.emphasis : undefined,
+        v2.sfxMarksByStory[storyId]?.[messageId],
+        v2.emphasisMarksByStory[storyId]?.[messageId],
+      ),
+      store.expressiveText,
+    );
+  };
+
   const committedBlocks = useMemo(() => {
     const blocks: BookBlock[] = [];
     for (const msg of committedMsgs) {
@@ -144,7 +192,16 @@ export const BookView = () => {
         hideMetadata: store.hideMetadata && !msg.hidden,
         role: msg.role,
       }).processedText;
-      blocks.push(...paragraphBlocks(text, msg.id, msg.role === 'user', maxParaChars, store.showImages));
+      const { kinds, match } = performFor(msg.id);
+      const emph = emphasisFor(msg.id);
+      // One `claimed` set across both tracks and every paragraph of the
+      // message: one mark stays one mark. The cadence matcher spans them the
+      // same way — a run can straddle a paragraph break.
+      const claimed = new Set<string>();
+      blocks.push(...paragraphBlocks(text, msg.id, msg.role === 'user', maxParaChars, store.showImages)
+        .map(b => (kinds || match || emph || store.expressiveText
+          ? { ...b, html: markSceneHtml(b.html, emph, kinds, claimed, store.expressiveText, undefined, match) }
+          : b)));
       // Images ATTACHED to the message (not inline in its text) get plates too.
       if (store.showImages) {
         for (const src of msg.images ?? []) blocks.push(attachedPlateBlock(src, msg.id));
@@ -154,6 +211,8 @@ export const BookView = () => {
   }, [
     committedMsgs, overrides, lensOn, procOpts, store.hideMetadata,
     chapterByStartId, maxParaChars, store.showImages,
+    store.scenePerformance, store.sceneEmphasis, store.expressiveText, storyId,
+    v2.performMarksByStory, v2.sceneByStory, v2.sfxMarksByStory, v2.emphasisMarksByStory,
   ]);
 
   // ----- pagination -------------------------------------------------------
@@ -195,7 +254,22 @@ export const BookView = () => {
       const tail: BookBlock[] = [];
       const ch = chapterByStartId.get(msg.id);
       if (ch) tail.push({ html: ch.html, chapter: ch.label });
-      tail.push(...paragraphBlocks(live, msg.id, msg.role === 'user', maxParaChars));
+      const { kinds: liveKinds, match: liveMatch } = performFor(msg.id);
+      const liveEmph = emphasisFor(msg.id);
+      const liveClaimed = new Set<string>();
+      // The tail is rebuilt on every reveal tick; without a set that outlives
+      // the render, every already-revealed marked word re-animates each time.
+      if (livePlayed.current.key !== msg.id) livePlayed.current = { key: msg.id, set: new Set() };
+      tail.push(...paragraphBlocks(live, msg.id, msg.role === 'user', maxParaChars)
+        .map(b => (liveKinds || liveMatch || liveEmph || store.expressiveText
+          ? {
+            ...b,
+            html: markSceneHtml(
+              b.html, liveEmph, liveKinds, liveClaimed, store.expressiveText,
+              livePlayed.current.set, liveMatch,
+            ),
+          }
+          : b)));
       if (!tail.length) { setTailPages(null); return; }
       setTailPages(paginateTail(measurer, basePages[basePages.length - 1], tail, dims.bodyH));
     };

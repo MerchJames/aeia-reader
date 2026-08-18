@@ -441,7 +441,7 @@ const AudioDemo = () => {
         </div>
         <p className="text-[10px] text-app-text/40">
           {active.loop ? 'A bed — carried across the scene and reused.' : 'A one-shot, fired as the words reach it.'}
-          {' '}These previews are synthesised by Aura itself, so nothing is bundled.
+          {' '}These previews are synthesised by Aeia itself, so nothing is bundled.
         </p>
       </div>
 
@@ -449,7 +449,7 @@ const AudioDemo = () => {
       <p className="text-[10px] text-app-text/40 leading-relaxed">
         Higher-quality voices (Kokoro) and generated music/SFX run as
         <span className="text-app-text/60"> separate local services you start yourself</span> —
-        Aura talks to them over a URL you set, and everything above still works without them.
+        Aeia talks to them over a URL you set, and everything above still works without them.
       </p>
     </div>
   );

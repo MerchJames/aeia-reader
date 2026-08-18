@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { Bot, Clapperboard, MessageSquare, Pin, X, Volume2 } from 'lucide-react';
-import { HIGHLIGHT_COLORS, ScenePerformKind } from '../types';
+import { Bot, Clapperboard, MessageSquare, Pin, Type, X, Volume2 } from 'lucide-react';
+import { HIGHLIGHT_COLORS, SceneEmphasis, ScenePerformKind } from '../types';
 
 /**
  * The performance verbs a reader can put on a span by hand — the same
@@ -21,6 +21,19 @@ const PERFORM_CHOICES: { kind: ScenePerformKind; label: string; hint: string }[]
   { kind: 'unwrite', label: 'Unwrite', hint: 'Written, then dissolves away' },
 ];
 
+/**
+ * The typographic treatments a reader can put on a span by hand.
+ *
+ * Reader-first on purpose: these are new vocabulary, and a treatment the reader
+ * has used themselves is one they can recognise when the Director reaches for
+ * it. A highlight paints BEHIND the words and belongs to the reader's notes;
+ * these change the words themselves and belong to the performance.
+ */
+const EMPHASIS_CHOICES: { kind: SceneEmphasis['kind']; label: string; hint: string; cls: string }[] = [
+  { kind: 'underline', label: 'Underline', hint: 'Stress, without raising the voice', cls: 'expr-underline' },
+  { kind: 'strike', label: 'Strike out', hint: 'Said, then taken back', cls: 'expr-strike' },
+];
+
 interface SelectionPopoverProps {
   sel: { x: number; y: number; text: string; messageId?: string };
   noteDraft: string;
@@ -36,14 +49,19 @@ interface SelectionPopoverProps {
   onPerform?: (kind: ScenePerformKind | null) => void;
   /** The direction already on this span, if any (so it reads as selected). */
   performKind?: ScenePerformKind | null;
+  /** Dress the selected span — colour, underline, strike. null clears it. */
+  onEmphasis?: (mark: { kind: SceneEmphasis['kind']; color?: string } | null) => void;
+  /** The treatment already on this span, if any. */
+  emphasis?: { kind: SceneEmphasis['kind']; color?: string } | null;
 }
 
 export const SelectionPopover = ({
   sel, noteDraft, setNoteDraft, onClose, onHighlight, onNote, onAskAi, onPin, onSfx,
-  onPerform, performKind,
+  onPerform, performKind, onEmphasis, emphasis,
 }: SelectionPopoverProps) => {
   const [sfxOpen, setSfxOpen] = useState(false);
   const [performOpen, setPerformOpen] = useState(false);
+  const [emphOpen, setEmphOpen] = useState(false);
   const [sfxPrompt, setSfxPrompt] = useState('');
   const [sfxSlow, setSfxSlow] = useState(true);
   const commitSfx = () => {
@@ -153,6 +171,67 @@ export const SelectionPopover = ({
         >
           <Clapperboard size={13} />
           {performKind ? `Performing: ${PERFORM_CHOICES.find(c => c.kind === performKind)?.label}` : 'Perform this span'}
+        </button>
+      )
+    )}
+
+    {onEmphasis && (
+      emphOpen ? (
+        <div className="flex flex-col gap-1.5 border-t border-app-border pt-2">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] text-muted">How should this be set?</span>
+            {emphasis && (
+              <button
+                onClick={() => { onEmphasis(null); setEmphOpen(false); }}
+                className="text-[11px] text-muted hover:text-app-text underline underline-offset-2"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+          {/* The swatches colour the WORDS. Deliberately a row of their own,
+              separated from the highlighter above, which paints behind them. */}
+          <div className="flex items-center gap-1.5">
+            {HIGHLIGHT_COLORS.map(c => (
+              <button
+                key={c.key}
+                title={`Colour the text ${c.label.toLowerCase()}`}
+                onClick={() => { onEmphasis({ kind: 'color', color: c.key }); setEmphOpen(false); }}
+                className={`w-8 h-8 rounded-lg border text-sm font-bold leading-none ${
+                  emphasis?.kind === 'color' && emphasis.color === c.key
+                    ? 'border-accent/60 bg-accent/10' : 'border-app-border hover:bg-app-text/5'
+                }`}
+                style={{ color: c.bg.replace(/[\d.]+\)$/, '1)') }}
+              >
+                A
+              </button>
+            ))}
+          </div>
+          <div className="grid grid-cols-2 gap-1">
+            {EMPHASIS_CHOICES.map(c => (
+              <button
+                key={c.kind}
+                title={c.hint}
+                onClick={() => { onEmphasis({ kind: c.kind }); setEmphOpen(false); }}
+                className={`px-2 py-1.5 rounded-md text-[11px] text-left border transition-colors ${
+                  emphasis?.kind === c.kind
+                    ? 'border-accent/60 bg-accent/15 text-accent font-medium'
+                    : 'border-app-border hover:bg-app-text/5'
+                }`}
+              >
+                <span className={c.cls}>{c.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <button
+          onClick={() => setEmphOpen(true)}
+          disabled={!sel.messageId}
+          className="flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg border border-app-border text-xs hover:bg-app-text/5 disabled:opacity-40"
+        >
+          <Type size={13} />
+          {emphasis ? 'Change how this is set' : 'Set this apart'}
         </button>
       )
     )}

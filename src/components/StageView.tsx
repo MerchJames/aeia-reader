@@ -17,7 +17,8 @@ import { SceneVfx } from './SceneVfx';
 import { deriveVfx, emoteFor, stickyWeather } from '../utils/sceneVfx';
 import { resolveWeather } from '../utils/sceneWeather';
 import { Message, SceneEmphasis, ScenePerformCue } from '../types';
-import { mergePerformCues, PERFORM_VISUAL } from '../utils/scenePerform';
+import { RunMatcher, mergePerformCues, performMatcher, performWordKinds } from '../utils/scenePerform';
+import { emphasisClass, emphasisKindKey, markPerformHtml, readerEmphasis } from '../utils/performMarkup';
 import { latestSpeech } from '../utils/dialogueSegments';
 import { cn } from '../utils/cn';
 
@@ -28,33 +29,64 @@ import { cn } from '../utils/cn';
  * styled spans after. Whispers shrink, shouts swell, beats pulse; performance
  * cues swell/tremble/drop/fade the words they mark.
  */
+/** Kinds Stage dresses in its own type. Everything else shares the reader's. */
+const STAGE_EMPHASIS: ReadonlySet<string> = new Set(['whisper', 'shout', 'beat', 'sfx']);
+
 export const renderWithEmphasis = (
   para: string,
   emphasis: SceneEmphasis[] | undefined,
   images: boolean,
   perform?: ScenePerformCue[],
+  /** Share one set across a message's paragraphs so a cue fires once. */
+  claimed?: Set<string>,
+  /**
+   * Words whose treatment has already animated, kept ACROSS renders.
+   *
+   * This view rebuilds its markup on every reveal tick, so without it a marked
+   * word in the already-revealed part of the passage restarted its animation
+   * every tick — 268 restarts on one word in six seconds. A cue fires on the
+   * reveal of its word; strobing afterwards reads as a fault.
+   */
+  played?: Set<string>,
+  /** This message's cadence matcher, shared across its paragraphs — see runMatcher. */
+  match?: RunMatcher,
 ): string => {
-  const marks: { text: string; cls: string }[] = [
-    ...(emphasis ?? []).map(e => ({ text: e.text, cls: `stage-emk-${e.kind}` })),
-    ...(perform ?? [])
-      .filter(p => PERFORM_VISUAL.has(p.kind))
-      .map(p => ({ text: p.text, cls: `perf-${p.kind}` })),
-  ];
-  if (!marks.length) return renderInline(para, { images });
-  let marked = para;
-  const used: number[] = [];
-  marks.forEach((mk, i) => {
-    if (!mk.text || !marked.includes(mk.text)) return;
-    marked = marked.replace(mk.text, `\uE010${i}\uE011${mk.text}\uE014${i}\uE015`);
-    used.push(i);
-  });
-  let html = renderInline(marked, { images });
-  for (const i of used) {
-    html = html
-      .replace(`\uE010${i}\uE011`, `<span class="${marks[i].cls}">`)
-      .replace(`\uE014${i}\uE015`, '</span>');
+  // Emphasis still fences whole spans — a whisper is a phrase, and shrinking
+  // it word by word would read as a stutter. Performance does NOT: it marks
+  // one word at a time, the same as the reader views, via `markPerformHtml`.
+  // Wrapping the whole span here was why the same cue looked like two
+  // different features depending on which view you were in.
+  // The four vocal kinds have Stage-specific type; the typographic ones added
+  // later wear the same classes as everywhere else, so a colour or a strike
+  // looks the same on the stage as it does on the page.
+  const marks: { text: string; cls: string }[] = (emphasis ?? [])
+    .map(e => {
+      const key = emphasisKindKey(e);
+      return {
+        text: e.text,
+        cls: STAGE_EMPHASIS.has(key) ? `stage-emk-${key}` : emphasisClass(key),
+      };
+    });
+
+  let html: string;
+  if (!marks.length) {
+    html = renderInline(para, { images });
+  } else {
+    let marked = para;
+    const used: number[] = [];
+    marks.forEach((mk, i) => {
+      if (!mk.text || !marked.includes(mk.text)) return;
+      marked = marked.replace(mk.text, `\uE010${i}\uE011${mk.text}\uE014${i}\uE015`);
+      used.push(i);
+    });
+    html = renderInline(marked, { images });
+    for (const i of used) {
+      html = html
+        .replace(`\uE010${i}\uE011`, `<span class="${marks[i].cls}">`)
+        .replace(`\uE014${i}\uE015`, '</span>');
+    }
   }
-  return html;
+  return markPerformHtml(html, performWordKinds(perform), { claimed, played, match });
 };
 
 /**
@@ -162,11 +194,13 @@ export const StageView = () => {
   const baseEmphasis = storyId && current
     ? v2.sceneByStory[storyId]?.[current.id]?.emphasis
     : undefined;
-  // Reader-authored SFX marks weave in as an always-on 'sfx' emphasis span.
+  // Reader-authored marks — sounds and typography — weave in alongside the
+  // Director's, always on: this is the reader's own marking of the page.
   const sfxMarks = storyId && current ? v2.sfxMarksByStory[storyId]?.[current.id] : undefined;
-  const emphasis = sfxMarks?.length
-    ? [...(baseEmphasis ?? []), ...sfxMarks.map(m => ({ text: m.text, kind: 'sfx' as const }))]
-    : baseEmphasis;
+  const emphasis = readerEmphasis(
+    baseEmphasis, sfxMarks,
+    storyId && current ? v2.emphasisMarksByStory[storyId]?.[current.id] : undefined,
+  );
   // The performance track's visual half — the pacing half is the streamer's.
   const perform = store.scenePerformance && storyId && current
     ? mergePerformCues(
@@ -174,13 +208,26 @@ export const StageView = () => {
       v2.sceneByStory[storyId]?.[current.id]?.perform,
     )
     : undefined;
+  // Survives re-renders, reset when the passage changes: a cue animates the
+  // first time its word appears and holds still after.
+  const playedRef = useRef<{ key: string; set: Set<string> }>({ key: '', set: new Set() });
+  const playedKey = current?.id ?? '';
+  if (playedRef.current.key !== playedKey) playedRef.current = { key: playedKey, set: new Set() };
+
   const bodyHtml = useMemo(
-    () => rawText
-      .split(/\n{2,}/)
-      .map(p => p.trim())
-      .filter(Boolean)
-      .map(p => `<p>${renderWithEmphasis(p, emphasis, false, perform)}</p>`)
-      .join(''),
+    () => {
+      // One claimed set for the whole passage: a cue marks its word once per
+      // message, not once per paragraph.
+      const claimed = new Set<string>();
+      // One matcher too — a cadence run can straddle a paragraph break.
+      const match = performMatcher(perform);
+      return rawText
+        .split(/\n{2,}/)
+        .map(p => p.trim())
+        .filter(Boolean)
+        .map(p => `<p>${renderWithEmphasis(p, emphasis, false, perform, claimed, playedRef.current.set, match)}</p>`)
+        .join('');
+    },
     [rawText, emphasis, perform],
   );
 

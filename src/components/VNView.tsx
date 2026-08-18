@@ -12,7 +12,8 @@ import { spriteFor, useSpriteStore } from '../stores/useSpriteStore';
 import { backdropForScene, useBackdropStore } from '../stores/useBackdropStore';
 import { reactionFor, renderWithEmphasis } from './StageView';
 import { latestSpeech } from '../utils/dialogueSegments';
-import { mergePerformCues } from '../utils/scenePerform';
+import { readerEmphasis } from '../utils/performMarkup';
+import { mergePerformCues, performMatcher } from '../utils/scenePerform';
 import { SceneFx } from './SceneFx';
 import { SceneVfx } from './SceneVfx';
 import { deriveStaging } from '../utils/vnStaging';
@@ -66,9 +67,10 @@ export const VNView = () => {
 
   const descriptor = storyId && current ? v2.sceneByStory[storyId]?.[current.id] : undefined;
   const sfxMarks = storyId && current ? v2.sfxMarksByStory[storyId]?.[current.id] : undefined;
-  const emphasis = sfxMarks?.length
-    ? [...(descriptor?.emphasis ?? []), ...sfxMarks.map(m => ({ text: m.text, kind: 'sfx' as const }))]
-    : descriptor?.emphasis;
+  const emphasis = readerEmphasis(
+    descriptor?.emphasis, sfxMarks,
+    storyId && current ? v2.emphasisMarksByStory[storyId]?.[current.id] : undefined,
+  );
   const bucket = bucketFor(descriptor?.speaker?.emotion);
 
   // ADV-style box, like a real VN (and like the RPG / Text Message feel the
@@ -106,8 +108,18 @@ export const VNView = () => {
   const perform = store.scenePerformance && storyId && current
     ? mergePerformCues(v2.performMarksByStory[storyId]?.[current.id], descriptor?.perform)
     : undefined;
+  // See StageView: this view rebuilds its markup every reveal tick, so without
+  // a set that outlives the render a cue restarts on every one of them.
+  const vnPlayedRef = useRef<{ key: string; set: Set<string> }>({ key: '', set: new Set() });
+  const vnPlayedKey = current?.id ?? '';
+  if (vnPlayedRef.current.key !== vnPlayedKey) {
+    vnPlayedRef.current = { key: vnPlayedKey, set: new Set() };
+  }
   const primaryHtml = useMemo(
-    () => renderWithEmphasis(beat.primary, emphasis, false, perform),
+    () => renderWithEmphasis(
+      beat.primary, emphasis, false, perform, undefined, vnPlayedRef.current.set,
+      performMatcher(perform),
+    ),
     [beat.primary, emphasis, perform],
   );
 

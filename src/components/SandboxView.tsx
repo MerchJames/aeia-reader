@@ -7,6 +7,7 @@ import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { resolveContent } from '../utils/lens';
 import { samplerParamsFrom } from '../utils/aiClient';
 import { buildDoc, buildSpeakerMap, escapeHtml, formatBody, ThemeVars } from '../utils/sandboxTheme';
+import { mergePerformCues, performMatcher, performWordKinds } from '../utils/scenePerform';
 import { generateTreatment, resolveCues } from '../utils/sandboxDirector';
 import { playSound } from '../utils/sandboxAudio';
 import { audioAssetUrl } from '../utils/audioLibrary';
@@ -331,10 +332,38 @@ export const SandboxView = () => {
     });
   }, [activeView, activeScene, current?.id, streamingCurrent, currentContent, colorFor, vars, reduceMotion, store.showImages, textHidden, forceText]);
 
+  /**
+   * The Director's per-word treatment for a message.
+   *
+   * The sandbox iframe carries none of the app's stylesheet, so `buildDoc`
+   * ships `PERFORM_CSS` alongside — without it a marked word would be a bare
+   * span and the cue would silently do nothing here.
+   */
+  const cuesFor = useCallback((messageId: string) => (
+    store.scenePerformance && storyId
+      ? mergePerformCues(
+        v2.performMarksByStory[storyId]?.[messageId],
+        v2.sceneByStory[storyId]?.[messageId]?.perform,
+      )
+      : undefined
+  ), [store.scenePerformance, storyId, v2.performMarksByStory, v2.sceneByStory]);
+
+  const performFor = useCallback(
+    (messageId: string) => performWordKinds(cuesFor(messageId)), [cuesFor],
+  );
+  /** A fresh matcher per call — it is stateful and belongs to one render pass. */
+  const matchFor = useCallback(
+    (messageId: string) => performMatcher(cuesFor(messageId)), [cuesFor],
+  );
+
   // Only the active scene's slice of streamed text (segmented, not the whole msg).
+  // The live text is pushed over postMessage and never goes through buildDoc,
+  // so the marking has to be applied here too or the cue would only appear
+  // once the message settled.
+  const livePerform = current ? performFor(current.id) : null;
   const sceneLiveHtml = activeScene
-    ? formatBody(store.streamedText.slice(activeScene.start, revealed))
-    : formatBody(store.streamedText);
+    ? formatBody(store.streamedText.slice(activeScene.start, revealed), livePerform, undefined, matchFor(current!.id))
+    : formatBody(store.streamedText, livePerform, undefined, current ? matchFor(current.id) : undefined);
 
   const style = useCallback(async (m: Message, content: string) => {
     if (!aiReady || !storyId) return;
@@ -369,9 +398,11 @@ export const SandboxView = () => {
         name: m.name, isUser: m.role === 'user', content, color: colorFor(m.name),
         vars, index: i, reduceMotion, images: store.showImages ? m.images : undefined,
         treatment: themeFor(m, msgChain[m.id]), textHidden, forceText,
+        perform: performFor(m.id),
+        match: matchFor(m.id),
       }),
     };
-  }), [store.visibleMessages, overrides, lensOn, colorFor, vars, reduceMotion, store.showImages, themeFor, msgChain, textHidden, forceText]);
+  }), [store.visibleMessages, overrides, lensOn, colorFor, vars, reduceMotion, store.showImages, themeFor, msgChain, textHidden, forceText, performFor, matchFor]);
 
   const sm = store.streamingMessage;
   const streamDoc = useMemo(() => sm ? buildDoc({
@@ -536,7 +567,13 @@ export const SandboxView = () => {
               <SandboxCard key={m.id} doc={doc} title={`${m.name} — sandbox`} toolbar={toolbarFor(m, content)} />
             ))}
             {sm && streamDoc && (
-              <SandboxCard key={sm.id} doc={streamDoc} title={`${sm.name} — sandbox`} fx={fxSig} liveHtml={formatBody(store.streamedText)} />
+              <SandboxCard
+                key={sm.id}
+                doc={streamDoc}
+                title={`${sm.name} — sandbox`}
+                fx={fxSig}
+                liveHtml={formatBody(store.streamedText, performFor(sm.id), undefined, matchFor(sm.id))}
+              />
             )}
           </div>
         </div>

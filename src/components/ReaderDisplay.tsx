@@ -7,6 +7,7 @@ import { cn } from '../utils/cn';
 import { HIGHLIGHT_COLORS, Message, PinFormat } from '../types';
 import { paintHighlights } from '../utils/highlightPaint';
 import { resolveContent } from '../utils/lens';
+import { readerEmphasis } from '../utils/performMarkup';
 import { mergePerformCues } from '../utils/scenePerform';
 import { resolveWeather } from '../utils/sceneWeather';
 import { stickyWeather } from '../utils/sceneVfx';
@@ -21,6 +22,9 @@ import { MessageBlock } from './MessageBlock';
 import { SelectionPopover } from './SelectionPopover';
 import { AnnotationThread } from './AnnotationThread';
 import { AskCharacter } from './AskCharacter';
+import { LiveReactor } from './LiveReactor';
+import { SceneImageModal } from './SceneImageModal';
+import { deleteArt, releaseArtUrl } from '../lib/artStorage';
 import { FocusVars, focusMoved, focusVars } from '../utils/readingFocus';
 
 /**
@@ -139,6 +143,8 @@ export const ReaderDisplay = () => {
   const [threadOpen, setThreadOpen] = React.useState<
     { messageId?: string; anchorText?: string } | null
   >(null);
+  /** The beat whose scene-image composer is open, if any. */
+  const [imageFor, setImageFor] = React.useState<string | null>(null);
   const prevIndexRef = useRef(store.currentChainIndex);
 
   useEffect(() => {
@@ -345,6 +351,17 @@ export const ReaderDisplay = () => {
   // Hand a message off to the AI assistant's Lens-edit mode.
   const lensEdit = useCallback((id: string) => useAppStore.getState().setLensEditTarget(id), []);
 
+  const sceneImage = useCallback((id: string) => setImageFor(id), []);
+
+  /** Delete one generated picture: the metadata row AND the bytes behind it. */
+  const removeArt = useCallback((messageId: string, artId: string) => {
+    const sid = useAppStore.getState().currentStory?.id;
+    if (!sid) return;
+    useAuraV2Store.getState().removeSceneArt(sid, messageId, artId);
+    releaseArtUrl(artId);
+    void deleteArt(artId);
+  }, []);
+
   const pinContent = useCallback((messageId: string, content: string, format: PinFormat) => {
     const sid = useAppStore.getState().currentStory?.id;
     if (!sid) return;
@@ -477,9 +494,9 @@ export const ReaderDisplay = () => {
     // build a new array when marks exist, so the memo stays stable otherwise.
     const baseEmphasis = store.sceneEmphasis && storyId ? v2.sceneByStory[storyId]?.[msg.id]?.emphasis : undefined;
     const sfxMarks = storyId ? v2.sfxMarksByStory[storyId]?.[msg.id] : undefined;
-    const emphasis = sfxMarks?.length
-      ? [...(baseEmphasis ?? []), ...sfxMarks.map(m => ({ text: m.text, kind: 'sfx' as const }))]
-      : baseEmphasis;
+    const emphasis = readerEmphasis(
+      baseEmphasis, sfxMarks, storyId ? v2.emphasisMarksByStory[storyId]?.[msg.id] : undefined,
+    );
 
     // Performance cues: the reader's hand-marked spans win over the Director's.
     const perform = store.scenePerformance && storyId
@@ -500,6 +517,9 @@ export const ReaderDisplay = () => {
         onOpenNotes={openNotes}
         onPinContent={pinContent}
         onLensEdit={store.aiBaseUrl && store.aiModel ? lensEdit : undefined}
+        onSceneImage={store.imageBaseUrl ? sceneImage : undefined}
+        sceneArt={storyId ? v2.artByStory[storyId]?.[msg.id] : undefined}
+        onRemoveArt={removeArt}
         streamEffect={store.streamEffect}
         expressiveText={store.expressiveText}
         ttsReading={store.ttsEnabled && store.ttsPending && isStreamingMsg}
@@ -698,6 +718,19 @@ export const ReaderDisplay = () => {
           ? v2.performMarksByStory[storyId]?.[selPopover.messageId]
             ?.find(m => m.text === selPopover.text.trim())?.kind ?? null
           : null}
+        onEmphasis={(mark) => {
+          if (storyId && selPopover.messageId) {
+            const text = selPopover.text.trim();
+            if (mark) v2.addEmphasisMark(storyId, selPopover.messageId, { ...mark, text });
+            else v2.clearEmphasisMarkFor(storyId, selPopover.messageId, text);
+          }
+          window.getSelection()?.removeAllRanges();
+          setSelPopover(null);
+        }}
+        emphasis={storyId && selPopover.messageId
+          ? v2.emphasisMarksByStory[storyId]?.[selPopover.messageId]
+            ?.find(m => m.text === selPopover.text.trim()) ?? null
+          : null}
         onSfx={store.audioCuesEnabled ? (prompt, slow) => {
           if (storyId && selPopover.messageId) {
             v2.addSfxMark(storyId, selPopover.messageId, { text: selPopover.text.trim(), prompt, slow });
@@ -725,6 +758,12 @@ export const ReaderDisplay = () => {
     {/* Anchored to the beat on screen — the streaming one while it reads, else
       * the last one the reader has arrived at. Scroll back and the interview you
       * had at that beat is the one that reopens. */}
+    {imageFor && <SceneImageModal messageId={imageFor} onClose={() => setImageFor(null)} />}
+
+    {/* Reading with someone. Mounted beside Ask Character, and reader-only on
+      * the same terms: nothing it produces is canon or reaches an export. */}
+    <LiveReactor />
+
     <AskCharacter
       messageId={askAnchorId}
       mood={storyId && askAnchorId ? v2.sceneByStory[storyId]?.[askAnchorId]?.mood : undefined}

@@ -8,6 +8,11 @@ import {
   AskTurn, OPENERS, askCharacter, castOf, clampHistory, hasAside, readThread, splitAnswer,
 } from '../utils/askCharacter';
 import { bucketFor, EmotionBucket } from '../lib/spriteStorage';
+import { buildVisitorAskMessages, isUsable, type Visitor } from '../utils/visitor';
+import { chatCompletion, mergeSamplers } from '../utils/aiClient';
+import { parseAnswer } from '../utils/askCharacter';
+import { getStory } from '../lib/storage';
+import type { CardInfo } from '../types';
 import { cn } from '../utils/cn';
 
 /**
@@ -95,9 +100,51 @@ export const AskCharacter = ({ messageId, mood }: Props) => {
   // A group chat has no single "the character". The cast comes from who
   // actually speaks, and the subject FOLLOWS the beat on screen — until the
   // reader picks someone, which sticks until they pick again.
-  const cast = useMemo(
+  const hostCast = useMemo(
     () => castOf(store.chains.flatMap(c => c.messages), story?.userName),
     [store.chains, story?.userName],
+  );
+
+  /**
+   * Characters brought in from other chats join the cast.
+   *
+   * This is where a visitor SPEAKS. Their dossier is assembled in the assistant
+   * panel — that is where context is built — but a character answering in their
+   * own voice is exactly what this panel is, and it already has the two things
+   * that makes safe: an anchor, and a knowledge clamp. What differs is only
+   * where the knowledge comes from: a cast member lived the story, a visitor
+   * has just walked into it.
+   */
+  const visitors = useAuraV2Store(s => (storyId ? s.visitorsByStory[storyId] : undefined));
+  const guests = useMemo(
+    () => (visitors ?? []).filter(v => v.active && isUsable(v.fields)),
+    [visitors],
+  );
+  const guestByName = useMemo(
+    () => new Map(guests.map(g => [g.name, g])),
+    [guests],
+  );
+  // Their own cards, for voice — fetched once each, off the story they came from.
+  const [guestCards, setGuestCards] = useState<Record<string, CardInfo | undefined>>({});
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      const next: Record<string, CardInfo | undefined> = {};
+      for (const g of guests) {
+        if (g.useCard === false) continue;
+        next[g.name] = (await getStory(g.sourceStoryId))?.card;
+      }
+      if (live) setGuestCards(next);
+    })();
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [guests.map(g => `${g.id}:${g.useCard}`).join('|')]);
+
+  // Host cast first, then guests — a visitor is an addition to the room, and
+  // ordering them among the people who live there would misrepresent that.
+  const cast = useMemo(
+    () => [...hostCast, ...guests.map(g => g.name).filter(n => !hostCast.includes(n))],
+    [hostCast, guests],
   );
   const onScreen = store.streamingMessage?.name?.trim()
     ?? store.visibleMessages[store.visibleMessages.length - 1]?.name?.trim();
@@ -176,25 +223,50 @@ export const AskCharacter = ({ messageId, mood }: Props) => {
     try {
       const history = clampHistory(ordered, messageId);
       const anchor = ordered.find(m => m.id === messageId);
-      const answer = await askCharacter(
-        {
-          characterName,
-          cast: others,
-          userName: story?.userName,
-          card: story?.card,
-          history,
-          anchorText: anchor?.content ?? '',
-          turns: thread,
-          question: q,
-          mood,
-          movedOn: !!lastBeat && lastBeat !== messageId,
-        },
-        {
-          base: store.aiBaseUrl, key: store.aiApiKey, model: store.aiModel,
-          params: samplerParamsFrom(store.aiAdvanced),
-        },
-        abort.current.signal,
-      );
+      const guest = guestByName.get(subject);
+      // A visitor is asked from their BRIEF and their own card; the host
+      // transcript reaches them as a scene they have walked into, never as
+      // memory. A cast member gets the ordinary interview.
+      const answer = guest
+        ? parseAnswer(
+          await chatCompletion(
+            store.aiBaseUrl, store.aiApiKey, store.aiModel,
+            buildVisitorAskMessages({
+              visitor: guest,
+              card: guest.useCard === false ? undefined : guestCards[guest.name],
+              hostTitle: story?.title ?? 'this story',
+              hostCharacter: story?.characterName,
+              hostUser: story?.userName,
+              scene: history,
+              anchorText: anchor?.content ?? '',
+              turns: thread,
+              question: q,
+              mood,
+            }),
+            mergeSamplers({ temperature: 0.85, max_tokens: 500 }, samplerParamsFrom(store.aiAdvanced)),
+            abort.current.signal,
+          ),
+          guest.name,
+        )
+        : await askCharacter(
+          {
+            characterName,
+            cast: others,
+            userName: story?.userName,
+            card: story?.card,
+            history,
+            anchorText: anchor?.content ?? '',
+            turns: thread,
+            question: q,
+            mood,
+            movedOn: !!lastBeat && lastBeat !== messageId,
+          },
+          {
+            base: store.aiBaseUrl, key: store.aiApiKey, model: store.aiModel,
+            params: samplerParamsFrom(store.aiAdvanced),
+          },
+          abort.current.signal,
+        );
       if (!answer) { setError('Nothing came back. Try asking again.'); return; }
       v2.addAskTurn(storyId, {
         id: rid(), role: 'character', text: answer.text, at: Date.now(),
@@ -207,7 +279,7 @@ export const AskCharacter = ({ messageId, mood }: Props) => {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storyId, messageId, busy, ordered, characterName, subject, others, mood, story, thread,
-    knownUpto, store.aiBaseUrl, store.aiModel]);
+    knownUpto, store.aiBaseUrl, store.aiModel, guestByName, guestCards]);
 
   if (!store.askCharacter || !storyId || !messageId) return null;
 
@@ -262,7 +334,9 @@ export const AskCharacter = ({ messageId, mood }: Props) => {
               <div className="min-w-0">
                 <div className="text-app-text font-semibold truncate">{characterName}</div>
                 <div className="text-[10px] text-app-text/50">
-                  knows the story through beat {knownUpto} — not a word past it
+                  {guestByName.has(subject)
+                    ? `visiting from “${guestByName.get(subject)!.sourceStoryTitle}” — has seen this story only through beat ${knownUpto}`
+                    : `knows the story through beat ${knownUpto} — not a word past it`}
                   {thread.length > 0 && lastAskedBeat != null && lastAskedBeat !== knownUpto && (
                     <span className="text-accent"> · you’ve moved on since you last asked</span>
                   )}
@@ -307,12 +381,15 @@ export const AskCharacter = ({ messageId, mood }: Props) => {
                 const face = spriteFor(storyId, name, 'neutral', sprites, spriteUrls)
                   ?? story?.characterAvatars?.[name];
                 const active = name === subject;
+                const guest = guestByName.get(name);
                 return (
                   <button
                     key={name}
                     onClick={() => setPinnedSubject(name)}
                     data-testid={`ask-cast-${name}`}
-                    title={active ? `Interviewing ${name}` : `Ask ${name} instead — they can see what has been said`}
+                    title={guest
+                      ? `${name} is visiting from "${guest.sourceStoryTitle}" — they have only just arrived here`
+                      : active ? `Interviewing ${name}` : `Ask ${name} instead — they can see what has been said`}
                     className={cn(
                       'flex items-center gap-1.5 rounded-full pl-1 pr-2.5 py-0.5 text-xs border shrink-0 transition-colors',
                       active
@@ -324,6 +401,9 @@ export const AskCharacter = ({ messageId, mood }: Props) => {
                       {face ? <img src={face} alt="" className="w-full h-full object-cover object-top" /> : name[0]}
                     </span>
                     {name}
+                    {guest && (
+                      <span className="text-[9px] opacity-60" title="visiting from another chat">⁘</span>
+                    )}
                   </button>
                 );
               })}

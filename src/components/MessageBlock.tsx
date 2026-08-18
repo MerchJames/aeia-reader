@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { ChevronLeft, ChevronRight, MessageSquare, Pencil, Pin as PinIcon, Wand2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ImageIcon, MessageSquare, Pencil, Pin as PinIcon, Wand2 } from 'lucide-react';
 import { cn } from '../utils/cn';
 import {
   AnimationStyle,
@@ -11,6 +11,7 @@ import {
   Message,
   OocHandling,
   PinFormat,
+  SceneArt,
   SceneEmphasis,
   ScenePerformCue,
   StatRule,
@@ -26,9 +27,13 @@ import {
   truncateToWord,
 } from '../utils/textProcessor';
 import { isShoutWord, normalizeWord } from '../utils/expressive';
-import { PerformKind, isMarkableWord, performWordKinds } from '../utils/scenePerform';
+import {
+  PerformKind, RunMatcher, isMarkableWord, performRuns, performWordKinds, runMatcher,
+} from '../utils/scenePerform';
+import { emphasisClass, emphasisKindKey, MARKABLE_EMPHASIS } from '../utils/performMarkup';
 import { attributeSpeaker, aiSpeakerFor, DialogueAttribution } from '../utils/dialogueSegments';
 import { buildStatPanel, isBarStat, StatEntry } from '../utils/statFormatter';
+import { SceneArtStrip } from './SceneArtStrip';
 
 /** Strip markdown markers for a plain-text context preview. */
 const plainish = (t: string): string =>
@@ -41,6 +46,7 @@ const plainish = (t: string): string =>
  */
 const extractDialogueSegments = (
   text: string, cast: string[] = [], dialogue?: DialogueAttribution[],
+  names: { characterName?: string; userName?: string } = {},
 ): { quote: string; context: string; speaker?: string }[] => {
   const re = /["“]([^"”\n]{1,400})["”]/g;
   const matches: { inner: string; start: number; end: number }[] = [];
@@ -54,7 +60,7 @@ const extractDialogueSegments = (
     const context = plainish(text.slice(from, to));
     // Enrichment attribution first, then the narration heuristic — so a quote
     // the author voices for someone else is labelled, not read as this message's.
-    const speaker = aiSpeakerFor(mm.inner, dialogue)
+    const speaker = aiSpeakerFor(mm.inner, dialogue, names)
       ?? attributeSpeaker(text.slice(from, mm.start).slice(-72), text.slice(mm.end, to).slice(0, 72), cast);
     return { quote: mm.inner, context, speaker };
   });
@@ -190,6 +196,14 @@ interface WordCounter {
    * passage with treatments. One mark stays one mark.
    */
   claimed: Set<string>;
+  /**
+   * This message's cadence matcher — see `runMatcher`.
+   *
+   * It lives on the counter because a run has to be matched across the whole
+   * passage in document order, and `wrapWords` is called once per markdown
+   * block. The counter is the only thing that already spans them all.
+   */
+  runs: RunMatcher;
 }
 
 /** Longest stagger a burst of new words can accumulate (10 × 30ms). */
@@ -213,14 +227,29 @@ const wrapWords = (
   delays: Map<number, number>,
   expressive: boolean,
   readingWord: number | null,
-  emphasis: Map<string, EmphKind> | null,
+  emphasis: Map<string, string> | null,
   perform: Map<string, PerformKind> | null,
+  /**
+   * Words whose arrival animation has already run, kept for the life of the
+   * stream.
+   *
+   * A marked word restarted its animation on essentially every reveal tick —
+   * measured at 291 restarts on a single word in six seconds of streaming, and
+   * 362 in Chat. The cue is meant to fire ON THE REVEAL of the word; instead it
+   * strobed for as long as the passage kept growing, which reads as a rendering
+   * fault rather than as direction. Once a word has played, it keeps the LOOK
+   * (the classes carry static styling too) and drops the motion.
+   */
+  played: Set<number>,
+  /** True when this message has cadence runs to mark — see counter.runs. */
+  runs: boolean,
 ): React.ReactNode => {
   // Nothing to do unless we're animating the streaming tail, dressing shouts,
   // karaoke-highlighting the voice's word, or applying Director emphasis /
   // performance. When only `expressive` is on we wrap just the shout words, so
   // it stays cheap.
-  if ((!style || WORD_REVEAL_CAP <= 0) && !expressive && readingWord == null && !emphasis && !perform) return node;
+  if ((!style || WORD_REVEAL_CAP <= 0) && !expressive && readingWord == null
+    && !emphasis && !perform && !runs) return node;
   if (typeof node === 'string') {
     if (!node.trim()) return node;
     const out: React.ReactNode[] = [];
@@ -234,15 +263,22 @@ const wrapWords = (
       const norm = normalizeWord(word);
       const first = !counter.claimed.has(norm);
       const dir = emphasis && first ? emphasis.get(norm) : undefined;
-      const shout = dir === 'shout' || (expressive && isShoutWord(word));
-      const whisper = dir === 'whisper';
-      const sfxMark = dir === 'sfx';
+      // One resolver for every path, so Book/Stage/VN/export cannot disagree
+      // with this one about what a kind looks like.
+      const emphCls = dir ? emphasisClass(dir) : (expressive && isShoutWord(word) ? 'expr-shout' : null);
       // How the Director wants this word to ARRIVE (swell, tremble, drop, fade).
-      const perf = perform && first ? perform.get(norm) : undefined;
-      if (dir || perf) counter.claimed.add(norm);
+      // The cadence matcher is fed EVERY word, in order, whatever else happens
+      // to it — a matcher that misses a word loses the sequence.
+      const run = counter.runs(norm);
+      const perf = (perform && first ? perform.get(norm) : undefined) ?? run?.kind;
+      if (dir || (perf && !run)) counter.claimed.add(norm);
       const reading = readingWord != null && idx === readingWord;
+      // First render that shows this word gets the motion; every later one
+      // keeps the look and holds still.
+      const settledFx = played.has(idx);
+      if (dir || perf) played.add(idx);
       const inTail = !!style && idx >= settled && idx < settled + WORD_REVEAL_CAP;
-      if (!inTail && !shout && !whisper && !sfxMark && !reading && !perf) {
+      if (!inTail && !emphCls && !reading && !perf) {
         // Ordinary settled/out-of-window word — emit as plain text. Keyed, so a
         // growing children array reconciles by identity rather than by position
         // (see the note on remounting below).
@@ -257,16 +293,17 @@ const wrapWords = (
             key={`w-${idx}`}
             className={cn(
               inTail && `word-reveal word-reveal-${style}`,
-              shout && 'expr-shout',
-              whisper && 'expr-whisper',
-              sfxMark && 'sfx-mark',
+              emphCls,
               reading && 'tts-reading',
+              settledFx && emphCls && 'fx-played',
             )}
             style={inTail ? { animationDelay: `${delays.get(idx)}ms` } : undefined}
           >
             {/* The performance treatment nests INSIDE the reveal span so the two
                 animations (arrival + swell/tremble) don't overwrite each other. */}
-            {perf ? <span className={`perf-${perf}`}>{word}</span> : word}
+            {perf
+              ? <span className={cn(`perf-${perf}`, settledFx && 'fx-played')}>{word}</span>
+              : word}
           </span>,
         );
       }
@@ -276,29 +313,30 @@ const wrapWords = (
     return out.length === 1 ? out[0] : out;
   }
   if (Array.isArray(node)) {
-    return node.map(n => wrapWords(n, counter, settled, style, delays, expressive, readingWord, emphasis, perform));
+    return node.map(n => wrapWords(n, counter, settled, style, delays, expressive, readingWord, emphasis, perform, played, runs));
   }
   return node;
 };
 
-/** Word → emphasis-kind map from the Director's spans (verbatim substrings).
+/** Word → emphasis-kind-key map from the Director's spans (verbatim substrings).
  *  Beats are pacing, not visual. whisper/shout are gated on the expressive
- *  toggle; 'sfx' marks are reader-authored so they always show. */
-type EmphKind = 'whisper' | 'shout' | 'sfx';
+ *  toggle (they say how a line SOUNDS); colour/underline/strike are typographic
+ *  and are not. Reader-authored marks always show. */
 const buildEmphasisMap = (
   spans: SceneEmphasis[] | undefined,
   on: boolean,
-): Map<string, EmphKind> | null => {
+): Map<string, string> | null => {
   if (!spans || spans.length === 0) return null;
-  const map = new Map<string, EmphKind>();
+  const map = new Map<string, string>();
   for (const s of spans) {
-    if (s.kind === 'beat') continue;
+    if (!MARKABLE_EMPHASIS.has(s.kind)) continue;
     if ((s.kind === 'whisper' || s.kind === 'shout') && !on) continue; // expressive-gated
+    const key = emphasisKindKey(s);
     for (const w of s.text.split(/\s+/)) {
       const n = normalizeWord(w);
       // Same span-matched-by-word problem as performWordKinds — a cue on a
       // phrase must not mark every "the" and "her" in the passage.
-      if (isMarkableWord(n) && !map.has(n)) map.set(n, s.kind as EmphKind);
+      if (isMarkableWord(n) && !map.has(n)) map.set(n, key);
     }
   }
   return map.size ? map : null;
@@ -327,6 +365,14 @@ export interface MessageBlockProps {
   onPinContent?: (messageId: string, content: string, format: PinFormat) => void;
   /** Opens the AI assistant in Lens-edit mode targeting this message. */
   onLensEdit?: (messageId: string) => void;
+  /** Opens the scene-image composer for this beat. Absent when no image
+   *  backend is configured, so the button simply is not there. */
+  onSceneImage?: (messageId: string) => void;
+  /** Pictures generated for this beat. Rendered through the same grid as the
+   *  message's own images — annotation alongside the source, never inside it. */
+  sceneArt?: SceneArt[];
+  /** Deletes one generated picture. */
+  onRemoveArt?: (messageId: string, artId: string) => void;
   msgAnim: AnimationStyle;
   /** Per-word streaming effect (independent of the block reveal). */
   streamEffect: StreamEffect;
@@ -398,6 +444,8 @@ const MessageContent = React.memo(({
   onSelectSwipe,
   markLore,
   onPinContent,
+  sceneArt,
+  onRemoveArt,
   expressiveText,
   ttsReading,
   emphasis,
@@ -405,15 +453,17 @@ const MessageContent = React.memo(({
   settledCount,
   wordRevealStyle,
   wordDelays,
+  playedFx,
 }: Pick<MessageBlockProps, 'msg' | 'content' | 'isStreamingMsg' | 'revealComplete' | 'msgAnim' | 'dialogueColor'
   | 'dialogueStyle' | 'dialogueAnimation' | 'hideMetadata' | 'oocHandling' | 'autoFormat'
   | 'autoFormatRules' | 'statRules' | 'paragraphSpacing' | 'dialogueOwnLine' | 'smartTypography'
   | 'styleQuotes' | 'substituteNames' | 'characterName' | 'userName' | 'showImages'
   | 'swipeSelections' | 'onImageClick' | 'onSelectSwipe' | 'markLore' | 'onPinContent'
-  | 'expressiveText' | 'ttsReading' | 'emphasis' | 'perform'> & {
+  | 'expressiveText' | 'ttsReading' | 'emphasis' | 'perform' | 'sceneArt' | 'onRemoveArt'> & {
     settledCount: number;
     wordRevealStyle: string | null;
     wordDelays: Map<number, number>;
+    playedFx: Set<number>;
   }) => {
   const { entries: statEntries, prose: statProse } = buildStatPanel(content, statRules);
   const processedText = isStreamingMsg
@@ -438,7 +488,11 @@ const MessageContent = React.memo(({
         role: msg.role,
       }).processedText;
 
-  const counter: WordCounter = { value: 0, fresh: 0, claimed: new Set() };
+  // Cadence runs (stagger, drop) are matched across the whole message in
+  // document order, so the matcher is built here, once, and lives on the
+  // counter that every markdown block shares.
+  const runs = performRuns(perform);
+  const counter: WordCounter = { value: 0, fresh: 0, claimed: new Set(), runs: runMatcher(runs) };
   // The word at the reveal edge is what the voice is narrating (the reveal is
   // paced to the voice), so highlight it as a karaoke cue while TTS reads.
   const readingWord = ttsReading && isStreamingMsg
@@ -473,12 +527,12 @@ const MessageContent = React.memo(({
         components={{
           p: ({ node: _node, children, ...props }) => (
             <p {...props}>
-              {wrapWords(markLore(children), counter, settledCount, wordRevealStyle, wordDelays, expressiveText, readingWord, emphasisMap, performMap)}
+              {wrapWords(markLore(children), counter, settledCount, wordRevealStyle, wordDelays, expressiveText, readingWord, emphasisMap, performMap, playedFx, !!runs)}
             </p>
           ),
           li: ({ node: _node, children, ...props }) => (
             <li {...props}>
-              {wrapWords(markLore(children), counter, settledCount, wordRevealStyle, wordDelays, expressiveText, readingWord, emphasisMap, performMap)}
+              {wrapWords(markLore(children), counter, settledCount, wordRevealStyle, wordDelays, expressiveText, readingWord, emphasisMap, performMap, playedFx, !!runs)}
             </li>
           ),
           hr: ({ node: _node }) =>
@@ -490,7 +544,7 @@ const MessageContent = React.memo(({
             if (!dialogue) {
               return (
                 <em className="italic opacity-90" {...props}>
-                  {wrapWords(markLore(props.children), counter, settledCount, wordRevealStyle, wordDelays, expressiveText, readingWord, emphasisMap, performMap)}
+                  {wrapWords(markLore(props.children), counter, settledCount, wordRevealStyle, wordDelays, expressiveText, readingWord, emphasisMap, performMap, playedFx, !!runs)}
                 </em>
               );
             }
@@ -518,7 +572,7 @@ const MessageContent = React.memo(({
               className={cn('font-bold text-amber-600 dark:text-amber-400', expressiveText && 'expr-key')}
               {...props}
             >
-              {wrapWords(props.children, counter, settledCount, wordRevealStyle, wordDelays, expressiveText, readingWord, emphasisMap, performMap)}
+              {wrapWords(props.children, counter, settledCount, wordRevealStyle, wordDelays, expressiveText, readingWord, emphasisMap, performMap, playedFx, !!runs)}
             </strong>
           ),
           // AI-written tables get a hover pin — captured verbatim from the
@@ -601,6 +655,13 @@ const MessageContent = React.memo(({
           ))}
         </div>
       )}
+      {showImages && sceneArt && sceneArt.length > 0 && (
+        <SceneArtStrip
+          art={sceneArt}
+          onImageClick={onImageClick}
+          onRemove={onRemoveArt && !isStreamingMsg ? (id) => onRemoveArt(msg.id, id) : undefined}
+        />
+      )}
       {msg.swipes && msg.swipes.length > 1 && (() => {
         const len = msg.swipes.length;
         const idx = swipeSelections[msg.id] ?? Math.max(0, msg.swipes.indexOf(msg.content));
@@ -672,10 +733,13 @@ const MessageContent = React.memo(({
     && prev.ttsReading === next.ttsReading
     && prev.emphasis === next.emphasis
     && prev.perform === next.perform
+    && prev.sceneArt === next.sceneArt
+    && prev.onRemoveArt === next.onRemoveArt
     && prev.revealComplete === next.revealComplete
     && prev.settledCount === next.settledCount
     && prev.wordRevealStyle === next.wordRevealStyle
-    && prev.wordDelays === next.wordDelays;
+    && prev.wordDelays === next.wordDelays
+    && prev.playedFx === next.playedFx;
 });
 
 export const MessageBlock = React.memo((props: MessageBlockProps) => {
@@ -691,6 +755,9 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
     onOpenNotes,
     onPinContent,
     onLensEdit,
+    onSceneImage,
+    sceneArt,
+    onRemoveArt,
     msgAnim,
     streamEffect,
     theme,
@@ -724,6 +791,14 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
   }
   const wordDelays = wordDelaysRef.current.map;
 
+  // Same lifetime as the delays, and for the same reason: a fact about a word's
+  // FIRST appearance, which a re-render must not be able to undo.
+  const playedFxRef = useRef<{ key: string; set: Set<number> }>({ key: '', set: new Set() });
+  if (playedFxRef.current.key !== delayKey) {
+    playedFxRef.current = { key: delayKey, set: new Set() };
+  }
+  const playedFx = playedFxRef.current.set;
+
   // Phone "dialogue only" — show just the spoken lines as received-text
   // bubbles; each quote becomes its own bubble, narration is hidden.
   // Hidden SillyTavern messages (/hide, narrator, system notes) are still
@@ -731,7 +806,8 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
   if (theme === 'phone' && phoneDialogueOnly && viewMode !== 'storybook') {
     const { characterName, userName } = props;
     const cast = [characterName, userName, msg.name].filter(Boolean) as string[];
-    let segments = extractDialogueSegments(displayContent, cast, props.dialogue);
+    let segments = extractDialogueSegments(displayContent, cast, props.dialogue,
+      { characterName, userName });
     if (!segments.length && !msg.hidden) return null;
     if (!segments.length && msg.hidden) segments = [{ quote: displayContent, context: '' }];
     const ownerName = (msg.name ?? '').trim().toLowerCase();
@@ -828,7 +904,7 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
             {noteCount}
           </button>
         )}
-        <MessageContent {...props} content={displayContent} settledCount={settledCount} wordRevealStyle={wordRevealStyle} wordDelays={wordDelays} />
+        <MessageContent {...props} content={displayContent} settledCount={settledCount} wordRevealStyle={wordRevealStyle} wordDelays={wordDelays} playedFx={playedFx} />
       </div>
     );
   }
@@ -873,8 +949,18 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
               hidden
             </span>
           )}
-          {(noteCount > 0 || hasOverride || onPinContent || onLensEdit) && !isStreamingMsg && (
+          {(noteCount > 0 || hasOverride || onPinContent || onLensEdit || onSceneImage) && !isStreamingMsg && (
             <span className="ml-auto flex items-center gap-0.5">
+              {onSceneImage && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onSceneImage(msg.id); }}
+                  title="Picture this scene"
+                  data-testid="scene-image-button"
+                  className="p-1 touch:min-h-10 touch:min-w-10 touch:inline-flex touch:items-center touch:justify-center rounded-full text-app-text/50 hover:text-accent hover:bg-accent/10 opacity-0 group-hover:opacity-100 transition-opacity"
+                >
+                  <ImageIcon size={12} />
+                </button>
+              )}
               {onLensEdit && (
                 <button
                   onClick={(e) => { e.stopPropagation(); onLensEdit(msg.id); }}
@@ -918,7 +1004,7 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
             </span>
           )}
         </div>
-        <MessageContent {...props} content={displayContent} settledCount={settledCount} wordRevealStyle={wordRevealStyle} wordDelays={wordDelays} />
+        <MessageContent {...props} content={displayContent} settledCount={settledCount} wordRevealStyle={wordRevealStyle} wordDelays={wordDelays} playedFx={playedFx} />
       </div>
     </div>
   );
@@ -931,6 +1017,9 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
     && prev.onOpenNotes === next.onOpenNotes
     && prev.onPinContent === next.onPinContent
     && prev.onLensEdit === next.onLensEdit
+    && prev.onSceneImage === next.onSceneImage
+    && prev.sceneArt === next.sceneArt
+    && prev.onRemoveArt === next.onRemoveArt
     && prev.streamEffect === next.streamEffect
     && prev.isStreamingMsg === next.isStreamingMsg
     && prev.isMsgZoomed === next.isMsgZoomed

@@ -12,15 +12,18 @@ import { useAppStore } from '../store';
 import { useShallow } from 'zustand/react/shallow';
 import {
   candidateBases, chatCompletion, chatCompletionStream, ChatMsg, isLocalBase,
-  listModels, samplerParamsFrom,
+  listModels, mergeSamplers, samplerParamsFrom,
 } from '../utils/aiClient';
 import { cardToPromptBlock, pinsToPromptBlock, sheetsToPromptBlock } from '../utils/cardContext';
 import { cn } from '../utils/cn';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { buildZoneBody, flatWithIndex, zoneSummary } from '../utils/contextZone';
+import { visitorsToPromptBlock } from '../utils/visitor';
+import type { CardInfo } from '../types';
 import { resolveContent } from '../utils/lens';
 import { buildCowritePayload } from '../utils/cowrite';
 import { ContextZoneBuilder } from './ContextZoneBuilder';
+import { VisitorPanel } from './VisitorPanel';
 import { CowritePanel } from './CowritePanel';
 import { SummarizePanel } from './SummarizePanel';
 import { AiAdvancedConfig, ChatTurn, CowriteRunSpec, Message } from '../types';
@@ -69,6 +72,7 @@ const collectTranscript = (scope: Scope): { name: string; content: string }[] =>
 // Hard ceiling only to avoid a pathological multi-MB request that no model
 // could accept — the whole story is sent below this (~1M chars ≈ 250k tokens).
 const MAX_CHARS = 1_000_000;
+
 
 /** Build the system prompt for the assistant from the reader's chosen options. */
 const buildContext = (opts: ContextOpts): string => {
@@ -146,8 +150,19 @@ const buildContext = (opts: ContextOpts): string => {
   // gives the assistant ground truth beyond the transcript itself.
   const cardBlock = cardToPromptBlock(currentStory?.card);
 
+  // Characters the reader has brought in from other chats. Placed AFTER the
+  // story text, in the high-attention tail, and fenced with its own header and
+  // footer — a brief that bleeds into the transcript reads as part of it, which
+  // is exactly the confusion the whole dossier design exists to prevent.
+  const visitorBlock = currentStory
+    ? visitorsToPromptBlock(
+      useAuraV2Store.getState().visitorsByStory[currentStory.id],
+      currentStory.characterName,
+    )
+    : '';
+
   const assembled = [
-    `You are a reading assistant embedded in "Aura Reader", helping the reader with a story / roleplay chat titled "${currentStory?.title ?? 'Untitled'}".`,
+    `You are a reading assistant embedded in "Aeia Reader", helping the reader with a story / roleplay chat titled "${currentStory?.title ?? 'Untitled'}".`,
     currentStory?.characterName ? `Main character: ${currentStory.characterName}.` : '',
     currentStory?.userName ? `The reader's own persona in this story is "${currentStory.userName}".` : '',
     scopeLine,
@@ -160,6 +175,7 @@ const buildContext = (opts: ContextOpts): string => {
     highlightBlock,
     sheetBlock,
     pinBlock,
+    visitorBlock ? `\n${visitorBlock}` : '',
   ].filter(Boolean).join('\n');
 
   // Advanced overrides: an optional persona/system prompt and a custom context
@@ -225,6 +241,10 @@ const estimateContextChars = (opts: ContextOpts): number => {
   }
   for (const sh of (v2.sheetsByStory[sid] ?? []).slice(0, 6)) extra += Math.min(sh.rows.length, 60) * 48 + 48;
   extra += cardToPromptBlock(currentStory?.card).length;
+  // Visitors are small and few; building the real block is cheaper than
+  // approximating it, and keeps the readout exact for the one thing a reader
+  // is most likely to wonder about the cost of.
+  extra += visitorsToPromptBlock(v2.visitorsByStory[sid], currentStory?.characterName).length;
 
   return body + extra + 700;
 };
@@ -475,6 +495,7 @@ export const AIChat = () => {
   const [includeHighlights, setIncludeHighlights] = useState(true);
   const [focusCharacter, setFocusCharacter] = useState('');
   const [activeZoneId, setActiveZoneId] = useState<string>('');
+  const [visitorsOpen, setVisitorsOpen] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [cowriteOpen, setCowriteOpen] = useState(false);
   const [summarizeOpen, setSummarizeOpen] = useState(false);
@@ -504,6 +525,8 @@ export const AIChat = () => {
   const openZoneBuilder = useAuraV2Store(s => s.openZoneBuilder);
   const zoneList = zones ?? [];
   const activeZone = zoneList.find(z => z.id === activeZoneId);
+  const visitorList = useAuraV2Store(s => (storyId ? s.visitorsByStory[storyId] : undefined));
+  const activeVisitors = (visitorList ?? []).filter(v => v.active).length;
 
   // Keep a valid zone selected: default to the first, and recover if the
   // active one is deleted out from under us.
@@ -872,6 +895,8 @@ export const AIChat = () => {
         </div>
         <button
           onClick={() => store.setAiOpen(false)}
+          aria-label="Close the reading assistant"
+          data-testid="ai-close"
           className="p-1.5 rounded-full opacity-60 hover:opacity-100 hover:bg-app-text/10"
         >
           <X size={16} />
@@ -1102,7 +1127,28 @@ export const AIChat = () => {
               >
                 ★ Highlights
               </button>
+              {/* Visitors sit with the context controls, not with the Lens: the
+                * Lens rewrites messages that exist, a visitor assembles context
+                * for a generation that has not happened yet. */}
+              <button
+                onClick={() => setVisitorsOpen(v => !v)}
+                title="Bring a character in from another chat"
+                data-testid="visitors-toggle"
+                className={cn(
+                  'text-[11px] px-2 py-1 rounded-md border whitespace-nowrap transition-colors',
+                  activeVisitors > 0
+                    ? 'border-accent bg-accent/10 text-accent font-bold'
+                    : 'border-app-border hover:bg-app-text/5',
+                )}
+              >
+                ⁘ Visitors{activeVisitors > 0 ? ` ${activeVisitors}` : ''}
+              </button>
             </div>
+            {visitorsOpen && (
+              <div className="pt-1">
+                <VisitorPanel />
+              </div>
+            )}
           </div>
 
           <div className="flex-1 overflow-y-auto p-3 space-y-3 relative">

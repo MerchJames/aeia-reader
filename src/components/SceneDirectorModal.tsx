@@ -30,7 +30,7 @@ interface Shot extends ScenePlanItem {
 const ORIGIN_BADGE: Record<BuildOrigin, { label: string; title: string; cls: string }> = {
   ai: { label: 'designed', title: 'The model\u2019s scene passed the quality check as written.', cls: 'bg-emerald-400/10 text-emerald-500 border-emerald-400/25' },
   repaired: { label: 'repaired', title: 'The first attempt missed part of the brief; it was sent back with the exact misses and improved.', cls: 'bg-amber-400/10 text-amber-500 border-amber-400/25' },
-  composed: { label: 'composed', title: 'The model couldn\u2019t hit the brief, so Aura built this shot from your style packet instead.', cls: 'bg-sky-400/10 text-sky-500 border-sky-400/25' },
+  composed: { label: 'composed', title: 'The model couldn\u2019t hit the brief, so Aeia built this shot from your style packet instead.', cls: 'bg-sky-400/10 text-sky-500 border-sky-400/25' },
 };
 
 const KIND = {

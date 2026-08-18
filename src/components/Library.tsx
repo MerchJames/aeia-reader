@@ -1,10 +1,16 @@
-import React, { useRef, useState } from 'react';
-import { BookOpen, FileJson, FileText, Image, MessageSquare, Settings, Sparkles, Trash2, Upload, X } from 'lucide-react';
+import React, { useMemo, useRef, useState } from 'react';
+import { BookOpen, Check, FileJson, FileText, Image, MessageSquare, Settings, Sparkles, Tag, Trash2, Upload, X } from 'lucide-react';
 import { useAppStore } from '../store';
+import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { StoryFormat, StoryMeta } from '../types';
 import { ImportModal } from './ImportModal';
 import { Onboarding } from './Onboarding';
+import { DeepSearch, LibraryToolbar } from './LibraryToolbar';
 import { cn } from '../utils/cn';
+import { AEIA_MARK } from '../assets/aeiaMark';
+import {
+  LibrarySort, allTags, filterStories, sortStories, tagsFor,
+} from '../utils/librarySearch';
 
 const FORMAT_LABEL: Record<StoryFormat, string> = {
   sillytavern: 'SillyTavern',
@@ -28,16 +34,47 @@ const COVER_GRADIENTS = [
   'from-amber-500 to-red-500',
 ];
 
+/**
+ * "2d ago" rather than a date: on the library the useful question is how long
+ * it has been since you last touched a story, not which Tuesday it was.
+ */
+const sinceLabel = (at: number | undefined): string | null => {
+  if (!at) return null;
+  const mins = Math.floor((Date.now() - at) / 60_000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  const months = Math.floor(days / 30);
+  return months < 12 ? `${months}mo ago` : `${Math.floor(months / 12)}y ago`;
+};
+
 const coverGradient = (id: string) => {
   let hash = 0;
   for (const ch of id) hash = (hash * 31 + ch.charCodeAt(0)) | 0;
   return COVER_GRADIENTS[Math.abs(hash) % COVER_GRADIENTS.length];
 };
 
-const StoryCard = ({ story }: { story: StoryMeta }) => {
+const StoryCard = ({ story, suggestions }: { story: StoryMeta; suggestions: string[] }) => {
   const openStory = useAppStore(s => s.openStory);
   const deleteStoryById = useAppStore(s => s.deleteStoryById);
+  const userTags = useAuraV2Store(s => s.libraryTagsByStory);
+  const setStoryTags = useAuraV2Store(s => s.setStoryTags);
+  const lastReadAt = useAuraV2Store(s => s.statsByStory[story.id]?.lastReadAt);
+  const [editingTags, setEditingTags] = useState(false);
+  const [draftTag, setDraftTag] = useState('');
   const pct = story.progressPct ?? 0;
+  const tags = tagsFor(story, userTags);
+  const since = sinceLabel(lastReadAt);
+
+  const addTag = (raw: string) => {
+    const tag = raw.trim();
+    if (!tag) return;
+    setStoryTags(story.id, [...tags, tag]);
+    setDraftTag('');
+  };
 
   return (
     <div
@@ -60,7 +97,7 @@ const StoryCard = ({ story }: { story: StoryMeta }) => {
         </div>
 
         <div className="flex-1 min-w-0 p-4">
-          <h3 className="font-bold truncate pr-6">{story.title}</h3>
+          <h3 className="font-bold truncate pr-6" data-testid="card-title">{story.title}</h3>
           <div className="flex items-center gap-1.5 text-xs text-muted mt-1">
             {FORMAT_ICON[story.format]}
             <span>{FORMAT_LABEL[story.format]}</span>
@@ -68,23 +105,76 @@ const StoryCard = ({ story }: { story: StoryMeta }) => {
             <span>{story.messageCount} messages</span>
           </div>
           <div className="text-xs text-muted mt-0.5">
-            Imported {new Date(story.importedAt).toLocaleDateString()}
+            {since
+              ? `Last read ${since}`
+              : `Imported ${new Date(story.importedAt).toLocaleDateString()}`}
           </div>
-          {story.tags && story.tags.length > 0 && (
-            <div className="flex flex-wrap gap-1 mt-1.5">
-              {story.tags.slice(0, 3).map(tag => (
-                <span
-                  key={tag}
-                  className="px-1.5 py-0.5 rounded-full bg-app-text/5 border border-app-border/60 text-[10px] text-muted"
+          {/* Tags are the library's organising axis, so they are editable
+            * here rather than buried in a menu. Clicks inside must not open
+            * the story — the whole card is the open target. */}
+          <div className="flex flex-wrap items-center gap-1 mt-1.5">
+            {(editingTags ? tags : tags.slice(0, 3)).map(tag => (
+              <span
+                key={tag}
+                className="flex items-center gap-1 pl-1.5 rounded-full bg-app-text/5 border border-app-border/60 text-[10px] text-muted"
+              >
+                {tag}
+                {editingTags && (
+                  <button
+                    onClick={e => { e.stopPropagation(); setStoryTags(story.id, tags.filter(t => t !== tag)); }}
+                    aria-label={`Remove tag ${tag}`}
+                    className="flex items-center justify-center min-h-7 min-w-7 rounded-full hover:text-red-500"
+                  >
+                    <X size={10} />
+                  </button>
+                )}
+              </span>
+            ))}
+            {!editingTags && tags.length > 3 && (
+              <span className="text-[10px] text-muted">+{tags.length - 3}</span>
+            )}
+
+            {editingTags ? (
+              <>
+                <input
+                  autoFocus
+                  value={draftTag}
+                  onClick={e => e.stopPropagation()}
+                  onChange={e => setDraftTag(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') { e.preventDefault(); addTag(draftTag); }
+                    if (e.key === 'Escape') { setDraftTag(''); setEditingTags(false); }
+                  }}
+                  list={`tags-${story.id}`}
+                  placeholder="add tag…"
+                  aria-label="Add a tag"
+                  data-testid="tag-input"
+                  className="w-24 px-1.5 min-h-7 text-[10px] bg-app-text/5 border border-app-border rounded-full outline-none focus:border-accent/50"
+                />
+                {/* Suggestions come from tags already in use, so the library
+                  * converges on one spelling instead of five near-misses. */}
+                <datalist id={`tags-${story.id}`}>
+                  {suggestions.map(t => <option key={t} value={t} />)}
+                </datalist>
+                <button
+                  onClick={e => { e.stopPropagation(); addTag(draftTag); setEditingTags(false); }}
+                  aria-label="Done editing tags"
+                  className="flex items-center justify-center min-h-7 min-w-7 rounded-full text-accent"
                 >
-                  {tag}
-                </span>
-              ))}
-              {story.tags.length > 3 && (
-                <span className="text-[10px] text-muted">+{story.tags.length - 3}</span>
-              )}
-            </div>
-          )}
+                  <Check size={12} />
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={e => { e.stopPropagation(); setEditingTags(true); }}
+                aria-label={`Edit tags for ${story.title}`}
+                data-testid="edit-tags"
+                className="flex items-center gap-1 px-1.5 min-h-7 rounded-full border border-dashed border-app-border/60 text-[10px] text-muted opacity-0 group-hover:opacity-100 focus:opacity-100 touch:opacity-100 transition-opacity"
+              >
+                <Tag size={9} /> {tags.length ? 'edit' : 'tag'}
+              </button>
+            )}
+          </div>
 
           <div className="mt-3">
             <div className="h-1.5 rounded-full bg-app-text/10 overflow-hidden">
@@ -135,6 +225,33 @@ export const Library = () => {
   const [notes, setNotes] = useState<string[]>([]);
   const [pending, setPending] = useState<{ stories: File[]; cards: File[] } | null>(null);
 
+  const userTags = useAuraV2Store(s => s.libraryTagsByStory);
+  const stats = useAuraV2Store(s => s.statsByStory);
+  const jumpToMessage = useAppStore(s => s.jumpToMessage);
+  const openStory = useAppStore(s => s.openStory);
+  const [query, setQuery] = useState('');
+  const [sort, setSort] = useState<LibrarySort>('lastRead');
+  const [format, setFormat] = useState<StoryFormat | 'all'>('all');
+  const [activeTags, setActiveTags] = useState<string[]>([]);
+
+  const tagOptions = useMemo(() => allTags(library, userTags), [library, userTags]);
+  const tagSuggestions = useMemo(() => tagOptions.map(t => t.tag), [tagOptions]);
+  const shown = useMemo(
+    () => sortStories(filterStories(library, { query, tags: activeTags, format }, userTags), sort, stats),
+    [library, query, activeTags, format, userTags, sort, stats],
+  );
+
+  const toggleTag = (tag: string) => setActiveTags(prev =>
+    prev.some(t => t.toLowerCase() === tag.toLowerCase())
+      ? prev.filter(t => t.toLowerCase() !== tag.toLowerCase())
+      : [...prev, tag]);
+
+  /** A deep-search hit: open the story, then land on the exact message. */
+  const openAt = async (storyId: string, messageId: string) => {
+    await openStory(storyId);
+    jumpToMessage(messageId);
+  };
+
   const runImport = async (stories: File[], cards: File[]) => {
     setImporting(true);
     try {
@@ -184,18 +301,32 @@ export const Library = () => {
       />
 
       <header className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 px-5 sm:px-10 pt-6 sm:pt-8 pb-5 sm:pb-6 max-w-5xl w-full mx-auto">
-        <div className="min-w-0">
-          <h1 className="text-3xl font-serif font-bold">Aura Reader</h1>
-          <p className="text-sm text-muted mt-1">
-            Relive your SillyTavern &amp; Kobold stories.
-          </p>
+        <div className="flex items-center gap-3 min-w-0">
+          {/* The mark lives here and nowhere else in the app — the library is
+            * the front door, and a logo over the reading column would be a
+            * brand sitting in the middle of someone's story.
+            * `alt=""`: the h1 beside it already says the name, and a screen
+            * reader hearing it twice is noise, not access. */}
+          <img
+            src={AEIA_MARK}
+            alt=""
+            aria-hidden="true"
+            draggable={false}
+            className="h-9 sm:h-11 w-auto shrink-0 select-none"
+          />
+          <div className="min-w-0">
+            <h1 className="text-3xl font-serif font-bold">Aeia Reader</h1>
+            <p className="text-sm text-muted mt-1">
+              Relive your SillyTavern &amp; Kobold stories.
+            </p>
+          </div>
         </div>
         <div className="flex items-center gap-2">
           {/* The tour is opt-in after the first run — it shows itself once, then
             * lives here so it stays findable without nagging. */}
           <button
             onClick={() => setTourOpen(true)}
-            title="Take the tour — what Aura can do"
+            title="Take the tour — what Aeia can do"
             data-testid="tour-button"
             className="flex items-center justify-center gap-1.5 px-3 min-h-11 rounded-lg border border-app-border text-sm text-app-text/70 hover:text-app-text hover:bg-app-text/5 transition-colors"
           >
@@ -269,8 +400,42 @@ export const Library = () => {
             </p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {library.map(story => <StoryCard key={story.id} story={story} />)}
+          <div className="flex flex-col gap-4">
+            <LibraryToolbar
+              query={query}
+              onQuery={setQuery}
+              sort={sort}
+              onSort={setSort}
+              format={format}
+              onFormat={setFormat}
+              tags={tagOptions}
+              activeTags={activeTags}
+              onToggleTag={toggleTag}
+              shown={shown.length}
+              total={library.length}
+            />
+
+            {shown.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-app-border p-10 text-center">
+                <p className="text-sm font-medium">Nothing matches those filters.</p>
+                <button
+                  onClick={() => { setQuery(''); setActiveTags([]); setFormat('all'); }}
+                  className="mt-3 px-3 min-h-10 rounded-lg border border-app-border text-xs hover:bg-app-text/5"
+                >
+                  Clear filters
+                </button>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {shown.map(story => (
+                  <StoryCard key={story.id} story={story} suggestions={tagSuggestions} />
+                ))}
+              </div>
+            )}
+
+            {/* Titles and tags are searched as you type; the text inside the
+              * stories costs a read of the whole library, so it is asked for. */}
+            <DeepSearch query={query} onOpen={(sid, mid) => void openAt(sid, mid)} />
           </div>
         )}
       </main>
