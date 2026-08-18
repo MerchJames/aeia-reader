@@ -4,9 +4,10 @@ import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { plainTextForSpeech, processText } from '../utils/textProcessor';
 import { resolveContent } from '../utils/lens';
 import { kokoroSpeak, voiceForSpeaker } from '../utils/kokoro';
-import { buildSpeechPlan, dialogueQuotes, SpeechSegment } from '../utils/dialogueSegments';
+import { dialogueQuotes } from '../utils/dialogueSegments';
 import { emotionProsody } from '../utils/sceneMood';
 import { audioMixer } from '../utils/audioMixer';
+import { speechPlanFor } from '../utils/speechPlan';
 
 export const ttsSupported = () =>
   typeof window !== 'undefined' && 'speechSynthesis' in window;
@@ -243,23 +244,24 @@ export const useTTS = () => {
 
       // Multi-voice: read narration in the message's voice and each character's
       // dialogue in their own cast voice; single-voice reads the whole message.
-      const userName = (s.currentStory?.userName ?? '').trim().toLowerCase();
       const cast = [...new Set(useAppStore.getState().chains.flatMap(c => c.messages).map(m => m.name))];
-      // Prefer the enrichment's per-quote attribution over the heuristic.
-      const dialogue = storyId ? v2.sceneByStory[storyId]?.[msg.id]?.dialogue : undefined;
-      const plan = s.ttsMultiVoice
-        ? buildSpeechPlan(plain, { author: msg.name, cast, dialogue })
-        : [{ text: plain, speaker: msg.name, isDialogue: false }];
-      const voiceForSegment = (seg: SpeechSegment): string => voiceForSpeaker({
-        role: !seg.isDialogue ? msg.role : (seg.speaker.trim().toLowerCase() === userName ? 'user' : 'ai'),
-        name: seg.isDialogue ? seg.speaker : msg.name,
+      // The plan comes from the shared module, so the audiobook render and
+      // what you hear live can never drift apart.
+      const plan = speechPlanFor(msg, {
+        cast,
+        characterName: s.currentStory?.characterName,
+        userName: s.currentStory?.userName,
+        overrides: storyId ? v2.overridesByStory[storyId] : undefined,
+        lensOn: !!storyId && !!v2.lensOnByStory[storyId],
+        hideMetadata: s.hideMetadata,
+        substituteNames: s.substituteNames,
+        multiVoice: s.ttsMultiVoice,
         kokoroVoice: s.kokoroVoice,
         kokoroUserVoice: s.kokoroUserVoice,
         ttsVoiceByCharacter: s.ttsVoiceByCharacter,
-        primaryName: s.currentStory?.characterName,
-        // Multi-voice forces auto-casting so NPC lines always differentiate.
-        autoCast: s.autoCastVoices || s.ttsMultiVoice,
-      });
+        autoCastVoices: s.autoCastVoices,
+      }, storyId ? v2.sceneByStory[storyId]?.[msg.id] : undefined);
+      const voiceForSegment = (seg: { voice: string }): string => seg.voice;
 
       s.setTtsPending(true);
       s.setTtsProgress(0);

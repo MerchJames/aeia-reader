@@ -3,7 +3,7 @@ import { useAppStore } from '../store';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { processText } from '../utils/textProcessor';
 import { resolveContent } from '../utils/lens';
-import { holdMsAt, holdSpeedScale, pacingFor, rateMultiplier } from '../utils/expressive';
+import { dwellMs, holdMsAt, holdSpeedScale, pacingFor, rateMultiplier } from '../utils/expressive';
 import {
   PerformRange, derivePerformCues, mergePerformCues, nextPerformBoundary, performAudioAt,
   performEnterMs, performExitMs, performHoldMs, performRateAt, rangeAt, resolvePerformRanges,
@@ -51,6 +51,9 @@ export const useStreamer = () => {
     let raf = 0;
     let pauseTimer: ReturnType<typeof setTimeout> | null = null;
     let last = performance.now();
+    // When this passage started revealing — the read floor is a floor on total
+    // time on screen, so it has to know how much of that time the reveal spent.
+    const revealStart = last;
     let acc = 0;
     // Cinematic pacing: suppress reveals until this timestamp for a dramatic beat.
     let holdUntil = 0;
@@ -92,6 +95,13 @@ export const useStreamer = () => {
         )
         : undefined;
       return resolvePerformRanges(full, cues?.length ? cues : derivePerformCues(full));
+    };
+
+    /** Reveal speed in force — a starred chain may override the global slider. */
+    const speedNow = () => {
+      const s = useAppStore.getState();
+      const chain = s.chains[s.currentChainIndex];
+      return (chain?.starred && chain.starSettings?.speed) || s.playbackSpeed;
     };
 
     const fullText = () => {
@@ -136,11 +146,11 @@ export const useStreamer = () => {
       // Commit the PROCESSED text we just revealed (not raw source) so the
       // finished message keeps its formatting and full last word.
       s.finishCurrentMessage(fullText());
-      // Short lines finish streaming in a blink and would vanish before
-      // they can be read (worst on Stage/VN where only the current passage
-      // shows) — hold them for a read-speed floor before advancing.
+      // A passage owes the reader a minimum time ON SCREEN — see `dwellMs`. The
+      // reveal has been showing these words the whole time it was typing them,
+      // so what's left to wait is the floor MINUS the time that already took.
       const words = (useAppStore.getState().streamedText.match(/\S+/g) ?? []).length;
-      const readFloor = words <= 30 ? Math.min(2400, 300 + words * 110) : 0;
+      const readFloor = dwellMs(words, speedNow()) - (performance.now() - revealStart);
       pauseTimer = setTimeout(() => {
         const st = useAppStore.getState();
         if (!st.isStreaming || st.streamingMessage?.id !== messageId) return;
@@ -171,8 +181,7 @@ export const useStreamer = () => {
 
       if (!s.isStreaming || !s.streamingMessage) return;
 
-      const chain = s.chains[s.currentChainIndex];
-      const speed = (chain?.starred && chain.starSettings?.speed) || s.playbackSpeed;
+      const speed = speedNow();
       const full = fullText();
 
       if (s.streamedText.length >= full.length) {
@@ -190,6 +199,14 @@ export const useStreamer = () => {
       // (Dialogue-only TTS voices the quotes as the reveal passes them, so the
       // reveal is free — and stays free to perform.)
       const ttsSync = s.ttsEnabled && s.ttsPending && !s.ttsDialogueOnly;
+      // A companion is mid-sentence and the reader asked for the reveal to wait
+      // for them. Deliberately checked BEFORE `holdUntil` rather than folded
+      // into it: this hold has no known duration — it ends when the line lands
+      // or the request fails — so it cannot be expressed as a timestamp.
+      if (s.reactionHold) {
+        raf = requestAnimationFrame(tick);
+        return;
+      }
       // Mid-beat — whether the hold came from cinematic pacing or from a
       // Director cue, the reveal simply waits it out.
       if (now < holdUntil) {
