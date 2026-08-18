@@ -650,6 +650,21 @@ body {
 }
 .reader-img-grid .reader-img { margin: 0; max-height: 320px; width: auto; }
 
+/* --- A cue fires ONCE ------------------------------------------------
+ *
+ * The performance and emphasis treatments are meant to fire on the REVEAL of
+ * the word they mark. They were restarting on essentially every reveal tick
+ * instead — measured at 291 restarts on one word in six seconds of streaming,
+ * 362 in Chat — which strobes, and reads as a rendering fault rather than as
+ * direction.
+ *
+ * The renderer records the first render that shows a word and adds this class
+ * from then on. Motion stops; the LOOK stays, because every static declaration
+ * (drop's weight, fade's italic, unwrite's blur) lives on the base class rather
+ * than in the keyframes, and each animation already ends where it began.
+ */
+.fx-played { animation: none !important; }
+
 /* --- Reveal / dialogue animations ------------------------------------ */
 
 @keyframes smoothReveal {
@@ -867,6 +882,35 @@ body {
   letter-spacing: -0.01em;
 }
 
+/* --- typographic emphasis ---------------------------------------------------
+ * Shout and whisper say how a line SOUNDS, which is why they follow the
+ * expressive-text setting. These three say how it is SET — emphasis a printed
+ * page could carry — so they follow scene emphasis alone and stay put when the
+ * kinetic side is turned off.
+ *
+ * Colours are mixed toward `currentColor` rather than used neat: the same rule
+ * then reads on a parchment page and in a midnight bubble, and a coloured word
+ * never drops below the contrast of the prose it sits in.
+ */
+.expr-underline {
+  text-decoration: underline;
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 0.18em;
+  text-decoration-color: color-mix(in srgb, var(--app-accent) 65%, transparent);
+}
+.expr-strike {
+  text-decoration: line-through;
+  text-decoration-thickness: 1.5px;
+  text-decoration-color: color-mix(in srgb, var(--app-accent) 70%, transparent);
+  opacity: 0.72;
+}
+.expr-color-accent { color: color-mix(in srgb, var(--app-accent) 78%, currentColor); }
+.expr-color-yellow { color: color-mix(in srgb, #eab308 72%, currentColor); }
+.expr-color-green  { color: color-mix(in srgb, #22c55e 72%, currentColor); }
+.expr-color-blue   { color: color-mix(in srgb, #3b82f6 72%, currentColor); }
+.expr-color-pink   { color: color-mix(in srgb, #ec4899 72%, currentColor); }
+.expr-color-orange { color: color-mix(in srgb, #f97316 72%, currentColor); }
+
 /* TTS karaoke cue — soft highlight on the word the narration is currently on
    (the reveal is paced to the voice, so the leading word is what's spoken). */
 .tts-reading {
@@ -923,8 +967,13 @@ body {
   0%   { transform: translateX(var(--perf-rush-dx, 0.5em)) skewX(-9deg); opacity: 0; filter: blur(1.6px); }
   100% { transform: translateX(0) skewX(0); opacity: 1; filter: blur(0); }
 }
-/* Stagger — each word STAMPS down, like a hand pressing it into the page. */
-.perf-stagger { animation: perfStamp 0.3s cubic-bezier(0.2, 1.6, 0.4, 1) both; }
+/* Stagger — each word STAMPS down, like a hand pressing it into the page, and
+   arrives lit, then cools. See perfRunTell. */
+.perf-stagger {
+  animation:
+    perfStamp 0.3s cubic-bezier(0.2, 1.6, 0.4, 1) both,
+    perfRunTell var(--perf-tell-dur, 0.95s) ease-out backwards;
+}
 @keyframes perfStamp {
   0%   { transform: scale(var(--perf-stamp-scale, 1.5)); opacity: 0; }
   55%  { transform: scale(0.95); opacity: 1; }
@@ -942,6 +991,30 @@ body {
   0%   { transform: translateX(var(--perf-cut-dx, 0.35em)); opacity: 0; }
   70%  { transform: translateX(-0.05em); opacity: 1; }
   100% { transform: translateX(0); opacity: 1; }
+}
+
+/* --- the cadence tell -------------------------------------------------------
+ * Stagger and drop are the two cues that spread one gesture across a whole run,
+ * and until now the run was only PACED: the words arrived slowly and looked
+ * exactly like ordinary words arriving slowly, which is what a hung render
+ * looks like from the reader's chair.
+ *
+ * So each word of a run arrives lit toward the accent and cools back over about
+ * a second. Words land 260–390ms apart, so the tint is always brightest on the
+ * newest one and fading down the two behind it — a wave moving with the beat,
+ * which is the thing that reads as deliberate. Deliberately a colour wash and
+ * nothing else: the run already has motion (perfStamp, perfDrop) and a second
+ * moving treatment on top of it would fight the first.
+ *
+ * `to { color: currentColor }` and not a fixed value: on the `color` property
+ * `currentColor` resolves to the INHERITED colour, so the word releases to
+ * whatever the prose around it is — page, bubble, stage box, any theme.
+ * `backwards` and not `both` for the same reason: nothing is pinned once it
+ * has played.
+ */
+@keyframes perfRunTell {
+  from { color: color-mix(in srgb, var(--app-accent) var(--perf-tell-tint, 72%), currentColor); }
+  to   { color: currentColor; }
 }
 /* The last word before the break keeps a hard edge after it lands. */
 .perf-cut:last-child { box-shadow: inset -2px 0 0 -1px color-mix(in srgb, var(--app-accent) 55%, transparent); }
@@ -962,10 +1035,12 @@ body {
   75%  { transform: translate(calc(var(--perf-tremble-amp, 0.6px) * -1), -0.3px) rotate(0.25deg); }
   100% { transform: translate(0, 0) rotate(0deg); }
 }
-/* Drop — the word falls in and lands heavy. */
+/* Drop — the word falls in and lands heavy, lit on impact. See perfRunTell. */
 .perf-drop {
   font-weight: 700;
-  animation: perfDrop 0.42s cubic-bezier(0.3, 1.4, 0.5, 1) both;
+  animation:
+    perfDrop 0.42s cubic-bezier(0.3, 1.4, 0.5, 1) both,
+    perfRunTell var(--perf-tell-dur, 0.95s) ease-out backwards;
 }
 @keyframes perfDrop {
   0%   { transform: translateY(calc(var(--perf-drop-rise, 0.5em) * -1)) scale(1.12); opacity: 0; }
@@ -1006,8 +1081,14 @@ body {
   100% { opacity: var(--perf-fade-opacity, 0.55); filter: blur(0); }
 }
 
-/* Intensity presets — subtle whisper → cinematic punch. */
-.reader-page.expr-subtle {
+/* Intensity presets — subtle whisper → cinematic punch.
+
+   Scoped to `.expr-*` alone, not `.reader-page.expr-*`. The class is set on
+   the app root, so Stage, VN, Book and Sandbox inherit the same values; while
+   it lived on `.reader-page` — a class only ReaderDisplay applies — those four
+   views silently fell back to the hard-coded fallbacks in each rule, and the
+   intensity setting appeared to do nothing in most of the app. */
+.expr-subtle {
   --expr-shout-size: 1.07em; --expr-shout-tint: 24%; --expr-key-track: 0.006em;
   --expr-scene-gap: 1.2em; --expr-scene-opacity: 0.4;
   --perf-swell-scale: 1.12; --perf-swell-dur: 1.1s; --perf-tremble-amp: 0.4px;
@@ -1015,8 +1096,9 @@ body {
   --perf-unwrite-dur: 2s; --perf-unwrite-opacity: 0.34;
   --perf-slow-track: 0.08em; --perf-slow-dur: 1.1s; --perf-stamp-scale: 1.22;
   --perf-rush-dx: 0.3em; --perf-cut-dx: 0.2em;
+  --perf-tell-tint: 42%; --perf-tell-dur: 0.7s;
 }
-.reader-page.expr-expressive {
+.expr-expressive {
   --expr-shout-size: 1.15em; --expr-shout-tint: 40%; --expr-key-track: 0.012em;
   --expr-scene-gap: 1.6em; --expr-scene-opacity: 0.5;
   --perf-swell-scale: 1.28; --perf-swell-dur: 1.5s; --perf-tremble-amp: 0.6px;
@@ -1024,8 +1106,9 @@ body {
   --perf-unwrite-dur: 2.6s; --perf-unwrite-opacity: 0.22;
   --perf-slow-track: 0.16em; --perf-slow-dur: 1.6s; --perf-stamp-scale: 1.5;
   --perf-rush-dx: 0.5em; --perf-cut-dx: 0.35em;
+  --perf-tell-tint: 72%; --perf-tell-dur: 0.95s;
 }
-.reader-page.expr-cinematic {
+.expr-cinematic {
   --expr-shout-size: 1.3em; --expr-shout-tint: 58%; --expr-key-track: 0.022em;
   --expr-scene-gap: 2.4em; --expr-scene-opacity: 0.62;
   --perf-swell-scale: 1.5; --perf-swell-dur: 2s; --perf-tremble-amp: 1px;
@@ -1033,6 +1116,7 @@ body {
   --perf-unwrite-dur: 3.2s; --perf-unwrite-opacity: 0.12;
   --perf-slow-track: 0.26em; --perf-slow-dur: 2.1s; --perf-stamp-scale: 1.85;
   --perf-rush-dx: 0.8em; --perf-cut-dx: 0.55em;
+  --perf-tell-tint: 90%; --perf-tell-dur: 1.25s;
 }
 
 /* Motion is the whole point of these, so honour the OS/app opt-outs: the words
@@ -1053,6 +1137,22 @@ body {
 .no-effects .perf-stagger,
 .no-effects .perf-hold,
 .no-effects .perf-cut { animation: none !important; }
+
+/* A cadence run with its motion off is pacing and nothing else — which is
+   exactly what lag looks like. So when the tell cannot move, it goes static:
+   a faint accent underline saying the pause was meant. The reveal is still
+   paced under both opt-outs (they turn off VISUALS, not the streamer), so this
+   is the one treatment that must survive them. */
+@media (prefers-reduced-motion: reduce) {
+  .perf-stagger, .perf-drop { text-decoration: underline; }
+}
+.no-effects .perf-stagger,
+.no-effects .perf-drop { text-decoration: underline; }
+.perf-stagger, .perf-drop {
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.2em;
+  text-decoration-color: color-mix(in srgb, var(--app-accent) 34%, transparent);
+}
 
 /* Drop cap — the opening letter of each AI passage set large, book-style.
    Only non-user, non-streaming passages (the reveal would jump the cap). */

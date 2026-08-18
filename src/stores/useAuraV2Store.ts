@@ -2,11 +2,14 @@ import React from 'react';
 import { create } from 'zustand';
 import { applyOps, loadV2 } from '../lib/v2Storage';
 import { SliceBag, diffSlices, misdeclaredSlices, pickPersisted } from '../utils/v2Persist';
-import { Annotation, Chain, ChatThread, ChatTurn, ContextZone, CowritePreset, Message, MessageOverride, Pin, PinSet, PinVersion, SandboxActive, SandboxScope, SandboxTreatment, SceneCue, SceneDescriptor, ScenePerformCue, Sheet, StyleConfig } from '../types';
+import { Annotation, Chain, ChatThread, ChatTurn, ContextZone, CowritePreset, Message, MessageOverride, Pin, PinSet, PinVersion, SandboxActive, SandboxScope, SandboxTreatment, SceneArt, SceneCue, SceneDescriptor, SceneEmphasis, ScenePerformCue, Sheet, StyleConfig } from '../types';
 import { useAppStore } from '../store';
 import type { StoryRead } from '../utils/storyRead';
 import type { PacketRecord, StylePacket } from '../utils/stylePacket';
 import { readThread, type AskTurn } from '../utils/askCharacter';
+import type { ReactionPoint } from '../utils/liveReaction';
+import type { EmotionBucket } from '../lib/spriteStorage';
+import type { Visitor } from '../utils/visitor';
 
 /* ------------------------------------------------------------------ */
 /* Codex types                                                         */
@@ -274,12 +277,54 @@ export interface PerformMark extends ScenePerformCue {
   id: string;
 }
 
+/** One line the reactor actually said, at one marked moment. */
+export interface SpokenReaction {
+  text: string;
+  emotion: EmotionBucket;
+  at: number;
+}
+
+/** What the scout found in one passage, and what has been said there since. */
+export interface ReactionRecord {
+  messageId: string;
+  /** Who was watching. A reaction belongs to them — switching companions is a
+   *  different reading, not an edit of this one. */
+  reactor: string;
+  /** Fingerprint of the passage the moments were found in. */
+  hash: string;
+  points: ReactionPoint[];
+  /** Spoken lines, by point id. */
+  lines: Record<string, SpokenReaction>;
+}
+
+/**
+ * A reader-authored typographic mark on a hand-picked span — a colour, an
+ * underline, a strike.
+ *
+ * Kept apart from the Director's `SceneEmphasis` for the same reason SFX marks
+ * are: the Director's read is rebuilt whenever a passage is edited or re-read,
+ * and a reader's own marking must survive that. Merged with the Director's
+ * spans at every render site, never written into the descriptor.
+ */
+export interface EmphasisMark extends SceneEmphasis {
+  id: string;
+}
+
 interface AuraV2State {
   /* Codex data (persisted) */
   codexByStory: Record<string, CodexEntity[]>;
   /** Flat count of messages already scanned per story. */
   scanProgress: Record<string, number>;
   statsByStory: Record<string, StoryStats>;
+  /**
+   * Reader-assigned tags, the library's organising axis.
+   *
+   * Separate from `StoryMeta.tags`, which is whatever the character card
+   * shipped with and is never written again — those seed this on import, and
+   * from then on the two are independent. Kept here rather than on the story
+   * record so renaming a tag rewrites one small row, not every message.
+   */
+  libraryTagsByStory: Record<string, string[]>;
 
   /* Lens override layer (persisted) */
   overridesByStory: Record<string, MessageOverride[]>;
@@ -297,10 +342,41 @@ interface AuraV2State {
   addSfxMark: (storyId: string, messageId: string, mark: Omit<SfxMark, 'id'>) => void;
   removeSfxMark: (storyId: string, messageId: string, markId: string) => void;
 
+  /* Generated scene art — story → messageId → picture METADATA (persisted).
+   * The bytes live in `lib/artStorage.ts`; a megabyte per image in a slice
+   * would be rewritten on every debounced save. This is annotation, not the
+   * Lens: the Lens rewrites the WORDS, and a picture is not one of them. */
+  artByStory: Record<string, Record<string, SceneArt[]>>;
+  addSceneArt: (storyId: string, messageId: string, art: SceneArt) => void;
+  removeSceneArt: (storyId: string, messageId: string, artId: string) => void;
+
+  /* Visiting characters brought in from other chats — story → visitors
+   * (persisted). NOT the Lens: the Lens rewrites existing messages, while a
+   * visitor assembles context for a new generation. */
+  visitorsByStory: Record<string, Visitor[]>;
+  addVisitor: (storyId: string, visitor: Visitor) => void;
+  updateVisitor: (storyId: string, visitorId: string, patch: Partial<Visitor>) => void;
+  removeVisitor: (storyId: string, visitorId: string) => void;
+
+  /* Per-character appearance sheets — story → character name → prompt text.
+   * Prepended verbatim to every image prompt, which is the cheap 80% of making
+   * the same person recognisable twice. Reader-editable by design. */
+  appearanceByStory: Record<string, Record<string, string>>;
+  setAppearance: (storyId: string, character: string, text: string) => void;
+  /* Locked seed per character, where the backend has one. */
+  artSeedByStory: Record<string, Record<string, number>>;
+  setArtSeed: (storyId: string, character: string, seed: number | null) => void;
+
   /* Reader-authored PERFORMANCE cues — story → messageId → span directions
    * (persisted). Same shape the Director emits, so the reveal treats a
    * hand-marked span exactly like a directed one; these are applied first, so
    * a reader's call always wins over the AI's on the same words. */
+  /* Reader-authored typographic marks — story → messageId → spans (persisted). */
+  emphasisMarksByStory: Record<string, Record<string, EmphasisMark[]>>;
+  addEmphasisMark: (storyId: string, messageId: string, mark: Omit<EmphasisMark, 'id'>) => void;
+  /** Drop any hand-marked span on `text` (the popover's "no treatment"). */
+  clearEmphasisMarkFor: (storyId: string, messageId: string, text: string) => void;
+
   performMarksByStory: Record<string, Record<string, PerformMark[]>>;
   addPerformMark: (storyId: string, messageId: string, mark: Omit<PerformMark, 'id'>) => void;
   removePerformMark: (storyId: string, messageId: string, markId: string) => void;
@@ -360,6 +436,30 @@ interface AuraV2State {
    *  for the Director/summarizer/assistant. Exactly one component reads it. */
   askByStory: Record<string, AskTurn[]>;
 
+  /**
+   * Live Reaction — the scout's marked moments and the lines already spoken at
+   * them, per story → messageId.
+   *
+   * READER-ONLY on exactly the same terms as `askByStory`, and for a sharper
+   * reason: this one speaks without being asked, so the boundary is the only
+   * thing standing between a reading companion and a companion chat. It never
+   * reaches the Lens, an export, the Multiverse graph, or any AI context built
+   * for the Director/summarizer/assistant.
+   *
+   * `hash` fingerprints the passage the moments were found in, so an edited or
+   * swiped message drops its reactions instead of firing them at offsets that
+   * now point at different words.
+   */
+  reactionsByStory: Record<string, Record<string, ReactionRecord>>;
+  setReactionPoints: (
+    storyId: string, messageId: string,
+    rec: Pick<ReactionRecord, 'reactor' | 'hash' | 'points'>,
+  ) => void;
+  addReactionLine: (
+    storyId: string, messageId: string, pointId: string, line: SpokenReaction,
+  ) => void;
+  clearReactions: (storyId: string, messageId?: string) => void;
+
   /** Reader's standing direction for the Scene Director, per story (persisted). */
   sandboxGuidanceByStory: Record<string, string>;
   /** That direction RESOLVED into concrete values — the brief every beat of the
@@ -406,6 +506,9 @@ interface AuraV2State {
   setCodexUseAI: (on: boolean) => void;
   setCodexHighlight: (on: boolean) => void;
   markRecapSeen: (storyId: string) => void;
+  setStoryTags: (storyId: string, tags: string[]) => void;
+  /** Stamp "last read" without claiming any reading time was spent. */
+  touchStory: (storyId: string) => void;
 
   /** Merge freshly extracted entities into a story's codex. */
   upsertEntities: (storyId: string, incoming: Omit<CodexEntity, 'id' | 'updatedAt'>[]) => void;
@@ -573,6 +676,7 @@ export const useAuraV2Store = create<AuraV2State>()(
       codexByStory: {},
       scanProgress: {},
       statsByStory: {},
+      libraryTagsByStory: {},
 
       overridesByStory: {},
       lensOnByStory: {},
@@ -580,6 +684,11 @@ export const useAuraV2Store = create<AuraV2State>()(
       sheetsByStory: {},
       annotationsByStory: {},
       sfxMarksByStory: {},
+      artByStory: {},
+      visitorsByStory: {},
+      appearanceByStory: {},
+      artSeedByStory: {},
+      emphasisMarksByStory: {},
       performMarksByStory: {},
       pinsByStory: {},
       pinSetsByStory: {},
@@ -600,6 +709,7 @@ export const useAuraV2Store = create<AuraV2State>()(
       sandboxGuidanceByStory: {},
       sandboxPacketByStory: {},
       askByStory: {},
+      reactionsByStory: {},
       directorEnabledByStory: {},
       summaryPinByStory: {},
 
@@ -708,6 +818,38 @@ export const useAuraV2Store = create<AuraV2State>()(
         delete codex[storyId];
         delete scan[storyId];
         set({ codexByStory: codex, scanProgress: scan, codexFocusId: null });
+      },
+
+      setStoryTags: (storyId, tags) => {
+        // Trimmed, de-duped, case-insensitively unique, order preserved — the
+        // filter UI groups by exact string, so "Romance" and "romance" as two
+        // separate chips would be a bug the reader cannot see the cause of.
+        const seen = new Set<string>();
+        const clean: string[] = [];
+        for (const t of tags) {
+          const trimmed = t.trim();
+          const key = trimmed.toLowerCase();
+          if (!trimmed || seen.has(key)) continue;
+          seen.add(key);
+          clean.push(trimmed);
+        }
+        set({ libraryTagsByStory: { ...get().libraryTagsByStory, [storyId]: clean } });
+        // Write through rather than debounce. Saves are batched on a 400ms
+        // timer, and an IndexedDB write cannot hold up a page unload — fine for
+        // reading position, which is re-derived constantly and cheap to lose a
+        // moment of, but a tag is a deliberate, one-off edit. Tagging a story
+        // and immediately closing the tab must not silently discard it.
+        void flushV2();
+      },
+
+      touchStory: (storyId) => {
+        const prev = get().statsByStory[storyId] ?? { msRead: 0, lastReadAt: 0 };
+        set({
+          statsByStory: {
+            ...get().statsByStory,
+            [storyId]: { ...prev, lastReadAt: Date.now() },
+          },
+        });
       },
 
       addReadingTime: (storyId, ms) => {
@@ -1311,6 +1453,50 @@ export const useAuraV2Store = create<AuraV2State>()(
         const thread = readThread(get().askByStory[storyId]);
         set({ askByStory: { ...get().askByStory, [storyId]: [...thread, turn] } });
       },
+      setReactionPoints: (storyId, messageId, rec) => {
+        const byMsg = get().reactionsByStory[storyId] ?? {};
+        const prev = byMsg[messageId];
+        // Re-scouting the same passage keeps what was already said; a CHANGED
+        // passage starts clean, because the old offsets now point at different
+        // words and a line spoken at them would land on the wrong moment.
+        const lines = prev?.hash === rec.hash ? prev.lines : {};
+        set({
+          reactionsByStory: {
+            ...get().reactionsByStory,
+            [storyId]: { ...byMsg, [messageId]: { messageId, ...rec, lines } },
+          },
+        });
+      },
+      addReactionLine: (storyId, messageId, pointId, line) => {
+        const byMsg = get().reactionsByStory[storyId] ?? {};
+        const rec = byMsg[messageId];
+        if (!rec) return;
+        set({
+          reactionsByStory: {
+            ...get().reactionsByStory,
+            [storyId]: { ...byMsg, [messageId]: { ...rec, lines: { ...rec.lines, [pointId]: line } } },
+          },
+        });
+        // Written through: a spoken line cost a model call, and a reader
+        // scrolling back expects to find what was said at that beat.
+        void flushV2();
+      },
+      clearReactions: (storyId, messageId) => {
+        if (!messageId) {
+          const next = { ...get().reactionsByStory };
+          delete next[storyId];
+          set({ reactionsByStory: next });
+          void flushV2();
+          return;
+        }
+        const byMsg = get().reactionsByStory[storyId];
+        if (!byMsg?.[messageId]) return;
+        const next = { ...byMsg };
+        delete next[messageId];
+        set({ reactionsByStory: { ...get().reactionsByStory, [storyId]: next } });
+        void flushV2();
+      },
+
       clearAskThread: (storyId) => {
         const next = { ...get().askByStory };
         delete next[storyId];
@@ -1338,6 +1524,95 @@ export const useAuraV2Store = create<AuraV2State>()(
         const byMsg = get().sfxMarksByStory[storyId];
         if (!byMsg?.[messageId]) return;
         set({ sfxMarksByStory: { ...get().sfxMarksByStory, [storyId]: { ...byMsg, [messageId]: byMsg[messageId].filter(m => m.id !== markId) } } });
+      },
+
+      addSceneArt: (storyId, messageId, art) => {
+        const byMsg = get().artByStory[storyId] ?? {};
+        const list = [...(byMsg[messageId] ?? []), art];
+        set({ artByStory: { ...get().artByStory, [storyId]: { ...byMsg, [messageId]: list } } });
+        // A picture costs a GPU render — the same argument as tags and visitors.
+        void flushV2();
+      },
+      removeSceneArt: (storyId, messageId, artId) => {
+        const byMsg = get().artByStory[storyId];
+        if (!byMsg?.[messageId]) return;
+        const rest = byMsg[messageId].filter(a => a.id !== artId);
+        const next = { ...byMsg };
+        if (rest.length) next[messageId] = rest; else delete next[messageId];
+        set({ artByStory: { ...get().artByStory, [storyId]: next } });
+        void flushV2();
+      },
+
+      // All three write through rather than debounce, for the same reason
+      // `setStoryTags` does: saves are batched on a 400ms timer and an
+      // IndexedDB write cannot hold up a page unload. A visitor costs a model
+      // call to make and a careful read to correct — losing one to a reload a
+      // third of a second later is not a tradeoff anybody would accept.
+      addVisitor: (storyId, visitor) => {
+        const list = get().visitorsByStory[storyId] ?? [];
+        set({ visitorsByStory: { ...get().visitorsByStory, [storyId]: [...list, visitor] } });
+        void flushV2();
+      },
+      updateVisitor: (storyId, visitorId, patch) => {
+        const list = get().visitorsByStory[storyId];
+        if (!list) return;
+        set({
+          visitorsByStory: {
+            ...get().visitorsByStory,
+            [storyId]: list.map(v => (v.id === visitorId ? { ...v, ...patch } : v)),
+          },
+        });
+        void flushV2();
+      },
+      removeVisitor: (storyId, visitorId) => {
+        const list = get().visitorsByStory[storyId];
+        if (!list) return;
+        set({ visitorsByStory: { ...get().visitorsByStory, [storyId]: list.filter(v => v.id !== visitorId) } });
+        void flushV2();
+      },
+
+      setAppearance: (storyId, character, text) => {
+        const key = character.trim().toLowerCase();
+        if (!key) return;
+        const byChar = { ...(get().appearanceByStory[storyId] ?? {}) };
+        if (text.trim()) byChar[key] = text.trim(); else delete byChar[key];
+        set({ appearanceByStory: { ...get().appearanceByStory, [storyId]: byChar } });
+      },
+      setArtSeed: (storyId, character, seed) => {
+        const key = character.trim().toLowerCase();
+        if (!key) return;
+        const byChar = { ...(get().artSeedByStory[storyId] ?? {}) };
+        if (seed == null) delete byChar[key]; else byChar[key] = seed;
+        set({ artSeedByStory: { ...get().artSeedByStory, [storyId]: byChar } });
+      },
+
+      // Both write through rather than debounce, for the same reason visitors
+      // and art do: saves are batched on a 400ms timer and an IndexedDB write
+      // cannot hold up a page unload. Marking a span is a deliberate act — the
+      // reader picked the words by hand — and losing it to a reload a third of
+      // a second later is not a tradeoff anybody would accept. Caught by the
+      // e2e that reloads after marking, which is the only place it shows.
+      addEmphasisMark: (storyId, messageId, mark) => {
+        const text = mark.text.trim();
+        if (!text) return;
+        const byMsg = get().emphasisMarksByStory[storyId] ?? {};
+        // One treatment per span — re-marking the same words replaces the old.
+        const kept = (byMsg[messageId] ?? []).filter(m => m.text !== text);
+        const list = [...kept, { ...mark, text, id: newId() }];
+        set({ emphasisMarksByStory: { ...get().emphasisMarksByStory, [storyId]: { ...byMsg, [messageId]: list } } });
+        void flushV2();
+      },
+      clearEmphasisMarkFor: (storyId, messageId, text) => {
+        const byMsg = get().emphasisMarksByStory[storyId];
+        const list = byMsg?.[messageId];
+        if (!list?.length) return;
+        const t = text.trim();
+        // Same containment rule as the perform marks: clearing works whether
+        // the reader re-selects the exact span or a little more around it.
+        const next = list.filter(m => !(m.text === t || t.includes(m.text) || m.text.includes(t)));
+        if (next.length === list.length) return;
+        set({ emphasisMarksByStory: { ...get().emphasisMarksByStory, [storyId]: { ...byMsg, [messageId]: next } } });
+        void flushV2();
       },
 
       addPerformMark: (storyId, messageId, mark) => {

@@ -58,6 +58,8 @@ export default function App() {
   const textColor = useAppStore(s => s.textColor);
   const fontFamily = useAppStore(s => s.fontFamily);
   const themeEffects = useAppStore(s => s.themeEffects);
+  const expressiveText = useAppStore(s => s.expressiveText);
+  const expressiveIntensity = useAppStore(s => s.expressiveIntensity);
   const initLibrary = useAppStore(s => s.initLibrary);
   const aiOpen = useAppStore(s => s.aiOpen);
   const loadFonts = useFontStore(s => s.loadFonts);
@@ -110,6 +112,10 @@ export default function App() {
         // identity (pixel faces) apply their own without fighting a choice.
         fontFamily === 'theme' && !customFamily && 'stock-font',
         themeDef.rootClass,
+        // Intensity for the Director's typographic treatment. On the ROOT, so
+        // every view inherits it — Stage, VN, Book and Sandbox render their own
+        // markup and never had ReaderDisplay's `.reader-page` to inherit from.
+        expressiveText && `expr-${expressiveIntensity}`,
         !themeEffects && 'no-effects',
       )}
       style={customFamily ? { fontFamily: `"${customFamily}", var(--font-sans)` } : undefined}

@@ -13,18 +13,54 @@ import { useAuraV2Store } from './stores/useAuraV2Store';
 const MultiverseExplorer = lazy(() =>
   import('./components/MultiverseExplorer').then(m => ({ default: m.MultiverseExplorer })));
 
-/** Accumulate per-story reading time while text is actually streaming. */
+const TICK = 5000;
+/** How long after the last sign of life a manual reader still counts as reading. */
+const IDLE_AFTER = 60_000;
+
+/**
+ * Accumulate per-story reading time.
+ *
+ * This used to tick only while text was streaming, which meant someone turning
+ * pages in Book, or reading a settled passage at their own speed, accrued
+ * nothing at all — the number under "time read" was really "time spent
+ * watching the autoreader". Now streaming always counts, and a paused reader
+ * counts too as long as the tab is visible and they have touched something in
+ * the last minute. Still an estimate, but one that matches how the app is
+ * actually read.
+ */
 const useReadingClock = () => {
-  const active = useAppStore(s => s.isStreaming && s.screen === 'reader');
+  const inReader = useAppStore(s => s.screen === 'reader');
+
+  // "Last read" means the last time you OPENED it. Stamped here rather than in
+  // `openStory` because the app store must not import the v2 store — the
+  // dependency already runs the other way, and closing the loop would make
+  // module init order load-bearing.
+  const openedId = useAppStore(s => (s.screen === 'reader' ? s.currentStory?.id : undefined));
   useEffect(() => {
-    if (!active) return;
-    const TICK = 5000;
+    if (openedId) useAuraV2Store.getState().touchStory(openedId);
+  }, [openedId]);
+
+  useEffect(() => {
+    if (!inReader) return;
+    let lastActivity = Date.now();
+    const mark = () => { lastActivity = Date.now(); };
+    const events = ['pointerdown', 'keydown', 'wheel', 'touchstart'] as const;
+    for (const e of events) window.addEventListener(e, mark, { passive: true });
+
     const id = setInterval(() => {
-      const storyId = useAppStore.getState().currentStory?.id;
-      if (storyId) useAuraV2Store.getState().addReadingTime(storyId, TICK);
+      if (document.visibilityState !== 'visible') return;
+      const app = useAppStore.getState();
+      const storyId = app.currentStory?.id;
+      if (!storyId) return;
+      const attentive = app.isStreaming || Date.now() - lastActivity < IDLE_AFTER;
+      if (attentive) useAuraV2Store.getState().addReadingTime(storyId, TICK);
     }, TICK);
-    return () => clearInterval(id);
-  }, [active]);
+
+    return () => {
+      clearInterval(id);
+      for (const e of events) window.removeEventListener(e, mark);
+    };
+  }, [inReader]);
 };
 
 /**

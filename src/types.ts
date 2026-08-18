@@ -1,5 +1,28 @@
 export type Role = 'user' | 'ai';
 
+/** Which image backend the reader points at — see `services/image/`. */
+export type ImageAdapterId = 'openai' | 'comfy';
+
+/**
+ * One generated picture, filed against the beat it belongs to.
+ *
+ * Metadata ONLY — the bytes live in their own IndexedDB (`lib/artStorage.ts`),
+ * because the v2 slice store rewrites a whole record on every debounced save
+ * and a megabyte per image would make that ruinous.
+ */
+export interface SceneArt {
+  id: string;
+  /** The prompt actually sent, after the preset and appearance sheet. */
+  prompt: string;
+  negative?: string;
+  preset: string;
+  adapter: ImageAdapterId;
+  seed?: number;
+  width: number;
+  height: number;
+  createdAt: number;
+}
+
 /** Highlight swatch options: key → { label, background }. */
 export const HIGHLIGHT_COLORS: { key: string; label: string; bg: string }[] = [
   { key: 'yellow', label: 'Yellow', bg: 'rgba(250, 204, 21, 0.4)' },
@@ -375,9 +398,24 @@ export type Mood =
 
 /** An emphasis span the Director judged worth performing (verbatim substring).
  *  'sfx' is a reader-authored sound-effect mark (visual cue for the span). */
+/**
+ * How a span is DRESSED.
+ *
+ * The first four are vocal — how the words sound in the reader's head, which is
+ * why shout and whisper follow the expressive-text setting. The last three are
+ * typographic: emphasis a printed page could carry, so they follow scene
+ * emphasis alone. `color` names one of HIGHLIGHT_COLORS; anything else (or
+ * nothing) falls back to the theme accent rather than being dropped, so an
+ * invented colour name still produces a mark.
+ */
+export type SceneEmphasisKind =
+  'whisper' | 'shout' | 'beat' | 'sfx' | 'color' | 'underline' | 'strike';
+
 export interface SceneEmphasis {
   text: string;
-  kind: 'whisper' | 'shout' | 'beat' | 'sfx';
+  kind: SceneEmphasisKind;
+  /** For kind 'color' — a HIGHLIGHT_COLORS key. Absent = the theme accent. */
+  color?: string;
 }
 
 /**
@@ -740,6 +778,41 @@ export interface AppConfig {
   ttsVoiceByCharacter: Record<string, string>;
   /** Optional aura-audio generation service (SFX/ambience/music) base URL. */
   audioBaseUrl: string;
+
+  /* --- Scene images (optional, off until an address is set) --------------- */
+  /** Image backend base URL — ComfyUI's root, or an OpenAI-compatible host. */
+  imageBaseUrl: string;
+  imageApiKey: string;
+  /** Which dialect of backend `imageBaseUrl` is. */
+  imageAdapter: ImageAdapterId;
+  /** OpenAI-compatible only: the model to ask for. */
+  imageModel: string;
+  /** ComfyUI only: the reader's workflow, saved in API format, as JSON text. */
+  comfyWorkflow: string;
+  /** ComfyUI only: node ids the reader pinned, overriding auto-detection. */
+  comfyMapping: Partial<Record<'positive' | 'negative' | 'seed' | 'size' | 'reference', string>>;
+  /** Which prompt dialect the AI writes in — see `utils/imagePresets.ts`. */
+  imagePreset: string;
+  /** Extra negative-prompt terms the reader always wants appended. */
+  imageNegativeExtra: string;
+  /**
+   * Live Reaction — read with someone beside you (opt-in, needs the AI).
+   *
+   * A scout marks the moments in each passage this person would break in on;
+   * the reveal crossing one of those moments is what makes them speak. Nothing
+   * they say is canon. See `utils/liveReaction.ts`.
+   */
+  liveReaction: boolean;
+  /** Who is watching with you — a cast name, or a visitor's. Empty = the lead. */
+  liveReactor: string;
+  /** How much of the passage they can see when they speak: only what you have
+   *  uncovered (`upTo`, the frame) or the whole thing (`whole`, knowing). */
+  liveReactionVisibility: 'upTo' | 'whole';
+  /** Pause the reveal until they have finished speaking. Off by default — the
+   *  reading should not stop for a companion unless the reader wants it to. */
+  liveReactionFreeze: boolean;
+  /** Reading over your shoulder, or a voice on a call. */
+  liveReactionFrame: 'room' | 'phone';
   /** Play generated audio-library cues in the Scene Director (opt-in). */
   audioCuesEnabled: boolean;
   /** Offer to live-generate a scene bed when the library has no match (opt-in;
@@ -935,6 +1008,23 @@ export interface AppState extends AppConfig {
   setTtsEngine: (ttsEngine: TtsEngine) => void;
   setKokoroBaseUrl: (kokoroBaseUrl: string) => void;
   setAudioBaseUrl: (audioBaseUrl: string) => void;
+  setImageBaseUrl: (imageBaseUrl: string) => void;
+  setImageApiKey: (imageApiKey: string) => void;
+  setImageAdapter: (imageAdapter: ImageAdapterId) => void;
+  setImageModel: (imageModel: string) => void;
+  setComfyWorkflow: (comfyWorkflow: string) => void;
+  setComfyMapping: (comfyMapping: AppConfig['comfyMapping']) => void;
+  setImagePreset: (imagePreset: string) => void;
+  setImageNegativeExtra: (imageNegativeExtra: string) => void;
+  setLiveReaction: (liveReaction: boolean) => void;
+  setLiveReactor: (liveReactor: string) => void;
+  setLiveReactionVisibility: (v: 'upTo' | 'whole') => void;
+  setLiveReactionFreeze: (on: boolean) => void;
+  setLiveReactionFrame: (f: 'room' | 'phone') => void;
+  /** Transient: the reveal is held while a companion finishes speaking. Never
+   *  persisted — a reload must not leave the reader frozen. */
+  reactionHold: boolean;
+  setReactionHold: (on: boolean) => void;
   setAudioCuesEnabled: (audioCuesEnabled: boolean) => void;
   setAudioLiveGen: (audioLiveGen: boolean) => void;
   setSceneMusic: (sceneMusic: boolean) => void;
