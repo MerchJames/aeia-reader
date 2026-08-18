@@ -44,6 +44,51 @@ export const ruleError = (rule: AutoFormatRule): string | null => {
   }
 };
 
+/**
+ * Verbs that mark an attribution, so a quote beside one is being SPOKEN even
+ * without its own punctuation: `She said "nothing at all" and left.`
+ */
+const SPEECH_VERB =
+  /\b(said|says|saying|asked|asks|replied|replies|answered|answers|murmur\w*|whisper\w*|mutter\w*|shout\w*|yell\w*|cried|cries|breath\w*|add\w*|offer\w*|snap\w*|hiss\w*|growl\w*|purr\w*|laugh\w*|sigh\w*|tell\w*|told|repeat\w*|insist\w*|admit\w*|confess\w*|declar\w*|announc\w*|read aloud|quot\w*)\b/i;
+
+/**
+ * Is this quoted span SPEECH, or scare quotes in narration?
+ *
+ * `She fell inside the chasm. Of course, the "charming" rope was not enough` —
+ * `"charming"` is ironic emphasis, not a line of dialogue, and styling it as
+ * speech (and reading it aloud in the character's voice) is wrong in a way the
+ * reader notices immediately. Quoted words are used for scare quotes, titles,
+ * jargon and nicknames all through ordinary prose.
+ *
+ * The reliable signal is punctuation POSITION. Speech carries its terminal mark
+ * INSIDE the closing quote — `"Hello," she said.` / `"Hello."` / `"Wait—"` —
+ * because that is simply how dialogue is typeset. Scare quotes carry none: the
+ * sentence's punctuation is outside, and the phrase sits mid-clause.
+ *
+ * The one common exception is an attributed fragment with no internal mark
+ * (`She said "nothing at all" and left`), which the speech verb beside it
+ * catches. Anything else is left as narration — a false negative costs a line
+ * of colour, a false positive puts narration in a character's mouth.
+ *
+ * `call` is deliberately NOT an attribution verb here. It usually means naming
+ * rather than speaking — `he called it "a mistake"`, `the so-called "expert"` —
+ * and the genuinely spoken use (`"Wait!" she called`) already has its
+ * punctuation inside the quote.
+ */
+export const looksLikeSpeech = (body: string, before = '', after = ''): boolean => {
+  const inner = body.trim();
+  if (!inner) return false;
+  // Terminal punctuation inside the quote: how dialogue is typeset.
+  if (/[.,!?;:…—–]["'’”]?$/.test(inner)) return true;
+  // An attribution next to it, either side.
+  if (SPEECH_VERB.test(before) || SPEECH_VERB.test(after)) return true;
+  // A long capitalised span with no internal punctuation is still far more
+  // likely a spoken fragment than a nickname. Six words is deliberately high:
+  // titles and jargon are short, sentences are not.
+  const words = inner.split(/\s+/).length;
+  return words >= 6 && /^["'“‘]?[\p{Lu}]/u.test(inner);
+};
+
 /** Matches an OOC aside: [OOC: ...] or (OOC: ...), case-insensitive. */
 const OOC_RE = /([[(])\s*OOC\b[^\])]*[\])]/gi;
 
@@ -124,20 +169,76 @@ export const processText = (text: string, opts: ProcessOptions = {}) => {
   }
 
   if (opts.styleQuotes) {
-    // Wrap quoted speech in * * so it renders as <em> and can be styled as
-    // dialogue. Skip spans that already contain markdown emphasis markers.
-    processed = processed.replace(
-      /(^|[\s({\[—–-])"([^"*\n]+)"(?=[\s.,!?;:)}\]—–-]|$)/g,
-      '$1*"$2"*',
-    );
-    processed = processed.replace(
-      /(^|[\s({\[—–-])“([^”*\n]+)”(?=[\s.,!?;:)}\]—–-]|$)/g,
-      '$1*“$2”*',
-    );
+    /**
+     * Wrap quoted speech in `* *` so it renders as <em> and themes can style
+     * it as dialogue.
+     *
+     * The body used to exclude `*`, which meant ANY line of dialogue
+     * containing emphasis — `"You'd stand behind *my* counter?"` — was skipped
+     * entirely and rendered as narration. That is common in roleplay prose, so
+     * it looked like the dialogue styling had randomly stopped working.
+     *
+     * Emphasis can't nest in the same delimiter, so inner `*…*` is rewritten to
+     * the equivalent `_…_` form and the wrap goes on the outside. Any leftover
+     * lone `*` is escaped — an unbalanced marker would otherwise swallow the
+     * wrap and eat the rest of the paragraph.
+     */
+    const wrapQuote = (open: string, body: string, close: string): string =>
+      `*${open}${body
+        .replace(/\*\*\*([^*]+)\*\*\*/g, '___$1___')
+        .replace(/\*\*([^*]+)\*\*/g, '__$1__')
+        .replace(/\*([^*]+)\*/g, '_$1_')
+        .replace(/\*/g, '\\*')}${close}*`;
+
+    // Two passes so each quoted span can be judged with the words around it.
+    const speechPass = (open: string, close: string) => {
+      const re = new RegExp(
+        `(^|[\\s({\\[—–-])${open}([^${close}\\n]+)${close}(?=[\\s.,!?;:)}\\]—–-]|$)`,
+        'g',
+      );
+      processed = processed.replace(re, (m, pre: string, body: string, at: number) => {
+        const before = processed.slice(Math.max(0, at - 40), at + pre.length);
+        const after = processed.slice(at + m.length, at + m.length + 40);
+        return looksLikeSpeech(body, before, after)
+          ? `${pre}${wrapQuote(open, body, close)}`
+          : m;
+      });
+    };
+    speechPass('"', '"');
+    speechPass('“', '”');
+    /**
+     * Single quotes, on what is left OUTSIDE the spans just wrapped.
+     *
+     * A single-quoted phrase inside speech — `"The 'Silent Observer' becoming
+     * the 'Main Attraction'."` — is scare quotes, not a second speaker, and
+     * wrapping it put a `*…*` span INSIDE the `*…*` that already covers the
+     * whole line. Markdown reads that as three separate emphasis runs, so the
+     * first two words styled as dialogue and the rest of the sentence fell out
+     * of it; Book's renderer produced crossing tags and mangled the paragraph
+     * outright.
+     *
+     * So the wrapped spans are parked behind sentinels first, exactly as
+     * `renderInline` parks generated HTML, and restored after.
+     */
+    const parked: string[] = [];
+    // Private-use delimiters, not bare indices: a bare index would be
+    // indistinguishable from "he was 42 years old" on the way back.
+    processed = processed.replace(/\*["“][^\n]*?["”]\*/g,
+      (m) => `\uE000${parked.push(m) - 1}\uE001`);
+    // Single quotes keep the stricter rule on purpose: apostrophes are
+    // everywhere in prose, and loosening this starts turning `don't ... can't`
+    // into speech.
     processed = processed.replace(
       /(^|[\s({\[—–-])'([^'*\n]+)'(?=[\s.,!?;:)}\]—–-]|$)/g,
-      "$1*'$2'*",
+      (m, pre: string, body: string, at: number) => {
+        const before = processed.slice(Math.max(0, at - 40), at + pre.length);
+        const after = processed.slice(at + m.length, at + m.length + 40);
+        // Same judgement as double quotes: `'the arrangement'` is scare quotes,
+        // `'Hello,' she said` is British-style speech.
+        return looksLikeSpeech(body, before, after) ? `${pre}*'${body}'*` : m;
+      },
     );
+    processed = processed.replace(/\uE000(\d+)\uE001/g, (_m, i: string) => parked[Number(i)]);
   }
 
   return { processedText: processed };

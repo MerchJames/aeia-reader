@@ -52,6 +52,22 @@ export const renderInline = (md: string, opts?: { images?: boolean }): string =>
   s = s.replace(/\*\*\*([^*]+)\*\*\*/g, '<strong><em>$1</em></strong>');
   s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   s = s.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+  /**
+   * Underscore emphasis. Standard markdown, and this renderer never handled it
+   * — so `_very_` reached the page as literal underscores in Book, Stage, VN
+   * and the HTML export while Storybook and Chat (which go through remark)
+   * rendered it correctly. Prose people paste is full of it, and the dialogue
+   * pass in `textProcessor` deliberately rewrites emphasis INSIDE speech to the
+   * underscore form, so every emphasised word in a line of dialogue was showing
+   * its markers.
+   *
+   * Intraword underscores are left alone, per CommonMark: `snake_case_name` is
+   * an identifier, not emphasis, and the `*` rules above have no equivalent
+   * hazard.
+   */
+  s = s.replace(/(^|[^\w\\])___([^_\n]+)___(?![\w])/g, '$1<strong><em>$2</em></strong>');
+  s = s.replace(/(^|[^\w\\])__([^_\n]+)__(?![\w])/g, '$1<strong>$2</strong>');
+  s = s.replace(/(^|[^\w\\])_([^_\n]+)_(?![\w])/g, '$1<em>$2</em>');
   // Dialogue (straight or curly quotes) gets its own class so themes can
   // tint speech without touching narration.
   s = s.replace(/(["“])([^"“”\n]+)(["”])/g,

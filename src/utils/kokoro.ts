@@ -2,7 +2,16 @@
  * Kokoro TTS client. Talks to a Kokoro-FastAPI server, which exposes an
  * OpenAI-compatible `/v1/audio/speech` endpoint (plus `/v1/audio/voices`).
  * Everything stays local — the audio bytes come back and play in the reader.
+ *
+ * URL normalizing, auth and error text come from `services/http` — this file
+ * used to carry its own copy of all three, character-for-character identical to
+ * the one in `audioLibrary.ts`.
  */
+
+import { apiRoot, getJsonOrNull, postForBlob } from '../services/http';
+
+/** Where a Kokoro-FastAPI server listens unless told otherwise. */
+export const KOKORO_DEFAULT_BASE = 'http://localhost:8880';
 
 /** Standard Kokoro v1.0 voice set — used as a fallback when the server
  *  doesn't answer `/v1/audio/voices`. */
@@ -15,15 +24,6 @@ export const KNOWN_KOKORO_VOICES = [
   'bm_daniel', 'bm_fable', 'bm_george', 'bm_lewis',
 ];
 
-/** Normalize a base URL to its `/vN` API root (adds `/v1` if absent). */
-const apiRoot = (base: string): string => {
-  const b = base.trim().replace(/\/+$/, '');
-  return /\/v\d+$/.test(b) ? b : `${b}/v1`;
-};
-
-const authHeaders = (apiKey: string): Record<string, string> =>
-  apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
-
 /** Synthesize speech; resolves to an audio Blob (mp3). */
 export const kokoroSpeak = async (
   base: string,
@@ -32,38 +32,22 @@ export const kokoroSpeak = async (
   text: string,
   speed: number,
   signal?: AbortSignal,
-): Promise<Blob> => {
-  const res = await fetch(`${apiRoot(base)}/audio/speech`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders(apiKey) },
-    body: JSON.stringify({
-      model: 'kokoro',
-      input: text,
-      voice,
-      response_format: 'mp3',
-      speed: Math.min(2, Math.max(0.5, speed)),
-    }),
-    signal,
-  });
-  if (!res.ok) {
-    throw new Error(`Kokoro ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`);
-  }
-  return res.blob();
-};
+): Promise<Blob> =>
+  postForBlob(`${apiRoot(base, KOKORO_DEFAULT_BASE)}/audio/speech`, {
+    model: 'kokoro',
+    input: text,
+    voice,
+    response_format: 'mp3',
+    speed: Math.min(2, Math.max(0.5, speed)),
+  }, { apiKey, signal, label: 'Kokoro' });
 
 /** List the server's available voices, falling back to the known set. */
 export const listKokoroVoices = async (base: string, apiKey: string): Promise<string[]> => {
-  try {
-    const res = await fetch(`${apiRoot(base)}/audio/voices`, { headers: authHeaders(apiKey) });
-    if (res.ok) {
-      const data = await res.json();
-      const list = Array.isArray(data?.voices) ? data.voices : Array.isArray(data) ? data : [];
-      if (list.length) return list.map(String);
-    }
-  } catch {
-    /* offline / not a Kokoro server — fall through */
-  }
-  return KNOWN_KOKORO_VOICES;
+  const data = await getJsonOrNull<{ voices?: unknown[] }>(
+    `${apiRoot(base, KOKORO_DEFAULT_BASE)}/audio/voices`, { apiKey },
+  );
+  const list = Array.isArray(data?.voices) ? data.voices : Array.isArray(data) ? data : [];
+  return list.length ? list.map(String) : KNOWN_KOKORO_VOICES;
 };
 
 /** Speaker names that are narration, not a distinct character to cast. */

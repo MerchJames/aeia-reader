@@ -99,3 +99,29 @@ export const holdMsAt = (text: string, revealedLen: number, cfg: PacingConfig): 
 /** Faster readers get proportionally shorter dramatic holds. */
 export const holdSpeedScale = (speed: number): number =>
   Math.max(0.4, Math.min(1.4, 45 / Math.max(1, speed)));
+
+/** Longest a passage is ever held on screen by the read floor alone (ms). */
+const MAX_DWELL = 2400;
+
+/**
+ * The minimum time a finished passage owes the reader ON SCREEN, before
+ * auto-advance is allowed to replace it.
+ *
+ * A one-line reply finishes revealing in a blink and would be gone before the
+ * eye lands on it — worst in Stage/VN, where only the current passage shows.
+ * This is that floor, and the two words matter:
+ *
+ * - a FLOOR on total on-screen time, not an addition to it. The reveal has been
+ *   showing these words the whole time it was typing them, so the caller
+ *   subtracts the time the reveal already took. Adding it instead left the last
+ *   word of every short message sitting there with nothing happening.
+ * - CONTINUOUS in `words`. The old rule switched off above 30 words, so a
+ *   31-word message left the screen two full seconds sooner than a 30-word one
+ *   — longer passages getting less time than shorter ones. It saturates now
+ *   instead of falling off a cliff.
+ *
+ * Speed-scaled like every other beat in the reveal, so the slider means the
+ * same thing here as it does everywhere else.
+ */
+export const dwellMs = (words: number, speed: number): number =>
+  Math.min(MAX_DWELL, 300 + Math.max(0, words) * 110) * holdSpeedScale(speed);

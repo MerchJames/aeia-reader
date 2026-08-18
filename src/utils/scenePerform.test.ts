@@ -2,7 +2,7 @@
 import {
   PERFORM_KINDS, PERFORM_VISUAL, derivePerformCues, mergePerformCues, nextPerformBoundary,
   nextPerformStart, performAudioAt, performEnterMs, performExitMs, performHoldMs, performRateAt,
-  performWordKinds, resolvePerformRanges, scaleProfile,
+  performWordKinds, performRuns, resolvePerformRanges, runMatcher, scaleProfile, PERFORM_PROFILES,
 } from './scenePerform';
 
 let pass = 0, fail = 0;
@@ -175,10 +175,139 @@ for (const kind of PERFORM_KINDS) {
     `${kind} keeps the beds in a sane range even at cinematic`);
 }
 
+/* --------------------------------------------------------------------------
+ * Intensity must not drive a verb off the end of its own range.
+ *
+ * `scenePerformance` only ships ON in Performance mode, and Performance mode is
+ * "cinematic" — so cinematic is the ONLY intensity a reader ever sees this
+ * track at. Under the old linear scaling `slow` computed 0.01 there and `drop`
+ * 0.10, both slammed into the 0.15 clamp: the three heavy verbs became one
+ * verb, pinned at the slowest drag allowed, which is what "it stalls and I
+ * can't tell why" is made of.
+ * ------------------------------------------------------------------------- */
+
+const HEAVY = ['slow', 'drop', 'stagger'] as const;
+for (const kind of HEAVY) {
+  ok(scaleProfile(kind, 'cinematic').rate > 0.15,
+    `${kind} is not pinned to the rate floor at cinematic`);
+}
+ok(scaleProfile('slow', 'cinematic').rate < scaleProfile('drop', 'cinematic').rate
+  && scaleProfile('drop', 'cinematic').rate < scaleProfile('stagger', 'cinematic').rate,
+  'the heavy verbs stay ordered — and distinguishable — at cinematic');
+
+// The profiles are tuned at "expressive"; that tuning is the fixed point.
+for (const kind of PERFORM_KINDS) {
+  const r = scaleProfile(kind, 'expressive').rate;
+  ok(Math.abs(r - PERFORM_PROFILES[kind].rate) < 1e-9,
+    `${kind} passes through its tuned rate untouched at expressive`);
+}
+
+// Monotone in intensity, in the direction the verb points, for every verb.
+for (const kind of PERFORM_KINDS) {
+  const [s, e, c] = (['subtle', 'expressive', 'cinematic'] as const).map(i => scaleProfile(kind, i).rate);
+  const drags = PERFORM_PROFILES[kind].rate < 1;
+  ok(drags ? (s > e && e > c) : (s < e && e < c),
+    `${kind} leans harder as the intensity rises, never the other way`);
+  ok(s > 0 && c > 0, `${kind} never scales to a stopped reveal`);
+}
+
+// Holds are milliseconds, so they stay linear — 1.5x at cinematic, not 1.5^k.
+ok(Math.abs(scaleProfile('stagger', 'cinematic').wordHold
+  - PERFORM_PROFILES.stagger.wordHold * 1.5) < 1e-9,
+  'holds scale linearly, because they are added time rather than a multiplier');
+
+/* --------------------------------------------------------------------------
+ * The heuristic must not hear a stall in ordinary prose.
+ * ------------------------------------------------------------------------- */
+
+// `sentences()` splits on the period and cannot tell a title or an initial from
+// a sentence end, so "signed J. R. R. Tolkien" arrived as a run of one-word
+// sentences — a hard-stop cadence in the middle of a perfectly normal line.
+const noStagger = (src: string, why: string) =>
+  ok(!derivePerformCues(src).some(c => c.kind === 'stagger'), why);
+
+noStagger('The letter was signed J. R. R. Tolkien, of all people, and she just stared at it.',
+  'a run of initials is not a staccato cadence');
+noStagger('Dr. Vance met Mr. Alder at the corner of St. James and Fifth, half an hour late.',
+  'titles ending in a period are not sentence ends');
+noStagger('The rules were posted by the door. 1. 2. 3. Nobody had read past the first one.',
+  'a numbered list is not a staccato cadence');
+
+// ...while the real thing still reads as one.
+ok(derivePerformCues('He counted them off. One. Two. Three. Then he opened his eyes again.')
+  .some(c => c.kind === 'stagger' && c.text === 'One. Two. Three.'),
+  'genuine one-word sentences still stagger');
+ok(derivePerformCues('The room waited on her answer. "No." "Never." "Not once." She never looked up.')
+  .some(c => c.kind === 'stagger' && /Never/.test(c.text)),
+  'one-word dialogue beats still stagger');
+
+// An ellipsis that ENDS a sentence is a held breath. One that trails off
+// mid-sentence is a softening — firing the 900ms `hold` on those froze
+// ordinary roleplay prose several times a message.
+ok(derivePerformCues('She said nothing at all for a while... Then the door opened and cold came in.')
+  .some(c => c.kind === 'hold' && /^Then/.test(c.text)),
+  'an ellipsis ending a sentence still holds a beat');
+ok(derivePerformCues('He turned the ring over in his hand... "You knew," she said, quite calmly.')
+  .some(c => c.kind === 'hold' && /You knew/.test(c.text)),
+  'an ellipsis before a line of speech still holds');
+ok(!derivePerformCues('She hesitated... then reached for the door and pushed it open onto rain.')
+  .some(c => c.kind === 'hold'),
+  'an ellipsis trailing off mid-sentence is not a beat');
+
 // Every verb now has a visible treatment — pacing alone doesn't read.
 ok(PERFORM_KINDS.every(k => PERFORM_VISUAL.has(k)), 'every verb carries a visual signature');
-ok(performWordKinds([{ text: 'stop right there', kind: 'stagger' }])?.get('right') === 'stagger',
-  'a pacing verb now reaches the render layer too');
+ok(performWordKinds([{ text: 'stop right there', kind: 'slow' }])?.get('right') === 'slow',
+  'a pacing verb reaches the render layer too');
+
+/* --- cadence runs ------------------------------------------------------- */
+
+// stagger and drop are marked as runs, so they must NOT also be in the word map
+// — being in both would dress the same word twice by two different rules.
+ok(performWordKinds([{ text: 'stop right there', kind: 'stagger' }]) === null,
+  'a cadence cue leaves the word map alone');
+ok(performRuns([{ text: 'stop right there', kind: 'stagger' }])?.[0].words.join(' ') === 'stop right there',
+  'a cadence cue becomes an ordered word sequence');
+ok(performRuns([{ text: 'she pulls away', kind: 'swell' }]) === null,
+  'a word cue is not a run');
+
+// The bug this exists for: the stoplist drops the small words, and in a cadence
+// run the small words are exactly the ones left stalling with nothing on them.
+{
+  const cue = [{ text: 'In the end', kind: 'stagger' as const }];
+  const words = ['in', 'the', 'end'];
+  ok(words.every(w => performWordKinds(cue)?.get(w) === undefined),
+    'the word map would have dressed only "end" of "In. the. end."');
+  const m = runMatcher(performRuns(cue));
+  ok(words.every(w => m(w)?.kind === 'stagger'), 'the run dresses every word of the cadence');
+}
+
+// Repetition is the commonest cadence there is; a per-word rule silently ate it.
+{
+  const m = runMatcher(performRuns([{ text: 'No. No. No.', kind: 'drop' }]));
+  const keys = ['no', 'no', 'no'].map(w => m(w)?.key);
+  ok(keys.every(Boolean), 'every beat of a repeated run is marked');
+  ok(new Set(keys).size === 3, 'each beat gets its own key, so all three still animate');
+}
+
+// Punctuation must not break a run; a real word out of sequence must.
+{
+  const m = runMatcher(performRuns([{ text: 'one two three', kind: 'stagger' }]));
+  ok(m('one')?.kind === 'stagger' && m('')?.kind === undefined && m('two')?.kind === 'stagger',
+    'an em-dash between words does not end the run');
+  const m2 = runMatcher(performRuns([{ text: 'one two three', kind: 'stagger' }]));
+  m2('one');
+  ok(m2('nine') === null, 'a word out of sequence abandons the run');
+  ok(m2('three') === null, 'and the run does not resume mid-sequence');
+}
+
+// A run fires once — a repeated phrase is not re-performed later in the passage.
+{
+  const m = runMatcher(performRuns([{ text: 'go now', kind: 'stagger' }]));
+  ok(!!m('go') && !!m('now'), 'the run plays');
+  ok(m('go') === null && m('now') === null, 'and does not play again');
+}
+
+ok(runMatcher(null)('anything') === null, 'no runs is a no-op matcher');
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);

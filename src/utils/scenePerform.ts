@@ -96,6 +96,17 @@ const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n
  * Director's own `strength`. Rates are pulled toward 1 (and holds toward 0) at
  * "subtle" so the same descriptor reads as a nudge or as a full performance
  * depending on the reader's taste.
+ *
+ * Holds are additive milliseconds, so they scale LINEARLY. Rates are
+ * multipliers, so they scale GEOMETRICALLY (`base ** k`) — the two agree
+ * exactly at k=1, which is where the profiles above were tuned, but the linear
+ * form runs off the end of its own range above it: `slow` computed 0.01 at
+ * cinematic and `drop` 0.10, both slammed into the 0.15 floor. That made the
+ * only intensity `scenePerformance` actually ships at (Performance mode is
+ * "cinematic") the one where slow, drop and stagger were indistinguishable and
+ * all pinned at the heaviest drag the clamp allows — which is what a stall with
+ * no apparent cause looks like from the reader's chair. `base ** k` keeps the
+ * ordering and the character of each verb at every intensity.
  */
 export const scaleProfile = (
   kind: PerformKind,
@@ -105,7 +116,7 @@ export const scaleProfile = (
   const base = PERFORM_PROFILES[kind] ?? PERFORM_PROFILES.slow;
   const k = (INTENSITY_SCALE[intensity] ?? 1) * clamp(strength, 0.25, 1.5);
   return {
-    rate: clamp(1 + (base.rate - 1) * k, 0.15, 8),
+    rate: clamp(base.rate ** k, 0.15, 8),
     wordHold: base.wordHold * k,
     enterHold: base.enterHold * k,
     exitHold: base.exitHold * k,
@@ -339,6 +350,9 @@ export const performWordKinds = (
   const map = new Map<string, PerformKind>();
   for (const c of cues) {
     if (!PERFORM_VISUAL.has(c.kind)) continue;
+    // Cadence cues are marked as RUNS instead — see performRuns. Leaving them
+    // here too would dress the same word twice, by two different rules.
+    if (RUN_KINDS.has(c.kind)) continue;
     for (const w of (c.text ?? '').split(/\s+/)) {
       const n = w.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '').toLowerCase();
       if (isMarkableWord(n) && !map.has(n)) map.set(n, c.kind);
@@ -346,6 +360,142 @@ export const performWordKinds = (
   }
   return map.size ? map : null;
 };
+
+/* ------------------------------------------------------------------ */
+/* Cadence cues — the ones whose unit is a RUN, not a word             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The two verbs that exist for the beat of a whole run rather than for one
+ * word.
+ *
+ * Every other cue names a word and means something about THAT word: swell it,
+ * shake it, let it fade. These two name a cadence — "In. the. end." is one
+ * gesture spread across three words, and each word landing separately IS the
+ * effect.
+ *
+ * That distinction was invisible until you watched one play. The word→kind map
+ * runs every word through `isMarkableWord`, which drops the ninety commonest
+ * words in English so a phrase cue cannot paint every "the" on the page. Right
+ * for a phrase; wrong here, where the stalled words are exactly the small ones:
+ *
+ *     In.      the.      end.
+ *     dropped  dropped   marked
+ *
+ * The streamer paces all three — offsets, not words — so the reader watched two
+ * words arrive slowly with nothing happening to them, which is indistinguishable
+ * from the app hanging. No treatment on `.perf-stagger` could have fixed it,
+ * because the words that stall were never the words that were marked.
+ */
+export const RUN_KINDS: ReadonlySet<PerformKind> = new Set<PerformKind>(['stagger', 'drop']);
+
+/** A cadence cue, reduced to the normalised words it covers, in order. */
+export interface PerformRun {
+  words: string[];
+  kind: PerformKind;
+}
+
+/** Cadence cues as ordered word sequences. Empty tokens are dropped. */
+export const performRuns = (
+  cues: ScenePerformCue[] | undefined,
+): PerformRun[] | null => {
+  if (!cues?.length) return null;
+  const out: PerformRun[] = [];
+  for (const c of cues) {
+    if (!RUN_KINDS.has(c.kind) || !PERFORM_VISUAL.has(c.kind)) continue;
+    const words = (c.text ?? '').split(/\s+/)
+      .map(w => w.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '').toLowerCase())
+      .filter(Boolean);
+    if (words.length) out.push({ words, kind: c.kind });
+  }
+  return out.length ? out : null;
+};
+
+/**
+ * One word claimed by a cadence run.
+ *
+ * `key` identifies the OCCURRENCE, not the word: a run is very often a repeat
+ * ("No. No. No."), and a per-word key would tell the second and third that they
+ * had already played and hold them still — which is the exact opposite of the
+ * cue. Stable across renders because the run is matched from the start of the
+ * message every time.
+ */
+export interface RunMark {
+  kind: PerformKind;
+  key: string;
+}
+
+/** Fed one word at a time; answers how to mark it. See `runMatcher`. */
+export type RunMatcher = (normalized: string) => RunMark | null;
+
+/**
+ * A forward matcher over the cadence runs, fed the passage's words in document
+ * order.
+ *
+ * Deliberately greedy and backtrack-free, because the SAME thirty lines have to
+ * work in both of Aura's render paths — `wrapWords` walks React children and
+ * decides each word as it reaches it, with no chance to look ahead, while
+ * `markPerformHtml` scans a string. A matcher that needed lookahead would mean
+ * two implementations, and the whole point of this module is that the five
+ * views mark the same words by the same rules.
+ *
+ * What that costs: a false PREFIX. If "in the" appears earlier in the passage
+ * without "end" behind it, those two words get the treatment and the run then
+ * abandons. Two softly tinted words, against two algorithms that will
+ * eventually disagree — an easy trade.
+ *
+ * Punctuation-only tokens normalise to nothing and are skipped rather than
+ * treated as a break: an em-dash inside a staggered line does not end the run.
+ * Each run fires once, so a repeated phrase is not re-performed.
+ */
+export const runMatcher = (runs: PerformRun[] | null | undefined): RunMatcher => {
+  if (!runs?.length) return () => null;
+  const done = new Set<number>();
+  let active: { run: number; pos: number } | null = null;
+  return (norm: string): RunMark | null => {
+    if (!norm) return null;              // punctuation — does not break a run
+    if (active) {
+      const run = runs[active.run];
+      if (run.words[active.pos + 1] === norm) {
+        const pos = ++active.pos;
+        const at = active.run;
+        if (pos === run.words.length - 1) { done.add(at); active = null; }
+        return { kind: run.kind, key: `run${at}:${pos}` };
+      }
+      active = null;                     // sequence broke — fall through to a fresh start
+    }
+    for (let i = 0; i < runs.length; i++) {
+      if (done.has(i) || runs[i].words[0] !== norm) continue;
+      if (runs[i].words.length === 1) done.add(i);
+      else active = { run: i, pos: 0 };
+      return { kind: runs[i].kind, key: `run${i}:0` };
+    }
+    return null;
+  };
+};
+
+/**
+ * The cadence matcher for a message's cues — the pairing every render path
+ * wants, so no call site has to remember that `performWordKinds` alone now
+ * leaves stagger and drop unmarked.
+ *
+ * Stateful: build one per message, and feed it that message's words in order.
+ */
+export const performMatcher = (cues: ScenePerformCue[] | undefined): RunMatcher | undefined => {
+  const runs = performRuns(cues);
+  // `undefined`, not a no-op matcher, so callers can test "are there runs here"
+  // with the same value they pass down — and so the markers can keep their
+  // do-nothing fast path.
+  return runs ? runMatcher(runs) : undefined;
+};
+
+/**
+ * Cadence cues do NOT consult or claim the `claimed` set, unlike every other
+ * mark here. A run is very often built out of repetition — "No. No. No." — and
+ * `claimed` would let the first word through and silently drop the rest, which
+ * is the whole cue. Same reasoning as the all-caps shout heuristic: a word
+ * performed three times is performed three times.
+ */
 
 
 /* ------------------------------------------------------------------ */
@@ -368,6 +518,32 @@ const sentences = (text: string): { start: number; end: number; text: string }[]
 };
 
 const wordCount = (s: string) => (s.match(/[\p{L}\p{N}][\p{L}\p{N}'’-]*/gu) ?? []).length;
+
+/**
+ * Titles and abbreviations that end in a period without ending a sentence.
+ * `sentences()` splits on the period and cannot tell the difference, so
+ * "signed J. R. R. Tolkien" arrived as a run of one-word sentences and was
+ * heard as staccato — an unexplained hard-stop cadence in the middle of
+ * ordinary prose. Initials are caught by shape (`R.`), these by name.
+ */
+const ABBREVIATIONS = new Set([
+  'mr', 'mrs', 'ms', 'dr', 'st', 'prof', 'rev', 'sgt', 'capt', 'lt', 'col', 'gen',
+  'jr', 'sr', 'vs', 'etc', 'no', 'approx', 'inc', 'ltd', 'co', 'ave', 'rd', 'blvd',
+  'am', 'pm', 'ca', 'cf', 'al', 'eg', 'ie',
+]);
+
+/**
+ * Does this "sentence" actually end one? A single initial (`R.`), a title
+ * (`Mrs.`), or a bare number (`3.`, a list marker) never does — they only look
+ * like sentences because the splitter cuts on the period.
+ */
+const endsASentence = (text: string): boolean => {
+  const core = text.replace(/[.!?…]+$/, '').trim();
+  if (!core) return false;
+  if (/^\p{Lu}$/u.test(core)) return false;                  // an initial: "R."
+  if (/^\p{N}+$/u.test(core)) return false;                  // a list marker: "3."
+  return !ABBREVIATIONS.has(core.replace(/\./g, '').toLowerCase());
+};
 
 /** Max cues the heuristic will ever emit for one passage. */
 const HEURISTIC_CAP = 3;
@@ -396,9 +572,11 @@ export const derivePerformCues = (text: string): ScenePerformCue[] => {
 
   // Staccato runs — the "In. the. end." cadence.
   const sents = sentences(text);
+  const staccato = (s: { text: string }) =>
+    wordCount(s.text) <= 2 && /[.!?…]$/.test(s.text) && endsASentence(s.text);
   for (let i = 0; i < sents.length;) {
     let j = i;
-    while (j < sents.length && wordCount(sents[j].text) <= 2 && /[.!?…]$/.test(sents[j].text)) j++;
+    while (j < sents.length && staccato(sents[j])) j++;
     if (j - i >= 2) take(sents[i].start, sents[j - 1].end, 'stagger');
     i = j > i ? j : i + 1;
   }
@@ -411,8 +589,12 @@ export const derivePerformCues = (text: string): ScenePerformCue[] => {
     take(m.index, m.index + m[1].length, 'cut');
   }
 
-  // A trailing ellipsis is a held breath — pause before whatever follows it.
-  const ell = /(?:…|\.\.\.)\s+(\S+(?:\s+\S+)?)/g;
+  // An ellipsis that ENDS a sentence is a held breath — pause before whatever
+  // follows it. One that trails off mid-sentence ("she hesitated... then
+  // reached for the door") is a softening, not a beat: firing the 900ms `hold`
+  // on those froze ordinary roleplay prose three times a message, which is the
+  // most common way this track reads as lag rather than as direction.
+  const ell = /(?:…|\.\.\.)\s+((?:\p{Lu}|["“'‘—])\S*(?:\s+\S+)?)/gu;
   while ((m = ell.exec(text)) !== null) {
     const start = m.index + m[0].length - m[1].length;
     take(start, start + m[1].length, 'hold');

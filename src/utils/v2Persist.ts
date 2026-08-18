@@ -27,11 +27,20 @@ export const PERSISTED_SLICES: readonly { slice: string; perStory: boolean }[] =
   { slice: 'codexByStory', perStory: true },
   { slice: 'scanProgress', perStory: true },
   { slice: 'statsByStory', perStory: true },
+  { slice: 'libraryTagsByStory', perStory: true },
+  // Was in-memory only, so the "Previously…" card came back on every reload
+  // of a story you had already dismissed it for.
+  { slice: 'recapSeen', perStory: true },
   { slice: 'overridesByStory', perStory: true },
   { slice: 'lensOnByStory', perStory: true },
   { slice: 'sheetsByStory', perStory: true },
   { slice: 'annotationsByStory', perStory: true },
   { slice: 'sfxMarksByStory', perStory: true },
+  { slice: 'artByStory', perStory: true },
+  { slice: 'visitorsByStory', perStory: true },
+  { slice: 'appearanceByStory', perStory: true },
+  { slice: 'artSeedByStory', perStory: true },
+  { slice: 'emphasisMarksByStory', perStory: true },
   { slice: 'performMarksByStory', perStory: true },
   { slice: 'pinsByStory', perStory: true },
   { slice: 'pinSetsByStory', perStory: true },
@@ -49,6 +58,7 @@ export const PERSISTED_SLICES: readonly { slice: string; perStory: boolean }[] =
   { slice: 'sandboxGuidanceByStory', perStory: true },
   { slice: 'sandboxPacketByStory', perStory: true },
   { slice: 'askByStory', perStory: true },
+  { slice: 'reactionsByStory', perStory: true },
   { slice: 'directorEnabledByStory', perStory: true },
   { slice: 'summaryPinByStory', perStory: true },
   // Story-keyed despite the names — `Record<storyId, StyleConfig[]>` and

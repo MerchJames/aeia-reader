@@ -9,6 +9,9 @@
  * text — Aura injects the escaped words into `{{body}}` — so source stays sacred.
  */
 
+import { PERFORM_CSS, markPerformHtml } from './performMarkup';
+import type { PerformKind, RunMatcher } from './scenePerform';
+
 export interface ThemeVars {
   bg: string;
   surface: string;
@@ -127,12 +130,24 @@ export const escapeHtml = (s: string): string =>
  * Escaped-first body render: blank lines → paragraphs, single newlines → <br>,
  * "quoted speech" wrapped in a colorable span. Escaping happens BEFORE any
  * wrapping so the source text can never break out into markup.
+ *
+ * `perform` adds the Director's per-word treatment. It runs LAST, over text
+ * that is already escaped, and the only thing it injects is a class name drawn
+ * from a fixed set of cue kinds — so the escape-first guarantee still holds.
  */
-export const formatBody = (content: string): string =>
-  escapeHtml(content)
+export const formatBody = (
+  content: string,
+  perform?: Map<string, PerformKind> | null,
+  claimed?: Set<string>,
+  /** This message's cadence matcher — stagger/drop are marked as runs. */
+  match?: RunMatcher,
+): string => {
+  const html = escapeHtml(content)
     .split(/\n{2,}/)
     .map(p => `<p>${p.replace(/\n/g, '<br>').replace(/&quot;([^"]*?)&quot;/g, '<span class="say">&quot;$1&quot;</span>')}</p>`)
     .join('');
+  return perform || match ? markPerformHtml(html, perform, { claimed, match }) : html;
+};
 
 /**
  * Our sole, trusted script. Reports content height (so the iframe self-sizes)
@@ -208,6 +223,10 @@ export interface DocOptions {
   /** AI treatment (step 2). Its CSS owns the look; an optional skeleton slots
    *  the verbatim text. Absent → the deterministic heuristic card. */
   treatment?: { css: string; skeleton?: string };
+  /** Director performance cues, as a word→kind map. */
+  perform?: Map<string, PerformKind> | null;
+  /** …and this message's cadence matcher, for the run-marked kinds. */
+  match?: RunMatcher;
   /** Start with the words hidden (the light-switch intent, applied globally). */
   textHidden?: boolean;
   /** Force the reader's text colour (--text) to win over the AI's body colour. */
@@ -231,7 +250,7 @@ const fillSkeleton = (skeleton: string, o: DocOptions, bodyBlock: string): strin
  * deterministic heuristic card; with one, the AI's CSS owns the look.
  */
 export const buildDoc = (o: DocOptions): string => {
-  const body = formatBody(o.content);
+  const body = formatBody(o.content, o.perform, undefined, o.match);
   const bodyBlock = `<div class="body" id="aura-body">${body}</div>`;
   const imgs = (o.images ?? [])
     .map(src => `<img src="${escapeHtml(src)}" alt="">`).join('');
@@ -245,7 +264,8 @@ export const buildDoc = (o: DocOptions): string => {
   img{max-width:100%;height:auto;display:block;border-radius:8px}
   [data-act]{cursor:pointer;user-select:none} .aura-text-off .body{visibility:hidden}
   ${FX_CSS}
-  ${o.reduceMotion ? '[class*="aura-fx-"]{animation:none!important}' : ''}
+  ${PERFORM_CSS}
+  ${o.reduceMotion ? '[class*="aura-fx-"],[class*="perf-"]{animation:none!important}' : ''}
   @media (prefers-reduced-motion:reduce){[class*="aura-fx-"]{animation:none!important}}
   ${o.fullFrame ? 'html,body{height:100%} body{padding:0} .card{min-height:100vh;margin:0!important;border-radius:0;display:flex;flex-direction:column;justify-content:center}' : ''}`;
 

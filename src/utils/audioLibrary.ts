@@ -9,6 +9,7 @@
  */
 
 import { AudioCategory } from '../types';
+import { apiRoot, bareRoot, getJsonOrNull, postJson } from '../services/http';
 
 export interface AudioAsset {
   id: string;
@@ -36,23 +37,18 @@ export interface GenerateAudioInput {
   variant?: number;
 }
 
-const DEFAULT_BASE = 'http://localhost:8899';
+export const AUDIO_DEFAULT_BASE = 'http://localhost:8899';
 
-/** Normalize a base URL to its `/vN` API root (adds `/v1` if absent). */
-const apiRoot = (base: string): string => {
-  const b = (base || DEFAULT_BASE).trim().replace(/\/+$/, '');
-  return /\/v\d+$/.test(b) ? b : `${b}/v1`;
-};
+const root = (base: string) => apiRoot(base, AUDIO_DEFAULT_BASE);
 
 /** The direct URL to an asset's audio bytes (for an <audio>/WebAudio source). */
 export const audioAssetUrl = (base: string, id: string): string =>
-  `${apiRoot(base)}/audio/file/${encodeURIComponent(id)}`;
+  `${root(base)}/audio/file/${encodeURIComponent(id)}`;
 
-/** Is the audio service reachable? Cheap /health probe. */
+/** Is the audio service reachable? Cheap /health probe — at the BARE root. */
 export const audioServiceUp = async (base: string, signal?: AbortSignal): Promise<boolean> => {
   try {
-    const root = (base || DEFAULT_BASE).trim().replace(/\/+$/, '');
-    const res = await fetch(`${root}/health`, { signal });
+    const res = await fetch(`${bareRoot(base, AUDIO_DEFAULT_BASE)}/health`, { signal });
     return res.ok;
   } catch {
     return false;
@@ -69,14 +65,10 @@ export const searchAudioLibrary = async (
   if (params.q) qs.set('q', params.q);
   if (params.category) qs.set('category', params.category);
   if (params.tags?.length) qs.set('tags', params.tags.join(','));
-  try {
-    const res = await fetch(`${apiRoot(base)}/audio/library?${qs.toString()}`, { signal });
-    if (!res.ok) return [];
-    const data = await res.json();
-    return Array.isArray(data?.assets) ? data.assets : [];
-  } catch {
-    return [];
-  }
+  const data = await getJsonOrNull<{ assets?: AudioAsset[] }>(
+    `${root(base)}/audio/library?${qs.toString()}`, { signal },
+  );
+  return Array.isArray(data?.assets) ? data.assets : [];
 };
 
 /** Generate (or reuse) a clip; resolves to the manifest asset. Throws on failure. */
@@ -85,18 +77,25 @@ export const generateAudio = async (
   input: GenerateAudioInput,
   signal?: AbortSignal,
 ): Promise<AudioAsset> => {
-  const res = await fetch(`${apiRoot(base)}/audio/generate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(input),
-    signal,
-  });
-  if (!res.ok) {
-    throw new Error(`Audio ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`);
-  }
-  const data = await res.json();
+  const data = await postJson<{ asset?: AudioAsset }>(
+    `${root(base)}/audio/generate`, input, { signal, label: 'Audio' },
+  );
   if (!data?.asset) throw new Error('audio service returned no asset');
-  return data.asset as AudioAsset;
+  return data.asset;
+};
+
+/** Remove a clip from the library. Resolves false when the service says no. */
+export const deleteAudioAsset = async (
+  base: string, id: string, signal?: AbortSignal,
+): Promise<boolean> => {
+  try {
+    const res = await fetch(`${root(base)}/audio/file/${encodeURIComponent(id)}`, {
+      method: 'DELETE', signal,
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
 };
 
 /** Infer a library category from a free-text intent (music/ambience/sfx). */

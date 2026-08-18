@@ -11,7 +11,21 @@ const ok = (cond: boolean, msg: string) => { if (cond) { pass++; } else { fail++
 // A tripwire, not a fact: adding a store slice without declaring it here means
 // it silently stops persisting. Bump this deliberately, having checked the new
 // slice's `perStory` flag against its actual shape.
-ok(PERSISTED_SLICES.length === 33, 'every persisted slice is declared');
+// 35: +libraryTagsByStory (Record<storyId, string[]>) and +recapSeen
+// (Record<storyId, boolean>) — both story-keyed, so both perStory.
+// 38: +artByStory (Record<storyId, Record<messageId, SceneArt[]>>),
+// +appearanceByStory and +artSeedByStory (Record<storyId, Record<character, …>>)
+// — all three story-keyed, so all three perStory. Note what is NOT here: the
+// image BYTES, which live in their own IndexedDB (`lib/artStorage.ts`). A
+// megabyte per picture in a slice would be rewritten on every debounced save.
+// 39: +visitorsByStory (Record<storyId, Visitor[]>) — story-keyed, so perStory.
+// 40: +emphasisMarksByStory (Record<storyId, Record<messageId, EmphasisMark[]>>)
+// — story-keyed, so perStory. Sharded exactly like sfxMarksByStory, which it
+// sits beside: a reader's own marking has to outlive the Director's read.
+// 41: +reactionsByStory (Record<storyId, Record<messageId, ReactionRecord>>) —
+// story-keyed, so perStory. Reader-only, like askByStory beside it: it is
+// persisted so a re-read replays what was said, never so anything can read it.
+ok(PERSISTED_SLICES.length === 41, 'every persisted slice is declared');
 ok(new Set(PERSISTED_SLICES.map(s => s.slice)).size === PERSISTED_SLICES.length, 'no slice is declared twice');
 
 // --- record ids --------------------------------------------------------------

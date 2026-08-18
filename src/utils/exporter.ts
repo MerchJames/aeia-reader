@@ -1,8 +1,20 @@
 import { MessageOverride, Story } from '../types';
+import { AEIA_MARK } from '../assets/aeiaMark';
 import { resolveContent } from './lens';
 
-export const storyToMarkdown = (story: Story): string => {
-  const lines: string[] = [`# ${story.title}`, ''];
+/**
+ * The Aeia mark, as a markdown REFERENCE-style image.
+ *
+ * The mark has to travel as a data URI — an exported file is never allowed to
+ * fetch anything — but markdown is a format people read as plain text, and
+ * thirteen kilobytes of base64 sitting above the title makes the source
+ * unreadable in an editor. A reference definition puts the payload at the
+ * bottom of the file, out of the reading path, and renders identically.
+ */
+const MARK_REF = 'aeia-reader-mark';
+
+export const storyToMarkdown = (story: Story, exportedAt = Date.now()): string => {
+  const lines: string[] = [`![Aeia Reader][${MARK_REF}]`, '', `# ${story.title}`, ''];
   if (story.characterName || story.userName) {
     lines.push(
       [
@@ -12,6 +24,21 @@ export const storyToMarkdown = (story: Story): string => {
       '',
     );
   }
+
+  const words = story.messages.reduce((n, m) => n + (m.content.match(/\S+/g)?.length ?? 0), 0);
+  let date: string;
+  try {
+    date = new Date(exportedAt).toLocaleDateString(undefined,
+      { year: 'numeric', month: 'long', day: 'numeric' });
+  } catch { date = new Date(exportedAt).toISOString().slice(0, 10); }
+  lines.push(
+    `*${story.messages.length.toLocaleString()} passages · ${words.toLocaleString()} words`
+      + ` · exported from Aeia Reader on ${date}*`,
+    '',
+    '---',
+    '',
+  );
+
   story.messages.forEach(msg => {
     if (story.format !== 'kobold') lines.push(`### ${msg.name}`, '');
     lines.push(msg.content.trim(), '');
@@ -21,6 +48,9 @@ export const storyToMarkdown = (story: Story): string => {
     lines.push('---', '', '## Highlights', '');
     story.highlights.forEach(h => lines.push(`> ${h.text}`, ''));
   }
+
+  // Last, so the top of the file is the story and not a wall of base64.
+  lines.push('', `[${MARK_REF}]: ${AEIA_MARK}`, '');
   return lines.join('\n');
 };
 

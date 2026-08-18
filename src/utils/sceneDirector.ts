@@ -11,6 +11,7 @@
 
 import { CardInfo, Mood, SceneDescriptor, SceneEmphasis, ScenePerformCue } from '../types';
 import { PERFORM_KINDS } from './scenePerform';
+import { EMPHASIS_COLORS } from './performMarkup';
 import { FX_MEANING, SCENE_FX } from './livingBackground';
 import { cardToPromptBlock } from './cardContext';
 import { ChatMsg, SamplerParams, chatCompletion, isLocalBase, mergeSamplers } from './aiClient';
@@ -34,7 +35,9 @@ export const MOODS: readonly Mood[] = [
 ];
 
 const TIMES = ['dawn', 'day', 'dusk', 'night', 'unknown'] as const;
-const EMPHASIS_KINDS = ['whisper', 'shout', 'beat'] as const;
+const EMPHASIS_KINDS = [
+  'whisper', 'shout', 'beat', 'underline', 'strike', 'color',
+] as const;
 const FX_KINDS = SCENE_FX;
 const SHOT_KINDS = ['establishing', 'close', 'wide'] as const;
 const VFX_KINDS = ['flash', 'shake', 'vignette', 'desaturate', 'glitch', 'bloom'] as const;
@@ -47,12 +50,55 @@ export const SCENE_BATCH_OVERLAP = 1;
 const PASSAGE_CHAR_CAP = 1600;
 
 /**
+ * Reasoning models spend their output budget THINKING before they answer.
+ *
+ * The Director's budget was sized against the JSON alone, so a thinking model
+ * burned the whole allowance on a chain of thought and the array never arrived
+ * — the reply parsed to nothing, the batch was split, the halves failed the
+ * same way, and the reader saw "unreadable" on a model that reads perfectly
+ * well. `max_tokens` is a CEILING, not a spend, so the headroom costs a
+ * non-thinking model nothing; it is only added once reasoning has actually been
+ * seen, so a model that never thinks never asks for it.
+ */
+const REASONING_HEADROOM = 4000;
+
+/** Does this reply carry a chain of thought? */
+export const hasReasoning = (raw: string): boolean =>
+  /<think(?:ing)?\b|<reasoning\b/i.test(raw);
+
+/**
+ * A reply cut off mid-thought: opened its reasoning and never closed it. The
+ * definitive sign the budget was too small — and the case where splitting the
+ * batch cannot help, because the cost was the thinking, not the passages.
+ */
+export const truncatedInReasoning = (raw: string): boolean =>
+  hasReasoning(raw) && !/<\/(?:think(?:ing)?|reasoning)>/i.test(raw);
+
+/**
+ * Drop the chain of thought before parsing.
+ *
+ * `askCharacter`, `narrativeDirector`, `sandboxDirector` and `stylePacket` all
+ * do this; the Director alone did not. It matters more here than anywhere else,
+ * because the salvage parser scans for balanced braces — and reasoning about a
+ * JSON schema is full of them, so a thinking model could have its DELIBERATION
+ * parsed as descriptors.
+ */
+export const stripReasoning = (raw: string): string =>
+  raw
+    .replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, '')
+    .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '')
+    // An unclosed block means the reply was truncated mid-thought: everything
+    // from the tag on is thinking, and none of it is an answer.
+    .replace(/<think(?:ing)?\b[\s\S]*$/i, '')
+    .replace(/<reasoning\b[\s\S]*$/i, '');
+
+/**
  * Output tokens to allow for a batch. Measured against a fully-populated
  * descriptor (~180 tokens) with generous slack for models that pretty-print
  * their JSON; the floor covers a single-passage retry.
  */
-export const outputBudget = (passages: number): number =>
-  Math.max(700, Math.round(passages * 300));
+export const outputBudget = (passages: number, reasoning = false): number =>
+  Math.max(700, Math.round(passages * 300)) + (reasoning ? REASONING_HEADROOM : 0);
 
 /**
  * Sampling for a READING task, not a writing one.
@@ -104,7 +150,9 @@ export const SCENE_SYSTEM_PROMPT = [
   '  "timeOfDay": one of dawn|day|dusk|night|unknown,',
   '  "speaker": { "name": string, "emotion": short word } or null,',
   '  "dialogue": [ { "text": <verbatim quoted line, WITHOUT the quote marks>, "speaker": who says it } ],',
-  '  "emphasis": [ { "text": <verbatim substring of the passage>, "kind": whisper|shout|beat } ],',
+  '  "emphasis": [ { "text": <verbatim substring of the passage>, "kind":'
+  + ' whisper|shout|beat|underline|strike|color, "color": <only for kind "color">'
+  + ` one of ${EMPHASIS_COLORS.join('|')} } ],`,
   '  "perform": [ { "text": <verbatim substring>, "kind": '
   + `${PERFORM_KINDS.join('|')}, "strength": 0.25..1.5 } ],`,
   `  "fx": one of ${FX_KINDS.join('|')} or null,`,
@@ -153,6 +201,20 @@ export const SCENE_SYSTEM_PROMPT = [
   'genuinely earns it, and NEVER on a whole paragraph — a cue is a few words to',
   'one short sentence. Most passages deserve none: return [] and let the prose',
   'read at its natural pace. Overusing this makes the reader feel gimmicky.',
+  '',
+  '',
+  'EMPHASIS: how a span is SET on the page. The first three are how it SOUNDS —',
+  '"whisper" for a line barely voiced, "shout" for one at full volume, "beat" for',
+  'a pause held on a span. The last three are typographic and carry no volume:',
+  '- "underline": stress. Weight on a few words without raising the voice.',
+  '- "strike": said and taken back, or written and unsaid — the words stay, struck',
+  '  through. For a retraction the prose itself performs, not for a mere mistake.',
+  '- "color": the words are lit differently from the prose around them — a name',
+  `  that carries dread, a flash of something. Name a "color" from ${EMPHASIS_COLORS.join('|')};`,
+  '  omit it and the reader\'s own accent is used.',
+  'These three are decoration until they are earned. A page with a coloured word',
+  'in every paragraph reads as a ransom note; one on the right span reads as a',
+  'held breath. Most passages want none.',
   '',
   'Rules: emphasis.text and perform.text MUST be exact substrings copied from the',
   'passage. Keep emphasis to at most 3 spans per passage.',
@@ -242,7 +304,13 @@ const cleanEmphasis = (raw: unknown, passageText: string): SceneEmphasis[] | und
     const kind = e?.kind;
     if (!text || !(EMPHASIS_KINDS as readonly string[]).includes(kind)) continue;
     if (!passageText.includes(text)) continue; // verbatim only — locate by indexOf later
-    out.push({ text, kind });
+    // A colour outside the palette is NOT a reason to drop the span: the model
+    // judged the words worth lighting and only got the name wrong, so the mark
+    // stands and falls back to the reader's accent (see emphasisKindKey).
+    const color = kind === 'color' && typeof e?.color === 'string'
+      && EMPHASIS_COLORS.includes(e.color.trim().toLowerCase())
+      ? e.color.trim().toLowerCase() : undefined;
+    out.push(color ? { text, kind, color } : { text, kind });
     if (out.length >= 3) break;
   }
   return out.length ? out : undefined;
@@ -520,6 +588,9 @@ export const enrichPassages = async (
   // Every passage we've sent, so "unread" stays exact even though batches
   // overlap by one (a passage missed in one batch can land in the next).
   const attempted = new Set<string>();
+  // Set the first time a reply carries a chain of thought. From then on every
+  // request in this run is budgeted for one.
+  let reasoning = false;
 
   /**
    * One request. Never throws: `threw` distinguishes "the endpoint failed"
@@ -528,7 +599,7 @@ export const enrichPassages = async (
    */
   const readBatch = async (
     batch: ScenePassage[],
-  ): Promise<{ got: SceneDescriptor[]; threw: boolean }> => {
+  ): Promise<{ got: SceneDescriptor[]; threw: boolean; cut?: boolean }> => {
     try {
       const reply = await chatCompletion(
         cfg.base, cfg.key, cfg.model,
@@ -542,10 +613,21 @@ export const enrichPassages = async (
         // mergeSamplers, not a spread: an all-null reader config would otherwise
         // overwrite this regime with nulls and hand the batch back to the
         // backend's creative-writing defaults. See aiClient.mergeSamplers.
-        mergeSamplers({ ...directorSamplers(cfg.base), max_tokens: outputBudget(batch.length) }, cfg.params),
+        mergeSamplers(
+          { ...directorSamplers(cfg.base), max_tokens: outputBudget(batch.length, reasoning) },
+          cfg.params,
+        ),
         signal,
       );
-      return { got: parseDescriptors(reply, batch, Date.now(), lastLocation), threw: false };
+      // A model that thinks needs room to think NEXT time too — one detection
+      // fixes the whole run rather than every batch paying the same toll.
+      if (hasReasoning(reply)) reasoning = true;
+      const cut = truncatedInReasoning(reply);
+      return {
+        got: parseDescriptors(stripReasoning(reply), batch, Date.now(), lastLocation),
+        threw: false,
+        cut,
+      };
     } catch (e) {
       if (!signal?.aborted) console.error('[SceneDirector] batch failed', e);
       return { got: [], threw: true };
@@ -560,7 +642,16 @@ export const enrichPassages = async (
    * that would just multiply the failures.
    */
   const readOrSplit = async (batch: ScenePassage[]): Promise<SceneDescriptor[]> => {
-    const { got, threw } = await readBatch(batch);
+    const attempt = await readBatch(batch);
+    let { got } = attempt;
+    // Cut off mid-thought: the cost was the THINKING, not the passages, so
+    // splitting would fail the same way. `reasoning` is now set, which means
+    // this retry carries the headroom — try the same batch once more before
+    // giving up on it.
+    if (!got.length && !attempt.threw && attempt.cut && !signal?.aborted) {
+      got = (await readBatch(batch)).got;
+    }
+    const threw = attempt.threw;
     if (got.length || threw || batch.length < 4 || signal?.aborted) return got;
     const mid = Math.ceil(batch.length / 2);
     const first = await readOrSplit(batch.slice(0, mid));
