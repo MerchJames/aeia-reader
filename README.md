@@ -1,4 +1,4 @@
-# Aura Reader
+# Aeia Reader
 
 A local-first reader for **SillyTavern** and **KoboldAI** stories. Import your
 chat logs and read them back as something made — the words arrive at reading
@@ -16,6 +16,9 @@ feature still works from a heuristic fallback.
 
 ### Read
 
+- **A library that scales.** Search by title, character or tag; sort by last
+  read, date added, title or progress; filter by tag and format. Tags are yours
+  to edit. A deeper search reads the text inside every story on request.
 - **Nine views of the same story.** Storybook (prose), Chat (bubbles), Book
   (real two-page spreads with page-flips), Stage (RPG dialogue box with
   portraits), VN (visual-novel staging with sprites, backdrops and camera
@@ -81,6 +84,17 @@ feature still works from a heuristic fallback.
 - **Assistant, Cowrite, Summarize** — scoped Q&A over the story, alternate-beat
   ranking and fusion, and agentic map-reduce summaries saved as versioned pins.
 - **Narrative Refinery** — extract and restyle prose with a fidelity check.
+
+### Share it
+
+- **Export as a readable page** — one self-contained `.html` file with the
+  theme, dialogue styling, chapter structure, your highlights and the Director's
+  per-scene mood baked in. It loads nothing from the network, so handing someone
+  your story tells nobody they opened it.
+- **Render an audiobook** — the whole story as one MP3 with a CUE sheet marking
+  each chapter, read in your cast's voices. Needs a local **Kokoro** server: the
+  browser's own speech engine plays straight to the speakers and cannot be
+  recorded.
 
 ### Formats
 
@@ -149,6 +163,7 @@ that produce a Windows `.msi`/`.exe`, macOS `.dmg` or Linux `.AppImage`.
 npx tsc --noEmit                      # typecheck
 npx tsx src/utils/<name>.test.ts      # a unit suite (pure modules, no runner)
 npm run test:e2e                      # build + Playwright
+npm run mobile                        # render at 390px and report what breaks
 ```
 
 Unit tests are plain `tsx` scripts over the pure modules in `src/utils` — no
@@ -160,6 +175,28 @@ Visual features are screenshot-verified. If you are changing anything that
 paints — a theme, a scene effect, the reading spotlight — look at the render
 before believing a green suite; several bugs in this codebase passed every
 assertion and were obvious the moment someone opened a screenshot.
+
+**Small screens.** Below `sm` the header collapses to two rows — title and a
+tool menu above a scrolling view bar — and the reading views are unchanged.
+Above it the desktop header stays, but the view strip scrolls rather than
+forcing the page wider.
+
+`npm run mobile` renders every view, overlay and tour step and reports
+horizontal overflow and undersized tap targets; add `--size=landscape` or
+`--size=tablet` for the two shapes that get the desktop header without a mouse.
+`e2e/mobile.spec.ts` holds the properties it found.
+
+Three rules worth knowing before you add anything:
+
+- **Width decides layout, the pointer decides size.** `sm:`/`md:` for how much
+  room there is; the `touch:` variant (and `useIsTouch`) for hit targets, since
+  a tablet has the desktop layout and no mouse.
+- **Cap centred modals** — `max-h-[calc(100dvh-2rem)]` and a scrolling body. A
+  panel taller than the screen overflows in *both* directions, putting its own
+  buttons out of reach with nothing to scroll.
+- **Overflow is never cosmetic here.** A header that widens the document also
+  moves everything positioned `fixed left-1/2`, which is how the playback bar
+  ended up off-screen.
 
 ## Tech
 
@@ -173,6 +210,6 @@ your machine is a request to the AI endpoint you configured yourself.
 
 ## License & credits
 
-Aura Reader is written from scratch. Bundled Press Start 2P is SIL OFL (licence
+Aeia Reader is written from scratch. Bundled Press Start 2P is SIL OFL (licence
 in `public/fonts/`). Design inspiration is credited in the plan documents; no
 third-party application code is vendored.
