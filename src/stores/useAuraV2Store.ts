@@ -3,6 +3,7 @@ import { create } from 'zustand';
 import { applyOps, loadV2 } from '../lib/v2Storage';
 import { SliceBag, diffSlices, misdeclaredSlices, pickPersisted } from '../utils/v2Persist';
 import { Annotation, Chain, ChatThread, ChatTurn, ContextZone, CowritePreset, Message, MessageOverride, Pin, PinSet, PinVersion, SandboxActive, SandboxScope, SandboxTreatment, SceneArt, SceneCue, SceneDescriptor, SceneEmphasis, ScenePerformCue, Sheet, StyleConfig } from '../types';
+import { TasteEntry, recordTaste } from '../utils/tasteBlock';
 import { useAppStore } from '../store';
 import type { StoryRead } from '../utils/storyRead';
 import type { PacketRecord, StylePacket } from '../utils/stylePacket';
@@ -10,6 +11,10 @@ import { readThread, type AskTurn } from '../utils/askCharacter';
 import type { ReactionPoint } from '../utils/liveReaction';
 import type { EmotionBucket } from '../lib/spriteStorage';
 import type { Visitor } from '../utils/visitor';
+import type { Arc, Throughline } from '../utils/throughline';
+import {
+  moveArc as moveArcIn, orderedArcs, renumber as renumberArcs,
+} from '../utils/throughline';
 
 /* ------------------------------------------------------------------ */
 /* Codex types                                                         */
@@ -358,6 +363,24 @@ interface AuraV2State {
   updateVisitor: (storyId: string, visitorId: string, patch: Partial<Visitor>) => void;
   removeVisitor: (storyId: string, visitorId: string) => void;
 
+  /**
+   * Throughlines — one protagonist, several chats, in order.
+   *
+   * GLOBAL, not per-story, and that is the whole point: this is the one record
+   * that belongs to the reader rather than to a chat. A story's membership is
+   * its presence in an `arcs` list, so there is no second index that can
+   * disagree with the first about which throughline a story is in.
+   */
+  throughlines: Throughline[];
+  addThroughline: (t: Throughline) => void;
+  updateThroughline: (id: string, patch: Partial<Throughline>) => void;
+  removeThroughline: (id: string) => void;
+  /** Put a story into a throughline, at the end of the chronology. */
+  addArc: (id: string, arc: Arc) => void;
+  updateArc: (id: string, storyId: string, patch: Partial<Arc>) => void;
+  removeArc: (id: string, storyId: string) => void;
+  reorderArc: (id: string, storyId: string, direction: -1 | 1) => void;
+
   /* Per-character appearance sheets — story → character name → prompt text.
    * Prepended verbatim to every image prompt, which is the cheap 80% of making
    * the same person recognisable twice. Reader-editable by design. */
@@ -382,6 +405,29 @@ interface AuraV2State {
   removePerformMark: (storyId: string, messageId: string, markId: string) => void;
   /** Drop any hand-marked cue on `text` (the popover's "no performance"). */
   clearPerformMarkFor: (storyId: string, messageId: string, text: string) => void;
+
+  /**
+   * Every span this reader has directed by hand, across every story (persisted,
+   * global). Fed to the Director as few-shot examples — see `tasteBlock.ts` for
+   * why it is a flat global log rather than something derived from the marks
+   * above, and why a CLEARED mark is recorded as carefully as an added one.
+   *
+   * Global on purpose: taste is the reader's, not the story's, and a per-story
+   * derivation could only ever see the one story currently loaded.
+   */
+  tasteMarks: TasteEntry[];
+  /** Forget everything the Director has learned about this reader's taste. */
+  clearTaste: () => void;
+
+  /**
+   * Take on the direction layer that arrived with a Cut, keyed to the id this
+   * library just gave the story (see `utils/cut.ts`).
+   *
+   * Merges rather than replaces: the incoming story is new here, so there is
+   * nothing of its own to overwrite, and merging keeps every other story's
+   * share of the same slice untouched.
+   */
+  adoptCut: (storyId: string, wants: { slice: string; value: Record<string, unknown> }[]) => void;
 
   /* Pinned visuals (persisted) */
   pinsByStory: Record<string, Pin[]>;
@@ -449,16 +495,20 @@ interface AuraV2State {
    * `hash` fingerprints the passage the moments were found in, so an edited or
    * swiped message drops its reactions instead of firing them at offsets that
    * now point at different words.
+   *
+   * Keyed by `reactionKey(messageId, reactor)` — by beat AND by who was
+   * watching. See that function for why.
    */
   reactionsByStory: Record<string, Record<string, ReactionRecord>>;
   setReactionPoints: (
-    storyId: string, messageId: string,
-    rec: Pick<ReactionRecord, 'reactor' | 'hash' | 'points'>,
+    storyId: string, key: string,
+    rec: Pick<ReactionRecord, 'messageId' | 'reactor' | 'hash' | 'points'>,
   ) => void;
   addReactionLine: (
-    storyId: string, messageId: string, pointId: string, line: SpokenReaction,
+    storyId: string, key: string, pointId: string, line: SpokenReaction,
   ) => void;
-  clearReactions: (storyId: string, messageId?: string) => void;
+  /** Forget one point's line (a re-roll), one beat's, or the whole story's. */
+  clearReactions: (storyId: string, key?: string, pointId?: string) => void;
 
   /** Reader's standing direction for the Scene Director, per story (persisted). */
   sandboxGuidanceByStory: Record<string, string>;
@@ -652,6 +702,33 @@ const newId = () =>
     ? crypto.randomUUID()
     : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 
+/**
+ * Record one hand-marked span in the reader's taste log.
+ *
+ * Kept as a thin pair of wrappers so every mutator that touches a mark also
+ * teaches the Director, and none of them has to remember the log's shape.
+ */
+const learn = (log: TasteEntry[], entry: TasteEntry): TasteEntry[] => recordTaste(log, entry);
+
+/**
+ * Record that the reader took marks OFF.
+ *
+ * The removed marks are passed in rather than looked up, because by the time
+ * this runs they are already gone from the story's slice — and a clear is the
+ * single most informative thing in the log, so losing it to an ordering detail
+ * would quietly halve the feature.
+ */
+const forget = (
+  log: TasteEntry[],
+  removed: readonly { text: string; kind: string }[],
+  track: TasteEntry['track'],
+): TasteEntry[] => {
+  let next = log;
+  const at = Date.now();
+  for (const m of removed) next = recordTaste(next, { text: m.text, kind: m.kind, track, at, cleared: true });
+  return next;
+};
+
 /** Keep only the most recently touched stories so the codex can't grow unbounded. */
 const pruneStories = <T,>(map: Record<string, T>, keep: string[]): Record<string, T> => {
   const keys = Object.keys(map);
@@ -686,10 +763,12 @@ export const useAuraV2Store = create<AuraV2State>()(
       sfxMarksByStory: {},
       artByStory: {},
       visitorsByStory: {},
+      throughlines: [],
       appearanceByStory: {},
       artSeedByStory: {},
       emphasisMarksByStory: {},
       performMarksByStory: {},
+      tasteMarks: [],
       pinsByStory: {},
       pinSetsByStory: {},
       activePinSetByStory: {},
@@ -1453,9 +1532,9 @@ export const useAuraV2Store = create<AuraV2State>()(
         const thread = readThread(get().askByStory[storyId]);
         set({ askByStory: { ...get().askByStory, [storyId]: [...thread, turn] } });
       },
-      setReactionPoints: (storyId, messageId, rec) => {
-        const byMsg = get().reactionsByStory[storyId] ?? {};
-        const prev = byMsg[messageId];
+      setReactionPoints: (storyId, key, rec) => {
+        const byKey = get().reactionsByStory[storyId] ?? {};
+        const prev = byKey[key];
         // Re-scouting the same passage keeps what was already said; a CHANGED
         // passage starts clean, because the old offsets now point at different
         // words and a line spoken at them would land on the wrong moment.
@@ -1463,36 +1542,46 @@ export const useAuraV2Store = create<AuraV2State>()(
         set({
           reactionsByStory: {
             ...get().reactionsByStory,
-            [storyId]: { ...byMsg, [messageId]: { messageId, ...rec, lines } },
+            [storyId]: { ...byKey, [key]: { ...rec, lines } },
           },
         });
       },
-      addReactionLine: (storyId, messageId, pointId, line) => {
-        const byMsg = get().reactionsByStory[storyId] ?? {};
-        const rec = byMsg[messageId];
+      addReactionLine: (storyId, key, pointId, line) => {
+        const byKey = get().reactionsByStory[storyId] ?? {};
+        const rec = byKey[key];
         if (!rec) return;
         set({
           reactionsByStory: {
             ...get().reactionsByStory,
-            [storyId]: { ...byMsg, [messageId]: { ...rec, lines: { ...rec.lines, [pointId]: line } } },
+            [storyId]: { ...byKey, [key]: { ...rec, lines: { ...rec.lines, [pointId]: line } } },
           },
         });
         // Written through: a spoken line cost a model call, and a reader
         // scrolling back expects to find what was said at that beat.
         void flushV2();
       },
-      clearReactions: (storyId, messageId) => {
-        if (!messageId) {
+      clearReactions: (storyId, key, pointId) => {
+        if (!key) {
           const next = { ...get().reactionsByStory };
           delete next[storyId];
           set({ reactionsByStory: next });
           void flushV2();
           return;
         }
-        const byMsg = get().reactionsByStory[storyId];
-        if (!byMsg?.[messageId]) return;
-        const next = { ...byMsg };
-        delete next[messageId];
+        const byKey = get().reactionsByStory[storyId];
+        const rec = byKey?.[key];
+        if (!rec) return;
+        const next = { ...byKey };
+        if (pointId) {
+          // A re-roll: forget the LINE, keep the moment. The scout already
+          // decided this was worth breaking in on and re-asking it would cost a
+          // second call to be told the same thing.
+          const lines = { ...rec.lines };
+          delete lines[pointId];
+          next[key] = { ...rec, lines };
+        } else {
+          delete next[key];
+        }
         set({ reactionsByStory: { ...get().reactionsByStory, [storyId]: next } });
         void flushV2();
       },
@@ -1548,6 +1637,56 @@ export const useAuraV2Store = create<AuraV2State>()(
       // IndexedDB write cannot hold up a page unload. A visitor costs a model
       // call to make and a careful read to correct — losing one to a reload a
       // third of a second later is not a tradeoff anybody would accept.
+      addThroughline: (t) => {
+        set({ throughlines: [...get().throughlines, t] });
+        void flushV2();
+      },
+      updateThroughline: (id, patch) => {
+        set({ throughlines: get().throughlines.map(t => (t.id === id ? { ...t, ...patch } : t)) });
+        void flushV2();
+      },
+      removeThroughline: (id) => {
+        set({ throughlines: get().throughlines.filter(t => t.id !== id) });
+        void flushV2();
+      },
+      addArc: (id, arc) => {
+        set({
+          throughlines: get().throughlines.map(t => (t.id === id
+            // A story belongs to one arc. Re-adding it moves nothing and
+            // duplicates nothing — two arcs with one story id would make the
+            // spoiler clamp non-deterministic (see utils/throughline).
+            ? (t.arcs.some(a => a.storyId === arc.storyId)
+              ? t
+              : { ...t, arcs: renumberArcs([...orderedArcs(t), arc]) })
+            : t)),
+        });
+        void flushV2();
+      },
+      updateArc: (id, storyId, patch) => {
+        set({
+          throughlines: get().throughlines.map(t => (t.id === id
+            ? { ...t, arcs: t.arcs.map(a => (a.storyId === storyId ? { ...a, ...patch } : a)) }
+            : t)),
+        });
+        void flushV2();
+      },
+      removeArc: (id, storyId) => {
+        set({
+          throughlines: get().throughlines.map(t => (t.id === id
+            ? { ...t, arcs: renumberArcs(orderedArcs(t).filter(a => a.storyId !== storyId)) }
+            : t)),
+        });
+        void flushV2();
+      },
+      reorderArc: (id, storyId, direction) => {
+        set({
+          throughlines: get().throughlines.map(t => (t.id === id
+            ? { ...t, arcs: moveArcIn(t, storyId, direction) }
+            : t)),
+        });
+        void flushV2();
+      },
+
       addVisitor: (storyId, visitor) => {
         const list = get().visitorsByStory[storyId] ?? [];
         set({ visitorsByStory: { ...get().visitorsByStory, [storyId]: [...list, visitor] } });
@@ -1599,7 +1738,10 @@ export const useAuraV2Store = create<AuraV2State>()(
         // One treatment per span — re-marking the same words replaces the old.
         const kept = (byMsg[messageId] ?? []).filter(m => m.text !== text);
         const list = [...kept, { ...mark, text, id: newId() }];
-        set({ emphasisMarksByStory: { ...get().emphasisMarksByStory, [storyId]: { ...byMsg, [messageId]: list } } });
+        set({
+          emphasisMarksByStory: { ...get().emphasisMarksByStory, [storyId]: { ...byMsg, [messageId]: list } },
+          tasteMarks: learn(get().tasteMarks, { text, kind: mark.kind, track: 'emphasis', at: Date.now() }),
+        });
         void flushV2();
       },
       clearEmphasisMarkFor: (storyId, messageId, text) => {
@@ -1611,10 +1753,17 @@ export const useAuraV2Store = create<AuraV2State>()(
         // the reader re-selects the exact span or a little more around it.
         const next = list.filter(m => !(m.text === t || t.includes(m.text) || m.text.includes(t)));
         if (next.length === list.length) return;
-        set({ emphasisMarksByStory: { ...get().emphasisMarksByStory, [storyId]: { ...byMsg, [messageId]: next } } });
+        set({
+          emphasisMarksByStory: { ...get().emphasisMarksByStory, [storyId]: { ...byMsg, [messageId]: next } },
+          tasteMarks: forget(get().tasteMarks, list.filter(m => !next.includes(m)), 'emphasis'),
+        });
         void flushV2();
       },
 
+      // The three below write through for the same reason the two above do, and
+      // they did not until now — the debounce trap has bitten this app four
+      // times. Marking a span is deliberate: the reader picked the words by
+      // hand, and a 400ms IndexedDB write cannot hold up a page unload.
       addPerformMark: (storyId, messageId, mark) => {
         const text = mark.text.trim();
         if (!text) return;
@@ -1622,12 +1771,21 @@ export const useAuraV2Store = create<AuraV2State>()(
         // One direction per span — re-marking the same words replaces the old call.
         const kept = (byMsg[messageId] ?? []).filter(m => m.text !== text);
         const list = [...kept, { ...mark, text, id: newId() }];
-        set({ performMarksByStory: { ...get().performMarksByStory, [storyId]: { ...byMsg, [messageId]: list } } });
+        set({
+          performMarksByStory: { ...get().performMarksByStory, [storyId]: { ...byMsg, [messageId]: list } },
+          tasteMarks: learn(get().tasteMarks, { text, kind: mark.kind, track: 'perform', at: Date.now() }),
+        });
+        void flushV2();
       },
       removePerformMark: (storyId, messageId, markId) => {
         const byMsg = get().performMarksByStory[storyId];
         if (!byMsg?.[messageId]) return;
-        set({ performMarksByStory: { ...get().performMarksByStory, [storyId]: { ...byMsg, [messageId]: byMsg[messageId].filter(m => m.id !== markId) } } });
+        const gone = byMsg[messageId].filter(m => m.id === markId);
+        set({
+          performMarksByStory: { ...get().performMarksByStory, [storyId]: { ...byMsg, [messageId]: byMsg[messageId].filter(m => m.id !== markId) } },
+          tasteMarks: forget(get().tasteMarks, gone, 'perform'),
+        });
+        void flushV2();
       },
       clearPerformMarkFor: (storyId, messageId, text) => {
         const byMsg = get().performMarksByStory[storyId];
@@ -1638,7 +1796,34 @@ export const useAuraV2Store = create<AuraV2State>()(
         // reader re-selects the exact span or a little more around it.
         const next = list.filter(m => !(m.text === t || t.includes(m.text) || m.text.includes(t)));
         if (next.length === list.length) return;
-        set({ performMarksByStory: { ...get().performMarksByStory, [storyId]: { ...byMsg, [messageId]: next } } });
+        set({
+          performMarksByStory: { ...get().performMarksByStory, [storyId]: { ...byMsg, [messageId]: next } },
+          tasteMarks: forget(get().tasteMarks, list.filter(m => !next.includes(m)), 'perform'),
+        });
+        void flushV2();
+      },
+
+      clearTaste: () => { set({ tasteMarks: [] }); void flushV2(); },
+
+      adoptCut: (storyId, wants) => {
+        const state = get() as unknown as Record<string, unknown>;
+        const patch: Record<string, unknown> = {};
+        for (const { slice, value } of wants) {
+          // Only slices this store actually has. A Cut is already filtered on
+          // the way in (`parseCut`), and this is the second gate: a name that
+          // is not a real slice must not become one by arriving in a file.
+          if (!(slice in state)) continue;
+          const current = state[slice];
+          const share = value[storyId];
+          if (share === undefined) continue;
+          if (!current || typeof current !== 'object' || Array.isArray(current)) continue;
+          patch[slice] = { ...(current as Record<string, unknown>), [storyId]: share };
+        }
+        if (!Object.keys(patch).length) return;
+        set(patch as never);
+        // Written through: opening a Cut is the reader receiving something, and
+        // losing it to a reload would look exactly like a corrupt file.
+        void flushV2();
       },
 
       addAnnotation: (storyId, annotation) => {

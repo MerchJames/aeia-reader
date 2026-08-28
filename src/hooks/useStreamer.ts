@@ -159,6 +159,10 @@ export const useStreamer = () => {
           st.setAwaitingAdvance(true);
           return;
         }
+        // The reader drives. Checked AFTER the voice, so a narrated passage is
+        // never cut off mid-sentence by a keypress gate that arrived first —
+        // the voice finishes, then the wait begins.
+        if (st.pressToAdvance || st.viewHold) { st.setAwaitingInput(true); return; }
         st.advanceMessage();
       }, Math.max(0, s.messagePause, readFloor));
     };

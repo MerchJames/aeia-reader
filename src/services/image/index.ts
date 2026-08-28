@@ -1,3 +1,4 @@
+import { trackAi } from '../../utils/aiActivity';
 /**
  * The image service: pick an adapter, ask it for a picture.
  *
@@ -49,7 +50,9 @@ export const probeImageService = async (signal?: AbortSignal): Promise<ProbeResu
 
 export const generateImage = (req: ImageRequest): Promise<ImageResult> => {
   const config = imageConfig();
-  return adapterFor(config.adapter).generate(config, req);
+  // A picture is the longest errand in the app and the easiest to lose track
+  // of — the modal can be closed while it renders. Counted like the rest.
+  return trackAi('Rendering a scene', () => adapterFor(config.adapter).generate(config, req));
 };
 
 /** What the configured backend can do right now. */

@@ -8,8 +8,8 @@ import { hashContent } from '../utils/sceneDirector';
 import { visitorBlock } from '../utils/visitor';
 import { samplerParamsFrom } from '../utils/aiClient';
 import {
-  Reactor, ReactionPoint, historyBefore, pointAt, reactAt, resolveReactionPoints, scoutPassage,
-  visibleText,
+  EARLIER_LINES, Reactor, ReactionPoint, historyBefore, pointAt, reactAt, reactionKey,
+  resolveReactionPoints, scoutPassage, visibleText,
 } from '../utils/liveReaction';
 import type { EmotionBucket } from '../lib/spriteStorage';
 
@@ -51,6 +51,11 @@ export const useLiveReaction = () => {
   const streamedText = useAppStore(s => s.streamedText);
   const base = useAppStore(s => s.aiBaseUrl);
   const model = useAppStore(s => s.aiModel);
+  // Watched, so switching companions re-scouts. Without it the effect never
+  // re-ran and a second reactor simply never spoke — the feature looked broken
+  // rather than busy.
+  const picked = useAppStore(s => s.liveReactor);
+  const [reroll, setReroll] = useState(0);
 
   const [line, setLine] = useState<LiveLine | null>(null);
   const points = useRef<ReactionPoint[]>([]);
@@ -144,8 +149,9 @@ export const useLiveReaction = () => {
     if (passage.trim().length < 40) return;   // too short to break in on
 
     const hash = hashContent(passage);
-    const cached = v2.reactionsByStory[storyId]?.[messageId];
-    if (cached && cached.hash === hash && cached.reactor === reactor.name) {
+    const key = reactionKey(messageId, reactor.name);
+    const cached = v2.reactionsByStory[storyId]?.[key];
+    if (cached && cached.hash === hash) {
       points.current = cached.points;
       // Deliberately NOT seeding `spoken` from the cache. `spoken` is the
       // fire-once set for THIS reading, and pre-filling it made a re-read
@@ -174,14 +180,14 @@ export const useLiveReaction = () => {
         if (t !== token.current) return;              // the reader moved on
         const resolved = resolveReactionPoints(passage, cues);
         points.current = resolved;
-        useAuraV2Store.getState().setReactionPoints(storyId, messageId, {
-          reactor: reactor.name, hash, points: resolved,
+        useAuraV2Store.getState().setReactionPoints(storyId, key, {
+          messageId, reactor: reactor.name, hash, points: resolved,
         });
       } catch {
         // Silence is the correct failure: the reader reads on, undisturbed.
       }
     })();
-  }, [active, messageId, base, model]);
+  }, [active, messageId, base, model, picked, reroll]);
 
   // ----- pass 2: speak when the reveal reaches a moment --------------------
   useEffect(() => {
@@ -200,7 +206,8 @@ export const useLiveReaction = () => {
     // Claim it before the await, or a burst of reveal frames fires it twice.
     spoken.current.add(point.id);
 
-    const cachedLine = v2.reactionsByStory[storyId]?.[messageId]?.lines[point.id];
+    const key = reactionKey(messageId, reactor.name);
+    const cachedLine = v2.reactionsByStory[storyId]?.[key]?.lines[point.id];
     if (cachedLine) {
       setLine({
         id: point.id, reactor: reactor.name, text: cachedLine.text,
@@ -209,16 +216,29 @@ export const useLiveReaction = () => {
       return;
     }
 
+    const ordered = s.chains.flatMap(c => c.messages)
+      .map(m => ({ id: m.id, name: m.name, content: m.content }));
     const t = token.current;
     busy.current = true;
     if (s.liveReactionFreeze) s.setReactionHold(true);
     abort.current = new AbortController();
     void (async () => {
       try {
-        const ordered = s.chains.flatMap(c => c.messages)
-          .map(m => ({ id: m.id, name: m.name, content: m.content }));
-        const said = Object.values(v2.reactionsByStory[storyId]?.[messageId]?.lines ?? {})
-          .map(l => l.text);
+        const byKey = v2.reactionsByStory[storyId] ?? {};
+        const said = Object.values(byKey[key]?.lines ?? {}).map(l => l.text);
+        // What they have said EARLIER in the story, in reading order — their own
+        // lines only, so the companion has a memory without the prompt carrying
+        // a second copy of the transcript.
+        const stop = ordered.findIndex(m => m.id === messageId);
+        const earlier: string[] = [];
+        for (let i = 0; i < (stop < 0 ? 0 : stop); i++) {
+          const rec = byKey[reactionKey(ordered[i].id, reactor.name)];
+          if (!rec) continue;
+          for (const p of rec.points) {
+            const l = rec.lines[p.id];
+            if (l) earlier.push(l.text);
+          }
+        }
         const answer = await reactAt(
           {
             reactor,
@@ -229,13 +249,14 @@ export const useLiveReaction = () => {
             moment: point.text,
             userName: story.userName,
             said,
+            earlier: earlier.slice(-EARLIER_LINES),
             mood: v2.sceneByStory[storyId]?.[messageId]?.mood,
           },
           { base, key: s.aiApiKey, model, params: samplerParamsFrom(s.aiAdvanced) },
           abort.current!.signal,
         );
         if (t !== token.current || !answer) return;
-        useAuraV2Store.getState().addReactionLine(storyId, messageId, point.id, {
+        useAuraV2Store.getState().addReactionLine(storyId, key, point.id, {
           text: answer.text, emotion: answer.emotion, at: Date.now(),
         });
         setLine({
@@ -258,5 +279,23 @@ export const useLiveReaction = () => {
     if (!active) useAppStore.getState().setReactionHold(false);
   }, [active]);
 
-  return { line, dismiss: () => setLine(null) };
+  /**
+   * Ask again at the moment they just spoke at.
+   *
+   * Forgets the LINE and keeps the moment: the scout already judged this worth
+   * breaking in on, and re-scouting would spend a second call to be told the
+   * same thing. Clearing `spoken` lets pass 2 fire on it again.
+   */
+  const again = () => {
+    const s = useAppStore.getState();
+    const storyId = s.currentStory?.id;
+    const reactor = reactorNow();
+    if (!storyId || !messageId || !reactor || !line) return;
+    useAuraV2Store.getState()
+      .clearReactions(storyId, reactionKey(messageId, reactor.name), line.id);
+    spoken.current.delete(line.id);
+    setLine(null);
+  };
+
+  return { line, dismiss: () => setLine(null), again, rescout: () => setReroll(n => n + 1) };
 };

@@ -232,7 +232,11 @@ export const useTTS = () => {
       if (st.awaitingAdvance) {
         st.setAwaitingAdvance(false);
         if (st.isStreaming && st.streamingMessage?.id === messageId) {
-          st.advanceMessage();
+          // The voice finished, but the reader may still be driving. Hand the
+          // wait over rather than advancing past them — otherwise turning on
+          // narration silently disables press-to-advance.
+          if (st.pressToAdvance || st.viewHold) st.setAwaitingInput(true);
+          else st.advanceMessage();
         }
       }
     };
