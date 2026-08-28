@@ -18,7 +18,8 @@
 import { Message, MessageOverride } from '../types';
 import { useAppStore } from '../store';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
-import { chatCompletion, ChatMsg } from './aiClient';
+import { ChatMsg } from './aiClient';
+import { askText } from './aiCall';
 import { hashContent } from './sceneDirector';
 import { repairFormatting } from './textProcessor';
 
@@ -67,12 +68,16 @@ export const repairPassage = async (
   cfg: RepairConfig,
   signal?: AbortSignal,
 ): Promise<string | null> => {
-  const reply = await chatCompletion(
-    cfg.base, cfg.key, cfg.model,
+  const reply = await askText(
+    { base: cfg.base, key: cfg.key, model: cfg.model },
     buildRepairMessages(content),
-    // Deterministic, and roomy enough to echo the passage back.
-    { temperature: 0, max_tokens: Math.min(4000, Math.ceil(content.length / 2) + 300) },
-    signal,
+    {
+      label: 'Repairing formatting',
+      // Deterministic, and roomy enough to echo the passage back.
+      params: { temperature: 0 },
+      budget: Math.min(4000, Math.ceil(content.length / 2) + 300),
+      signal,
+    },
   );
   const fixed = cleanRepairReply(reply);
   return validRepair(content, fixed) ? fixed : null;

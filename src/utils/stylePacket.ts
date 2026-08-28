@@ -26,7 +26,8 @@
  *    rather than to nothing.
  */
 
-import { ChatMsg, chatCompletion, SamplerParams } from './aiClient';
+import { ChatMsg, SamplerParams } from './aiClient';
+import { askText, stripReasoning } from './aiCall';
 import { isLocalBase } from './aiClient';
 
 export const STYLE_PACKET_VERSION = 1;
@@ -375,7 +376,10 @@ const listFrom = (v: unknown, max: number, fallback: string[]): string[] => {
  */
 export const parsePacket = (raw: string, guidance: string): StylePacket => {
   const floor = heuristicPacket(guidance);
-  const text = (raw || '').replace(/<think>[\s\S]*?<\/think>/gi, '');
+  // The shared stripper: the private one here knew `<think>` only, and only a
+  // CLOSED one, so a packet request that ran out of room mid-thought had its
+  // deliberation scanned for a fenced palette.
+  const text = stripReasoning(raw || '');
   const fenced = text.match(/```json\b[^\n]*\n([\s\S]*?)```/i)?.[1]
     ?? text.match(/```[^\n]*\n([\s\S]*?)```/)?.[1]
     ?? (text.trim().startsWith('{') ? text.trim() : '');
@@ -439,9 +443,10 @@ export const derivePacket = async (
 ): Promise<StylePacket> => {
   if (!cfg.base || !cfg.model) return heuristicPacket(guidance);
   try {
-    const reply = await chatCompletion(
-      cfg.base, cfg.key, cfg.model, buildPacketMessages(guidance, samples),
-      { ...packetSamplers(cfg.base), max_tokens: 700 }, signal,
+    const reply = await askText(
+      { base: cfg.base, key: cfg.key, model: cfg.model },
+      buildPacketMessages(guidance, samples),
+      { label: 'Designing the look', params: packetSamplers(cfg.base), budget: 700, signal },
     );
     return parsePacket(reply, guidance);
   } catch {

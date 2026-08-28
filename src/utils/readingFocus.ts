@@ -29,6 +29,8 @@
  * of bug that made this drift.
  */
 
+import { MagnifierStyle } from '../types';
+
 /** The parts of a DOMRect this needs — plain data, so it is testable. */
 export interface Box {
   left: number;
@@ -95,3 +97,40 @@ export const focusMoved = (prev: FocusVars | null, next: FocusVars): boolean => 
   const dy = Math.abs(parseFloat(prev['--focus-y']) - parseFloat(next['--focus-y']));
   return dx > 8 || dy > 3;
 };
+
+/* ── The dresses ───────────────────────────────────────────────────────────
+ *
+ * Everything above measures WHERE the reader's eye is. This decides only how
+ * that gets drawn, and lives here rather than in the component so the settings
+ * panel and the stylesheet cannot disagree about which looks exist.
+ *
+ * Adding one is a class in index.css (`.rs-<id>`) and a row here. Nothing in
+ * the measuring path changes — that is the whole point of the scrim design.
+ */
+export const MAGNIFIER_STYLES: readonly {
+  id: MagnifierStyle; label: string; hint: string;
+}[] = [
+  {
+    id: 'light', label: 'Light',
+    hint: 'A soft spotlight on the words, the rest of the page falling away.',
+  },
+  {
+    id: 'glass', label: 'Glass',
+    hint: 'A frosted lens — the page around it blurs, the line under it stays sharp.',
+  },
+  {
+    id: 'box', label: 'Card',
+    hint: 'A framed plate that slides down the page, line by line.',
+  },
+  {
+    id: 'ruler', label: 'Ruler',
+    hint: 'A reading guide: everything above and below the line is covered.',
+  },
+  {
+    id: 'iris', label: 'Iris',
+    hint: 'A film gate closing down to the moment you are reading.',
+  },
+];
+
+export const isMagnifierStyle = (v: unknown): v is MagnifierStyle =>
+  MAGNIFIER_STYLES.some(m => m.id === v);

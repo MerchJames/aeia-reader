@@ -33,6 +33,7 @@ export const FONT_STACKS: Record<Exclude<FontFamily, 'theme'>, string> = {
   slab: '"Roboto Slab", ui-serif, Georgia, serif',
   medieval: '"MedievalSharp", "Papyrus", fantasy',
   comic: '"Comic Neue", "Comic Sans MS", cursive',
+  calligraphy: '"Dancing Script", "Segoe Script", "Brush Script MT", cursive',
 };
 
 /**
@@ -52,6 +53,9 @@ const GOOGLE_SPECS: Record<string, string | null> = {
   slab: 'Roboto+Slab:wght@400;600;700',
   medieval: 'MedievalSharp',
   comic: 'Comic+Neue:wght@400;700',
+  // Two weights: the theme sets prose in the regular and the speaker plates in
+  // the bold, and a script face without its bold has no way to emphasise.
+  calligraphy: 'Dancing+Script:wght@400;700',
   // OpenDyslexic comes from a different CDN and is a large face; the stack's
   // Comic Sans fallback is the point of it anyway.
   dyslexic: null,

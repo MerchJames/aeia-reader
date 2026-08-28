@@ -86,7 +86,19 @@ narrates('She read "The Salt Road" twice that winter.', 'nor a title');
 // `call` means naming far more often than speaking, so it is NOT an
 // attribution verb — and the spoken use has its punctuation inside anyway.
 narrates('He called the plan "ambitious".', 'nor something being named');
-narrates("She called it 'the arrangement' and left.", 'single quotes get the same judgement');
+/* Single quotes are judged DIFFERENTLY now, and deliberately.
+ *
+ * They used to share this rule, because they shared the dialogue look and a
+ * scare quote is not a second speaker. They no longer share the look: `'…'` is
+ * its own channel — the ASIDE (see utils/markupStyles) — and thought, scare
+ * quotes and British speech are all of it. So every single-quoted span wraps,
+ * and what stops `don't` from wrapping is the boundary rule, asserted above.
+ *
+ * TTS is unaffected: `dialogueSegments` splits on `[“"]` only, so nothing
+ * single-quoted has ever been handed to a character's voice. */
+ok(q("She called it 'the arrangement' and left.")
+  === "She called it *'the arrangement'* and left.",
+  'a single-quoted phrase in narration is an aside, and styles as one');
 
 speaks('"Hello."', 'a full stop inside the quote is speech');
 speaks('"Are you coming?"', 'so is a question mark');

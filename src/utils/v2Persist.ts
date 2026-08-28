@@ -66,6 +66,12 @@ export const PERSISTED_SLICES: readonly { slice: string; perStory: boolean }[] =
   { slice: 'sandboxConfigs', perStory: true },
   { slice: 'sandboxActive', perStory: true },
   { slice: 'cowritePresets', perStory: false },
+  // Global on purpose: taste is the reader's, not the story's (see tasteBlock.ts).
+  { slice: 'tasteMarks', perStory: false },
+  // Global on purpose, for the same reason taste is: a throughline belongs to
+  // the READER, not to any one chat — it is the record of the person they play
+  // across all of them (see utils/throughline).
+  { slice: 'throughlines', perStory: false },
   { slice: 'codexEnabled', perStory: false },
   { slice: 'codexUseAI', perStory: false },
   { slice: 'codexHighlight', perStory: false },

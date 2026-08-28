@@ -47,12 +47,12 @@
  * companion chat, and that boundary is the whole reason it can be built.
  */
 
-import { ChatMsg, SamplerParams, chatCompletion, isLocalBase, mergeSamplers } from './aiClient';
+import { ChatMsg, SamplerParams, isLocalBase } from './aiClient';
 import { cardToPromptBlock } from './cardContext';
 import {
   HISTORY_BUDGET, HistoryMessage, clampHistory, historyBlock, parseAnswer, type ParsedAnswer,
 } from './askCharacter';
-import { stripReasoning } from './sceneDirector';
+import { askText, salvageArray, stripReasoning } from './aiCall';
 import type { CardInfo } from '../types';
 
 /** How much of the passage the reactor is shown when they speak. */
@@ -73,6 +73,18 @@ export interface ReactionPoint extends ReactionCue {
   start: number;
   end: number;
 }
+
+/**
+ * How a passage's reactions are filed: by beat AND by who was watching.
+ *
+ * Keyed by both because a reaction belongs to a person. Filing them by message
+ * alone meant a second companion overwrote the first's, so switching back
+ * re-billed a reading you had already paid for — and, worse, made switching
+ * look broken, because the record for the beat already existed and the new
+ * reactor's name did not match it.
+ */
+export const reactionKey = (messageId: string, reactor: string): string =>
+  `${messageId}::${reactor.trim().toLowerCase()}`;
 
 /** Who is watching with you. A cast member, a visitor, or an uploaded card. */
 export interface Reactor {
@@ -180,30 +192,16 @@ export const buildScoutMessages = (input: ScoutInput): ChatMsg[] => {
   ];
 };
 
-/** The first JSON array in a reply, tolerating fences and preamble. */
-const firstArray = (raw: string): unknown => {
-  const s = stripReasoning(raw ?? '');
-  const start = s.indexOf('[');
-  if (start < 0) return null;
-  let depth = 0;
-  let inStr = false;
-  let esc = false;
-  for (let i = start; i < s.length; i++) {
-    const c = s[i];
-    if (inStr) {
-      if (esc) esc = false;
-      else if (c === '\\') esc = true;
-      else if (c === '"') inStr = false;
-      continue;
-    }
-    if (c === '"') { inStr = true; continue; }
-    if (c === '[') depth++;
-    else if (c === ']' && --depth === 0) {
-      try { return JSON.parse(s.slice(start, i + 1)); } catch { return null; }
-    }
-  }
-  return null;
-};
+/**
+ * The cues out of a reply.
+ *
+ * Was a fourth private copy of the balanced-brace scan. The shared one salvages
+ * as well as parses, so a scout reply cut off at the token limit now costs the
+ * cue that was cut rather than every cue in the passage — which, for a feature
+ * whose whole output is two or three lines, was the difference between a quiet
+ * companion and a silent one.
+ */
+const firstArray = (raw: string): unknown => salvageArray(raw);
 
 /**
  * Keep only cues that name a real, short span of the passage.
@@ -334,6 +332,20 @@ export interface ReactionInput {
   userName?: string;
   /** What they have already said about THIS passage, so they do not repeat it. */
   said?: string[];
+  /**
+   * What they have said EARLIER IN THE STORY, oldest first.
+   *
+   * Without it every reaction was the first thing they had ever said: they
+   * would gasp at the same revelation three passages running, having apparently
+   * forgotten reacting to it, which is the single thing that most breaks the
+   * illusion of someone sitting beside you.
+   *
+   * Their own lines only — never the passages those lines were about. Their
+   * reactions are a compact record of what struck them and are a few hundred
+   * characters for a whole chapter, where the passages would be tens of
+   * thousands and would quietly re-open the spoiler question.
+   */
+  earlier?: string[];
   mood?: string;
 }
 
@@ -356,8 +368,15 @@ export const buildReactionMessages = (input: ReactionInput): ChatMsg[] => {
     input.moment,
     '"""',
     input.mood ? `\nThis beat reads as: ${input.mood}` : '',
+    input.earlier?.length
+      ? '\nWHAT YOU HAVE SAID SO FAR, WATCHING THIS WITH THEM (oldest first):\n'
+        + input.earlier.map(s => `  "${s}"`).join('\n')
+        + '\nYou remember saying these. Do not react to something as though it were'
+        + ' new when you have already reacted to it — build on it, take it back,'
+        + ' or be quieter about it the second time.'
+      : '',
     input.said?.length
-      ? '\nYou have already said, in this same passage:\n'
+      ? '\nAnd already, in this same passage:\n'
         + input.said.map(s => `  "${s}"`).join('\n')
         + '\nDo not repeat yourself. If you have nothing new, say something short.'
       : '',
@@ -380,6 +399,10 @@ export const reactionSamplers = (base: string): SamplerParams => ({
   ...(isLocalBase(base) ? { min_p: 0.05, repetition_penalty: 1.08 } : {}),
 });
 
+/** How many of their earlier lines travel with them. Enough to have a memory,
+ *  few enough that the prompt stays small on a 500-message story. */
+export const EARLIER_LINES = 8;
+
 /** One or two lines. The ceiling is a guard, not a target. */
 export const REACTION_TOKENS = 160;
 /** The scout returns three short strings; it needs nothing like the same room.
@@ -397,10 +420,16 @@ export interface ReactionConfig {
 export const scoutPassage = async (
   input: ScoutInput, cfg: ReactionConfig, signal?: AbortSignal,
 ): Promise<ReactionCue[]> => {
-  const reply = await chatCompletion(
-    cfg.base, cfg.key, cfg.model, buildScoutMessages(input),
-    mergeSamplers({ temperature: 0.4, top_p: 0.9, max_tokens: scoutTokens(true) }, cfg.params),
-    signal,
+  const reply = await askText(
+    { base: cfg.base, key: cfg.key, model: cfg.model },
+    buildScoutMessages(input),
+    {
+      label: `${input.reactor.name} is reading ahead`,
+      params: { temperature: 0.4, top_p: 0.9 },
+      reader: cfg.params,
+      budget: scoutTokens(true),
+      signal,
+    },
   );
   return parseScoutCues(reply, input.passage);
 };
@@ -409,10 +438,16 @@ export const scoutPassage = async (
 export const reactAt = async (
   input: ReactionInput, cfg: ReactionConfig, signal?: AbortSignal,
 ): Promise<ParsedAnswer | null> => {
-  const reply = await chatCompletion(
-    cfg.base, cfg.key, cfg.model, buildReactionMessages(input),
-    mergeSamplers({ ...reactionSamplers(cfg.base), max_tokens: REACTION_TOKENS }, cfg.params),
-    signal,
+  const reply = await askText(
+    { base: cfg.base, key: cfg.key, model: cfg.model },
+    buildReactionMessages(input),
+    {
+      label: `${input.reactor.name} is about to say something`,
+      params: reactionSamplers(cfg.base),
+      reader: cfg.params,
+      budget: REACTION_TOKENS,
+      signal,
+    },
   );
   return parseAnswer(reply, input.reactor.name);
 };

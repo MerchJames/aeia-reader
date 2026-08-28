@@ -18,10 +18,14 @@
  * as a link that rots or reports who opened it.
  */
 
-import type { Mood, SceneDescriptor, SceneEmphasis, ScenePerformCue, Story } from '../types';
+import type {
+  CharacterChannelColors, DialogueAnimation, DialogueStyle, MarkupPresets, Mood, SceneDescriptor, SceneEmphasis,
+  ScenePerformCue, Story,
+} from '../types';
 import type { ThemeDef } from '../themes';
 import { AEIA_MARK } from '../assets/aeiaMark';
 import { renderInline } from './bookLayout';
+import { resolveCharColors } from './markupStyles';
 import { MOOD_COLOR, sceneAtmosphere } from './sceneMood';
 import { WalkedStory, minutesFor } from './storyWalk';
 import {
@@ -85,6 +89,20 @@ export interface ExportOptions {
   /** Stamped on the cover. Injected rather than read from the clock so the
    *  output is reproducible and the tests can pin a date. */
   exportedAt?: number;
+  /**
+   * The reader's dialogue/markup-channel settings, baked in at export time —
+   * same colors/styles/animation (and, when on, the same per-character color)
+   * the reader sees live. Omitted keeps the export's old plain look.
+   */
+  markup?: {
+    dialogueColor: string;
+    dialogueStyle: DialogueStyle;
+    dialogueAnimation: DialogueAnimation;
+    markupPresets: MarkupPresets;
+    characterColors?: Record<string, string>;
+    characterChannelColors?: CharacterChannelColors;
+    characterColorsEnabled?: boolean;
+  };
 }
 
 const escapeHtml = (s: string): string =>
@@ -169,6 +187,14 @@ display:grid;place-items:center;color:#fff;font-weight:700;font-size:.9em;
 margin-top:.15rem}
 .pic img{width:100%;height:100%;object-fit:cover;margin:0;border-radius:0}
 .book-say{color:var(--accent)}
+/* Markup-channel colors, resolved once for the small closed palette
+ * MARKUP_COLORS/characterColor() ever hand out — this file has no Tailwind
+ * stylesheet to interpret those utility class names itself. One shade only
+ * (no dark: variant): the export bakes in one look, not a live toggle. */
+.text-indigo-600{color:#4f46e5}.text-rose-600{color:#e11d48}.text-emerald-600{color:#059669}
+.text-amber-600{color:#d97706}.text-sky-600{color:#0284c7}.text-violet-600{color:#7c3aed}
+.text-app-text\/70{color:var(--text);opacity:.7}
+.not-italic{font-style:normal}.font-bold{font-weight:700}.font-medium{font-weight:500}
 code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.88em;
 background:color-mix(in srgb,var(--text) 8%,transparent);padding:.1em .35em;border-radius:.25em}
 mark{background:color-mix(in srgb,var(--accent) 32%,transparent);color:inherit;
@@ -502,7 +528,18 @@ export const exportStoryHtml = (
     const label = d?.location || d?.mood;
 
     const body = ch.messages.map(m => {
-      let inner = m.text.split(/\n{2,}/).map(p => `<p>${renderInline(p)}</p>`).join('');
+      const markupCtx = opts.markup ? {
+        dialogueColor: opts.markup.dialogueColor,
+        dialogueStyle: opts.markup.dialogueStyle,
+        dialogueAnimation: opts.markup.dialogueAnimation,
+        markup: opts.markup.markupPresets,
+        charColors: resolveCharColors(
+          m.name, opts.markup.characterColors, opts.markup.characterChannelColors,
+          !!opts.markup.characterColorsEnabled,
+        ),
+        animate: true,
+      } : undefined;
+      let inner = m.text.split(/\n{2,}/).map(p => `<p>${renderInline(p, { markupCtx })}</p>`).join('');
       const mine = byMessage.get(m.id);
       if (mine || anywhere.length) inner = applyHighlights(inner, [...(mine ?? []), ...anywhere]);
       // The Director's two tracks, marked through the same scanner the reader

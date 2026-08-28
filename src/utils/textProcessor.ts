@@ -228,24 +228,30 @@ export const processText = (text: string, opts: ProcessOptions = {}) => {
     // Single quotes keep the stricter rule on purpose: apostrophes are
     // everywhere in prose, and loosening this starts turning `don't ... can't`
     // into speech.
+    /*
+     * Every surviving single-quoted span is wrapped, speech or not.
+     *
+     * It used to run `looksLikeSpeech` here and drop anything that failed, so
+     * `'the arrangement'` rendered as bare prose. That was right while single
+     * quotes shared the dialogue look — a scare quote is not a second speaker.
+     * It stopped being right when `'…'` became its own channel (the ASIDE, see
+     * utils/markupStyles): the reader now picks one treatment for the mark
+     * itself, and thought, scare quotes and British speech are all it.
+     *
+     * The BOUNDARY rule is untouched, and is the part that matters: the opening
+     * quote must follow whitespace or an opening bracket and the closing one
+     * must precede whitespace or punctuation, which is what keeps `don't` and
+     * `readin'` out of it.
+     */
     processed = processed.replace(
       /(^|[\s({\[—–-])'([^'*\n]+)'(?=[\s.,!?;:)}\]—–-]|$)/g,
-      (m, pre: string, body: string, at: number) => {
-        const before = processed.slice(Math.max(0, at - 40), at + pre.length);
-        const after = processed.slice(at + m.length, at + m.length + 40);
-        // Same judgement as double quotes: `'the arrangement'` is scare quotes,
-        // `'Hello,' she said` is British-style speech.
-        return looksLikeSpeech(body, before, after) ? `${pre}*'${body}'*` : m;
-      },
+      (_m, pre: string, body: string) => `${pre}*'${body}'*`,
     );
     processed = processed.replace(/\uE000(\d+)\uE001/g, (_m, i: string) => parked[Number(i)]);
   }
 
   return { processedText: processed };
 };
-
-/** True when an emphasis span is quoted dialogue rather than an action/thought. */
-export const isDialogueText = (text: string): boolean => /^["'“‘]/.test(text.trim());
 
 /**
  * Close dangling emphasis markers so a partially streamed message renders

@@ -25,7 +25,14 @@ const ok = (cond: boolean, msg: string) => { if (cond) { pass++; } else { fail++
 // 41: +reactionsByStory (Record<storyId, Record<messageId, ReactionRecord>>) —
 // story-keyed, so perStory. Reader-only, like askByStory beside it: it is
 // persisted so a re-read replays what was said, never so anything can read it.
-ok(PERSISTED_SLICES.length === 41, 'every persisted slice is declared');
+// 43: +throughlines (Throughline[]) — GLOBAL, not perStory, and the flag is the
+// whole design decision rather than an accident: a throughline is the record of
+// the person the reader plays across several chats, so it belongs to the reader
+// and not to any one story. Sharding it per story would give each chat its own
+// private copy of a thing whose entire purpose is being shared between them.
+ok(PERSISTED_SLICES.length === 43, 'every persisted slice is declared');
+ok(PERSISTED_SLICES.some(s => s.slice === 'throughlines' && !s.perStory),
+  'throughlines are global — a per-story copy of a cross-story record is a contradiction');
 ok(new Set(PERSISTED_SLICES.map(s => s.slice)).size === PERSISTED_SLICES.length, 'no slice is declared twice');
 
 // --- record ids --------------------------------------------------------------

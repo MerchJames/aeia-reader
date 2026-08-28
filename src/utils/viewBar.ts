@@ -1,12 +1,12 @@
 /**
  * The view bar is the reader's, not ours.
  *
- * All nine views stay — each is genuinely a different way to read and they earn
- * their place. What crowded the app was nine buttons competing for the top bar
- * on first open, which reads as nine decisions before a single word.
+ * Every view stays — each is genuinely a different way to read and they earn
+ * their place. What crowded the app was every button competing for the top bar
+ * on first open, which reads as a dozen decisions before a single word.
  *
  * So the bar is curated: `visibleViews` pins what sits up top, the rest live one
- * click deeper in an overflow that ALWAYS lists the full nine. Nothing is hidden
+ * click deeper in an overflow that ALWAYS lists every one. Nothing is hidden
  * away, only hidden behind.
  *
  * `null` means "follow the workspace preset" — the preset SEEDS the bar. The
@@ -24,21 +24,47 @@ export type ViewGroup = 'read' | 'cowrite' | 'scenes';
 
 /** Canonical order. An explicit list may reorder freely; this is the fallback. */
 export const VIEW_ORDER: readonly ViewMode[] = [
-  'storybook', 'book', 'stage', 'vn', 'sandbox', 'chat', 'branches', 'overview', 'highlights',
+  'storybook', 'book', 'script', 'panels', 'atlas', 'stage', 'vn', 'rpg', 'sandbox', 'chat',
+  'branches', 'overview', 'highlights',
 ];
 
 export const VIEW_GROUP: Record<ViewMode, ViewGroup> = {
   storybook: 'read', book: 'read', stage: 'read', vn: 'read', branches: 'read',
-  overview: 'read', highlights: 'read',
+  overview: 'read', highlights: 'read', script: 'read', panels: 'read', atlas: 'read',
+  rpg: 'scenes',
   sandbox: 'scenes',
   chat: 'cowrite',
 };
 
 export const VIEW_LABEL: Record<ViewMode, string> = {
   storybook: 'Storybook', book: 'Book', stage: 'Stage', vn: 'Visual Novel',
-  sandbox: 'Sandbox', chat: 'Chat', branches: 'Branches', overview: 'Overview',
-  highlights: 'Highlights',
+  rpg: 'RPG', sandbox: 'Sandbox', chat: 'Chat', branches: 'Branches', overview: 'Overview',
+  highlights: 'Highlights', script: 'Script', panels: 'Panels', atlas: 'Atlas',
 };
+
+/**
+ * Views that show the STORY, as opposed to a list ABOUT it.
+ *
+ * ── Why this is one constant ───────────────────────────────────────────────
+ *
+ * This list existed three times, written out by hand in `store.ts`: once when a
+ * story opens, once when a timeline is chosen, and once in the persist
+ * partialize. Adding a view meant remembering all three, and the first v3 view
+ * proved it — opening a story with the Script view selected silently dropped
+ * the reader into Chat, because two of the three copies had never heard of it.
+ *
+ * So: derived from `VIEW_ORDER` by subtraction, with a test that every view is
+ * in exactly one group. A view added later is a reading view unless somebody
+ * says otherwise, which is the safe default: worst case it opens somewhere real.
+ */
+export const LIST_VIEWS: readonly ViewMode[] = ['overview', 'highlights', 'branches'];
+
+export const READING_VIEWS: readonly ViewMode[] =
+  VIEW_ORDER.filter(v => !LIST_VIEWS.includes(v));
+
+/** True when a story can be OPENED into this view. */
+export const isReadingView = (v: unknown): v is ViewMode =>
+  READING_VIEWS.includes(v as ViewMode);
 
 /** One line on what each view is FOR — the overflow is where views are discovered. */
 export const VIEW_HINT: Record<ViewMode, string> = {
@@ -46,11 +72,15 @@ export const VIEW_HINT: Record<ViewMode, string> = {
   book: 'Two-page spread with real page turns.',
   stage: 'RPG scene — portraits, dialogue window, game chrome.',
   vn: 'Cinematic visual novel — backdrops, sprites, camera.',
+  rpg: 'The whole game interface — HUD, party, command row, press to continue.',
   sandbox: 'AI-designed presentation, per message.',
   chat: 'The original transcript, message by message.',
   branches: 'Alternate takes and attached timelines.',
   overview: 'The whole story at a glance.',
   highlights: 'Everything you’ve marked.',
+  script: 'Screenplay format — scenes, cues, and how long it would run.',
+  panels: 'A comic page: one beat per panel, laid out by what the beat is.',
+  atlas: 'The whole story as a map you can zoom into.',
 };
 
 /**

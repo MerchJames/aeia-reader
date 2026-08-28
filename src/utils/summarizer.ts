@@ -1,19 +1,20 @@
 /**
- * Agentic summarizer — a map-reduce over a (possibly huge) story that no single
- * context could hold. It chunks the transcript to fit a worker's context
- * window (~80% by default), summarizes each chunk to a chosen format ("map"),
- * then folds the section summaries into one coherent doc ("reduce"). The result
- * becomes a versioned Lens Pin.
+ * Chunking a story that no single context could hold, and the sheet filler
+ * built on it.
  *
- * Single-LLM by design: the `send` callback runs one request at a time, so the
- * whole thing is a sequential queue on the user's one model. The core here is
- * pure/injectable (pass any `send`) — orchestration + store wiring live in the
- * panel that calls `runSummary`.
+ * This was the app's map-reduce summariser: chunk, summarise each chunk alone,
+ * fold the results. `utils/longRead.ts` replaced that — it walks the same
+ * chunks but carries a digest between them, so section nine knows who section
+ * two introduced, which a fold can never recover. What is left here is the part
+ * that was always right (budgeting and chunking, still used by both) plus the
+ * sheet filler, which genuinely IS map-reduce: rows extracted from one stretch
+ * do not need to know about rows from another, they only need de-duplicating.
  */
 
 import { CardInfo } from '../types';
 import { cardToPromptBlock } from './cardContext';
 import { ChatMsg } from './aiClient';
+import { salvageArray } from './aiCall';
 
 export interface SummaryPassage {
   name: string;
@@ -65,159 +66,27 @@ export const chunkByBudget = (
   return chunks;
 };
 
-export interface SummaryFormat {
-  id: string;
-  name: string;
-  instruction: string;
-}
-
-export const SUMMARY_FORMATS: SummaryFormat[] = [
-  { id: 'recap', name: 'Bulleted recap', instruction: 'Write a concise bulleted recap of the key events, decisions, and revelations.' },
-  { id: 'synopsis', name: 'Prose synopsis', instruction: 'Write a flowing prose synopsis of the story so far.' },
-  { id: 'timeline', name: 'Timeline', instruction: 'Write a chronological timeline of the notable beats, each a short ordered entry.' },
-  { id: 'characters', name: 'Character digest', instruction: 'Summarize per character: their arc, key relationships, and current state.' },
-];
-
 const passageText = (chunk: SummaryPassage[]): string =>
   chunk.map(p => (p.name ? `${p.name}: ${p.content}` : p.content)).join('\n\n');
 
-/** Messages for the "map" step: summarize one chunk in isolation but in order. */
-export const buildMapMessages = (
-  chunk: SummaryPassage[],
-  instruction: string,
-  priorSummary: string,
-  card: CardInfo | undefined,
-  index: number,
-  count: number,
-): ChatMsg[] => {
-  const system = [
-    `You are summarizing part ${index} of ${count} of a longer story for a reader's reference note.`,
-    'Be faithful: summarize only what is present in this section. Do not invent, and do not repeat the summary-so-far.',
-    instruction,
-  ].join('\n');
-
-  const user = [
-    cardToPromptBlock(card) && `STORY CONTEXT (for grounding only):\n${cardToPromptBlock(card)}`,
-    priorSummary && `SUMMARY SO FAR (for continuity, do not restate):\n${priorSummary}`,
-    `SECTION ${index}/${count}:\n${passageText(chunk)}`,
-    'Summarize THIS section only, consistent with the summary so far.',
-  ].filter(Boolean).join('\n\n');
-
-  return [
-    { role: 'system', content: system },
-    { role: 'user', content: user },
-  ];
-};
-
-/** Messages for the "reduce" step: fold several section summaries into one. */
-export const buildReduceMessages = (
-  partials: string[],
-  instruction: string,
-  card: CardInfo | undefined,
-): ChatMsg[] => {
-  const system = [
-    'You are combining section summaries of one story into a single coherent reference note.',
-    'Remove redundancy, keep chronological/logical order, and invent nothing not present in the sections.',
-    instruction,
-  ].join('\n');
-
-  const sections = partials.map((p, i) => `### Section ${i + 1}\n${p}`).join('\n\n');
-  const user = [
-    cardToPromptBlock(card) && `STORY CONTEXT (for grounding only):\n${cardToPromptBlock(card)}`,
-    `SECTION SUMMARIES:\n${sections}`,
-    'Produce the final combined summary.',
-  ].filter(Boolean).join('\n\n');
-
-  return [
-    { role: 'system', content: system },
-    { role: 'user', content: user },
-  ];
-};
-
-export type SummaryPhase = 'mapping' | 'reducing';
-
-export interface RunSummaryOptions {
-  passages: SummaryPassage[];
-  budgetChars: number;
-  instruction: string;
-  card?: CardInfo;
-  /** One model call. Injected so the core is testable + transport-agnostic. */
-  send: (messages: ChatMsg[], signal?: AbortSignal) => Promise<string>;
-  signal?: AbortSignal;
-  onPhase?: (phase: SummaryPhase, done: number, total: number) => void;
-}
-
-/** Trailing chars of the running summary carried into the next map call. */
-const CONTINUITY_CHARS = 1200;
-
 /**
- * Run the full map-reduce. Sequential (one `send` at a time) so a single model
- * acts as the whole worker pool. Aborting returns whatever was combined so far.
- * Returns the final combined document (markdown).
+ * How far a run has got. Kept here because the progress store speaks in these
+ * terms; the long read maps its own phases onto them.
  */
-export const runSummary = async (opts: RunSummaryOptions): Promise<string> => {
-  const chunks = chunkByBudget(opts.passages, opts.budgetChars);
-  if (chunks.length === 0) return '';
-
-  // Map: summarize each chunk, carrying a little continuity forward.
-  const partials: string[] = [];
-  let prior = '';
-  for (let i = 0; i < chunks.length; i++) {
-    if (opts.signal?.aborted) break;
-    opts.onPhase?.('mapping', i, chunks.length);
-    const msgs = buildMapMessages(chunks[i], opts.instruction, prior, opts.card, i + 1, chunks.length);
-    const part = (await opts.send(msgs, opts.signal)).trim();
-    if (part) {
-      partials.push(part);
-      prior = part.length > CONTINUITY_CHARS ? part.slice(-CONTINUITY_CHARS) : part;
-    }
-  }
-  opts.onPhase?.('mapping', chunks.length, chunks.length);
-
-  if (partials.length === 0) return '';
-  if (partials.length === 1) return partials[0];
-
-  // Reduce: fold the partials, grouping to fit the budget; repeat until one.
-  opts.onPhase?.('reducing', 0, 1);
-  let current = partials;
-  while (current.length > 1) {
-    if (opts.signal?.aborted) break;
-    const groups = chunkByBudget(current.map(c => ({ name: '', content: c })), opts.budgetChars);
-    // Each partial already exceeds the budget on its own — can't fold further.
-    if (groups.length >= current.length) break;
-    const next: string[] = [];
-    for (const g of groups) {
-      if (opts.signal?.aborted) break;
-      const msgs = buildReduceMessages(g.map(x => x.content), opts.instruction, opts.card);
-      const combined = (await opts.send(msgs, opts.signal)).trim();
-      next.push(combined || g.map(x => x.content).join('\n\n'));
-    }
-    current = next;
-  }
-  opts.onPhase?.('reducing', 1, 1);
-  return current.length === 1 ? current[0] : current.join('\n\n');
-};
-
-/* ---------------------------------------------------------------- */
-/* Sheet mode — same map-reduce, but each chunk yields table rows    */
-/* that accumulate (deduped) into a structured sheet.                */
-/* ---------------------------------------------------------------- */
+export type SummaryPhase = 'mapping' | 'reducing';
 
 /** Cap on rows collected into one sheet. */
 export const MAX_SHEET_ROWS = 200;
 
-/** Pull the first JSON array out of a reply (tolerant of prose/fences). */
-const extractJsonArray = (raw: string): unknown[] | null => {
-  const start = raw.indexOf('[');
-  const end = raw.lastIndexOf(']');
-  if (start === -1 || end <= start) return null;
-  try {
-    const parsed = JSON.parse(raw.slice(start, end + 1));
-    return Array.isArray(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
-};
+/**
+ * Pull the rows out of a reply.
+ *
+ * The version here was the weakest of the four copies this app grew: strict
+ * parse or nothing, so a table cut off at the token limit returned no rows at
+ * all rather than the ninety it had already written. The shared one salvages
+ * the complete objects and drops only the truncated one.
+ */
+const extractJsonArray = (raw: string): unknown[] | null => salvageArray(raw);
 
 /** Messages asking the model to extract table rows from one chunk. */
 export const buildSheetMapMessages = (

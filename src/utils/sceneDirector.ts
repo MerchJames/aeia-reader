@@ -15,6 +15,7 @@ import { EMPHASIS_COLORS } from './performMarkup';
 import { FX_MEANING, SCENE_FX } from './livingBackground';
 import { cardToPromptBlock } from './cardContext';
 import { ChatMsg, SamplerParams, chatCompletion, isLocalBase, mergeSamplers } from './aiClient';
+import { REASONING_HEADROOM, hasReasoning, salvageArray, stripReasoning, truncatedInReasoning } from './aiCall';
 // `storyRead.ts` imports ScenePassage/hashContent from here, so the VALUE
 // import must stay one-way: only `storyReadBlock` is pulled in, and the type
 // is imported as a type so the cycle never exists at runtime.
@@ -50,55 +51,33 @@ export const SCENE_BATCH_OVERLAP = 1;
 const PASSAGE_CHAR_CAP = 1600;
 
 /**
- * Reasoning models spend their output budget THINKING before they answer.
- *
- * The Director's budget was sized against the JSON alone, so a thinking model
- * burned the whole allowance on a chain of thought and the array never arrived
- * — the reply parsed to nothing, the batch was split, the halves failed the
- * same way, and the reader saw "unreadable" on a model that reads perfectly
- * well. `max_tokens` is a CEILING, not a spend, so the headroom costs a
- * non-thinking model nothing; it is only added once reasoning has actually been
- * seen, so a model that never thinks never asks for it.
+ * Reasoning, salvage and budget now live in `aiCall.ts` — every AI feature in
+ * the app hit the same three walls, and the Director was simply the first to
+ * climb them. Re-exported here because this module's callers (and its tests)
+ * have always reached for them at this address.
  */
-const REASONING_HEADROOM = 4000;
-
-/** Does this reply carry a chain of thought? */
-export const hasReasoning = (raw: string): boolean =>
-  /<think(?:ing)?\b|<reasoning\b/i.test(raw);
-
-/**
- * A reply cut off mid-thought: opened its reasoning and never closed it. The
- * definitive sign the budget was too small — and the case where splitting the
- * batch cannot help, because the cost was the thinking, not the passages.
- */
-export const truncatedInReasoning = (raw: string): boolean =>
-  hasReasoning(raw) && !/<\/(?:think(?:ing)?|reasoning)>/i.test(raw);
-
-/**
- * Drop the chain of thought before parsing.
- *
- * `askCharacter`, `narrativeDirector`, `sandboxDirector` and `stylePacket` all
- * do this; the Director alone did not. It matters more here than anywhere else,
- * because the salvage parser scans for balanced braces — and reasoning about a
- * JSON schema is full of them, so a thinking model could have its DELIBERATION
- * parsed as descriptors.
- */
-export const stripReasoning = (raw: string): string =>
-  raw
-    .replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, '')
-    .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '')
-    // An unclosed block means the reply was truncated mid-thought: everything
-    // from the tag on is thinking, and none of it is an answer.
-    .replace(/<think(?:ing)?\b[\s\S]*$/i, '')
-    .replace(/<reasoning\b[\s\S]*$/i, '');
+export { hasReasoning, stripReasoning, truncatedInReasoning } from './aiCall';
 
 /**
  * Output tokens to allow for a batch. Measured against a fully-populated
  * descriptor (~180 tokens) with generous slack for models that pretty-print
  * their JSON; the floor covers a single-passage retry.
+ *
+ * The headroom for a chain of thought is asked for UP FRONT, not after a
+ * thinking model has been caught mid-thought.
+ *
+ * It was reactive at first, which was defensible on paper — spend nothing until
+ * you know you need it — and wrong in the reader's chair. `max_tokens` is a
+ * CEILING, not a spend: a model that does not think is charged nothing for the
+ * room, so the only thing being saved was a number in a request body. What it
+ * cost was two failed batches before the Director noticed, and on a slow local
+ * model those two batches are the difference between "reads the page" and
+ * "sits there". `reasoning` now only survives as the flag that raises it
+ * FURTHER for a model that thinks unusually long.
  */
 export const outputBudget = (passages: number, reasoning = false): number =>
-  Math.max(700, Math.round(passages * 300)) + (reasoning ? REASONING_HEADROOM : 0);
+  Math.max(700, Math.round(passages * 300))
+  + REASONING_HEADROOM * (reasoning ? 2 : 1);
 
 /**
  * Sampling for a READING task, not a writing one.
@@ -254,6 +233,9 @@ export const buildEnrichMessages = (
   card?: CardInfo,
   prevLocation?: string,
   storyRead?: StoryRead,
+  /** The reader's own marks, rendered by `tasteBlock`. '' when they have made
+   *  none, and then nothing about the prompt changes. */
+  taste?: string,
 ): ChatMsg[] => {
   const cardBlock = cardToPromptBlock(card);
   const body = passages
@@ -273,6 +255,12 @@ export const buildEnrichMessages = (
     readBlock && `STORY READ (for weighting only):\n${readBlock}`,
     prevLocation && `PREVIOUS LOCATION: ${prevLocation} — the story is here now; keep it unless a passage clearly moves elsewhere.`,
     `PASSAGES:\n${body}`,
+    // After the passages and before the task: this shapes HOW to choose, so it
+    // wants the tail of the U, not the grounding at the head. The examples are
+    // spans from other passages and the block says so — and `cleanEmphasis` /
+    // `cleanPerform` drop anything that is not a verbatim substring of the
+    // passage in hand, so a model that copies one fails closed.
+    taste,
     'Return the JSON array of descriptors, one per passage, in order.',
   ].filter(Boolean).join('\n\n');
 
@@ -363,54 +351,6 @@ const cleanDialogue = (raw: unknown, passageText: string): { text: string; speak
 };
 
 /**
- * Pull the descriptor objects out of a model reply (tolerant of prose/fences).
- *
- * The strict path is a plain JSON.parse of the array. When that fails — a reply
- * cut off at the token limit, a trailing comma, a stray note after the array —
- * we SALVAGE instead of giving up: scan the text for balanced top-level objects
- * and parse each on its own, dropping only the one that was truncated. Without
- * this, one long reply loses an entire batch of passages, which is the
- * difference between the Director working at scale and appearing to do nothing.
- */
-const extractJsonArray = (raw: string): unknown[] | null => {
-  const start = raw.indexOf('[');
-  const end = raw.lastIndexOf(']');
-  if (start !== -1 && end > start) {
-    try {
-      const parsed = JSON.parse(raw.slice(start, end + 1));
-      if (Array.isArray(parsed)) return parsed;
-    } catch { /* fall through to salvage */ }
-  }
-  if (start === -1) return null;
-
-  const out: unknown[] = [];
-  let depth = 0;
-  let objStart = -1;
-  let inStr = false;
-  let esc = false;
-  for (let i = start; i < raw.length; i++) {
-    const c = raw[i];
-    if (inStr) {
-      if (esc) esc = false;
-      else if (c === '\\') esc = true;
-      else if (c === '"') inStr = false;
-      continue;
-    }
-    if (c === '"') { inStr = true; continue; }
-    if (c === '{') { if (depth === 0) objStart = i; depth++; continue; }
-    if (c === '}') {
-      depth--;
-      if (depth === 0 && objStart >= 0) {
-        try { out.push(JSON.parse(raw.slice(objStart, i + 1))); } catch { /* skip */ }
-        objStart = -1;
-      }
-      if (depth < 0) depth = 0; // stray brace — keep scanning
-    }
-  }
-  return out.length ? out : null;
-};
-
-/**
  * How much of a batch may carry each discretionary track.
  *
  * The prompt says "Most passages deserve none" and models simply do not obey it:
@@ -477,7 +417,7 @@ export const parseDescriptors = (
   now = Date.now(),
   prevLocation?: string,
 ): SceneDescriptor[] => {
-  const arr = extractJsonArray(raw);
+  const arr = salvageArray(raw);
   if (!arr) return [];
   const out: SceneDescriptor[] = [];
   arr.forEach((item, order) => {
@@ -560,6 +500,14 @@ export interface EnrichOptions {
   /** The cached whole-story read, if one has been taken — grounds cue weight. */
   storyRead?: StoryRead;
   /**
+   * The reader's own marks as few-shot examples (see `tasteBlock.ts`).
+   *
+   * Passed in already rendered rather than as raw entries, so this module stays
+   * free of the store's shapes and the block can be built once per run instead
+   * of once per batch.
+   */
+  taste?: string;
+  /**
    * Called after each batch with that batch's descriptors plus running counts:
    * `done` = unique passages read so far, `total` = passages requested,
    * `unread` = passages the model was asked about but gave nothing usable for
@@ -603,7 +551,7 @@ export const enrichPassages = async (
     try {
       const reply = await chatCompletion(
         cfg.base, cfg.key, cfg.model,
-        buildEnrichMessages(batch, cfg.card, lastLocation, opts.storyRead),
+        buildEnrichMessages(batch, cfg.card, lastLocation, opts.storyRead, opts.taste),
         // Budget the reply by BATCH SIZE. A fully-populated descriptor (mood,
         // location, speaker, up to 8 dialogue lines, emphasis, performance cues,
         // weather, shot, vfx) runs ~180 tokens, so a flat cap silently truncated
@@ -618,6 +566,7 @@ export const enrichPassages = async (
           cfg.params,
         ),
         signal,
+        `Reading ${batch.length} passage${batch.length === 1 ? '' : 's'}`,
       );
       // A model that thinks needs room to think NEXT time too — one detection
       // fixes the whole run rather than every batch paying the same toll.

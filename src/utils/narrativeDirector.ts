@@ -10,7 +10,10 @@
  * override layer, reversible in one click.
  */
 
-import { ChatMsg, chatCompletion, SamplerParams } from './aiClient';
+import { ChatMsg, SamplerParams } from './aiClient';
+// The shared stripper, not a third private copy — this one also handles the
+// reply that was cut off mid-thought, which the copy here did not.
+import { askText, stripReasoning } from './aiCall';
 
 export type RefineMode = 'restyle' | 'grammar' | 'tighten' | 'custom';
 
@@ -21,6 +24,13 @@ export interface RefineInput {
   target?: string;
   /** Constraint block from buildGrounding(extract(text)). */
   grounding: string;
+  /**
+   * The passage as labeled structural blocks — dialogue/thought/beat/shout,
+   * each attributed to a speaker — from `renderNarrativeBlocks(
+   * narrativeBlocksFor(...))`. Supplements the raw passage below; never a
+   * substitute for it, so a wrong label can't corrupt the rewrite.
+   */
+  structure?: string;
 }
 
 export interface RefineConfig {
@@ -63,6 +73,7 @@ export const buildRefineMessages = (input: RefineInput): ChatMsg[] => {
   const user = [
     `Brief: ${modeBrief(input.mode, input.target)}`,
     input.grounding ? `\nConstraints (must hold):\n${input.grounding}` : '',
+    input.structure ? `\nPassage structure:\n${input.structure}` : '',
     '\nPassage to rewrite:',
     '"""',
     input.text,
@@ -72,9 +83,6 @@ export const buildRefineMessages = (input: RefineInput): ChatMsg[] => {
   return [{ role: 'system', content: SYSTEM }, { role: 'user', content: user }];
 };
 
-/** Strip model reasoning preambles so the prose parses cleanly. */
-const stripReasoning = (raw: string): string =>
-  raw.replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '');
 
 /**
  * Clean a reply down to just the prose: drop reasoning, unwrap a stray code
@@ -97,8 +105,10 @@ export const parseRefinement = (reply: string): string | null => {
 export const generateRefinement = async (
   input: RefineInput, cfg: RefineConfig, signal?: AbortSignal,
 ): Promise<string | null> => {
-  const reply = await chatCompletion(
-    cfg.base, cfg.key, cfg.model, buildRefineMessages(input), cfg.params ?? {}, signal,
+  const reply = await askText(
+    { base: cfg.base, key: cfg.key, model: cfg.model },
+    buildRefineMessages(input),
+    { label: 'Restyling the passage', reader: cfg.params, signal },
   );
   return parseRefinement(reply);
 };

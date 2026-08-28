@@ -1,4 +1,5 @@
-import { chatCompletion, listModels } from './aiClient';
+import { listModels } from './aiClient';
+import { askText, salvageArray } from './aiCall';
 import { CodexEntity, EntityKind } from '../stores/useAuraV2Store';
 import { CardInfo } from '../types';
 
@@ -285,15 +286,10 @@ Return [] if nothing qualifies.`;
 
 /** Tolerant JSON extraction: models love to wrap arrays in fences/prose. */
 export const parseExtractionJSON = (raw: string): ExtractedEntity[] => {
-  const start = raw.indexOf('[');
-  const end = raw.lastIndexOf(']');
-  if (start === -1 || end <= start) return [];
-  let rows: unknown;
-  try {
-    rows = JSON.parse(raw.slice(start, end + 1));
-  } catch {
-    return [];
-  }
+  // Shared salvage — a codex scan runs over the whole library in the
+  // background, so a reply truncated at the token limit used to lose every
+  // entity in that passage silently, with nothing on screen to say so.
+  const rows = salvageArray(raw);
   if (!Array.isArray(rows)) return [];
   const kinds = new Set(['character', 'location', 'item']);
   return rows
@@ -323,10 +319,10 @@ export const createLLMExtractor = (cfg: LLMExtractorConfig): EntityExtractor => 
   return async (text, ctx) => {
     if (!resolvedBase) resolvedBase = (await listModels(cfg.baseUrl, cfg.apiKey)).base;
     const known = ctx.knownNames.slice(0, 80).join(', ') || '(none)';
-    const raw = await chatCompletion(resolvedBase, cfg.apiKey, cfg.model, [
+    const raw = await askText({ base: resolvedBase, key: cfg.apiKey, model: cfg.model }, [
       { role: 'system', content: EXTRACT_SYSTEM },
       { role: 'user', content: `KNOWN: ${known}\n\nPASSAGE:\n${text.slice(0, 7000)}` },
-    ]);
+    ], { label: 'Reading for the codex' });
     return parseExtractionJSON(raw);
   };
 };

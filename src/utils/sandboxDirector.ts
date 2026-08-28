@@ -8,7 +8,12 @@
  * no scripts, no event handlers, no network (`@import`, remote `url(...)`).
  */
 
-import { ChatMsg, chatCompletion, isLocalBase, mergeSamplers, SamplerParams } from './aiClient';
+import { ChatMsg, isLocalBase, SamplerParams } from './aiClient';
+// Was a private copy here, and a weaker one: it knew `<think>` but not
+// `<thinking>`, and left an UNCLOSED block — a reply that ran out of room
+// mid-thought — entirely in place, where the fence matcher would then read the
+// model's deliberation as the answer.
+import { askText, stripReasoning } from './aiCall';
 import { composeScene, packetBlock, StylePacket } from './stylePacket';
 import { ACCEPT_SCORE, REPAIRABLE_SCORE, repairNotes, scoreScene } from './sceneQuality';
 import { FxKind, SceneCue, ShellControl, SoundKind } from '../types';
@@ -102,9 +107,6 @@ export const buildSandboxMessages = (input: SandboxGenInput): ChatMsg[] => {
   return [{ role: 'system', content: SYSTEM }, { role: 'user', content: user }];
 };
 
-/** Drop model "reasoning" preambles so fenced blocks parse cleanly. */
-const stripReasoning = (raw: string): string =>
-  raw.replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '');
 
 const fence = (raw: string, lang: string): string | null => {
   const re = new RegExp('```' + lang + '\\b[^\\n]*\\n([\\s\\S]*?)```', 'i');
@@ -171,9 +173,12 @@ export const parseSandboxTreatment = (input: string): ParsedTreatment | null => 
 export const generateTreatment = async (
   input: SandboxGenInput, cfg: SandboxGenConfig, signal?: AbortSignal,
 ): Promise<ParsedTreatment | null> => {
-  const reply = await chatCompletion(
-    cfg.base, cfg.key, cfg.model, buildSandboxMessages(input),
-    mergeSamplers({ ...designSamplers(cfg.base), max_tokens: SCENE_TOKENS }, cfg.params), signal,
+  const reply = await askText(
+    { base: cfg.base, key: cfg.key, model: cfg.model }, buildSandboxMessages(input),
+    {
+      label: 'Styling this message',
+      params: designSamplers(cfg.base), reader: cfg.params, budget: SCENE_TOKENS, signal,
+    },
   );
   return parseSandboxTreatment(reply);
 };
@@ -311,9 +316,12 @@ export const generateStudioConfig = async (
 ): Promise<ParsedConfig | null> => {
   // Same design regime as the director: a Studio theme is a stylesheet too, and
   // it truncated on an unbudgeted max_tokens for exactly the same reason.
-  const reply = await chatCompletion(
-    cfg.base, cfg.key, cfg.model, buildStudioMessages(input),
-    mergeSamplers({ ...designSamplers(cfg.base), max_tokens: SCENE_TOKENS }, cfg.params), signal,
+  const reply = await askText(
+    { base: cfg.base, key: cfg.key, model: cfg.model }, buildStudioMessages(input),
+    {
+      label: 'Designing the look',
+      params: designSamplers(cfg.base), reader: cfg.params, budget: SCENE_TOKENS, signal,
+    },
   );
   return parseStudioConfig(reply, input.kind);
 };
@@ -651,9 +659,12 @@ export const parseScenePlan = (
 export const generateScenePlan = async (
   input: CueGenInput, cfg: SandboxGenConfig, signal?: AbortSignal,
 ): Promise<ScenePlanItem[]> => {
-  const reply = await chatCompletion(
-    cfg.base, cfg.key, cfg.model, buildPlanMessages(input),
-    mergeSamplers({ ...designSamplers(cfg.base), max_tokens: PLAN_TOKENS }, cfg.params), signal,
+  const reply = await askText(
+    { base: cfg.base, key: cfg.key, model: cfg.model }, buildPlanMessages(input),
+    {
+      label: 'Storyboarding the passage',
+      params: designSamplers(cfg.base), reader: cfg.params, budget: PLAN_TOKENS, signal,
+    },
   );
   const validIds = input.audioLibrary?.length ? new Set(input.audioLibrary.map(a => a.id)) : undefined;
   return parseScenePlan(reply, input.content, validIds);
@@ -780,12 +791,18 @@ export interface BuiltCue {
 export const generateSceneCue = async (
   input: CueGenInput, item: ScenePlanItem, cfg: SandboxGenConfig, signal?: AbortSignal,
 ): Promise<BuiltCue | null> => {
-  const params = mergeSamplers({ ...designSamplers(cfg.base), max_tokens: SCENE_TOKENS }, cfg.params);
+  const opts = {
+    label: 'Building the shot',
+    params: designSamplers(cfg.base), reader: cfg.params, budget: SCENE_TOKENS, signal,
+  };
   const messages = buildSceneMessages(input, item);
   const sliceLen = (item.slice ?? input.content).length;
 
   const build = async (msgs: ChatMsg[]): Promise<SceneCue | null> =>
-    parseSceneCue(await chatCompletion(cfg.base, cfg.key, cfg.model, msgs, params, signal), item, input.content);
+    parseSceneCue(
+      await askText({ base: cfg.base, key: cfg.key, model: cfg.model }, msgs, opts),
+      item, input.content,
+    );
 
   const first = await build(messages);
   const packet = input.packet;
@@ -856,9 +873,12 @@ export const resolveCues = (cues: SceneCue[], content: string): { start: number;
 export const generateCueTrack = async (
   input: CueGenInput, cfg: SandboxGenConfig, signal?: AbortSignal,
 ): Promise<SceneCue[]> => {
-  const reply = await chatCompletion(
-    cfg.base, cfg.key, cfg.model, buildCueMessages(input),
-    mergeSamplers({ ...designSamplers(cfg.base), max_tokens: SCENE_TOKENS }, cfg.params), signal,
+  const reply = await askText(
+    { base: cfg.base, key: cfg.key, model: cfg.model }, buildCueMessages(input),
+    {
+      label: 'Directing the scene',
+      params: designSamplers(cfg.base), reader: cfg.params, budget: SCENE_TOKENS, signal,
+    },
   );
   return parseCueTrack(reply, input.content);
 };

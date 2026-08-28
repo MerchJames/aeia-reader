@@ -8,6 +8,30 @@
  * a page never has to clip text.
  */
 
+import { DialogueAnimation, DialogueStyle, MarkupPresets, StoredChannel } from '../types';
+import { CharColorBundle, markupClass } from './markupStyles';
+
+/**
+ * The reader's markup-channel settings, resolved once by the caller (Book,
+ * Stage, VN, Atlas, the HTML export) and handed to `renderInline` so its
+ * plain `<em>`/`<strong>`/quote spans carry the same colors, styles and
+ * per-character overrides the chat view already applies via `MessageBlock`'s
+ * `quoteChannel`/`markupClass`. Omitted entirely, `renderInline` renders
+ * exactly as it always has — bare, unclassed tags.
+ */
+export interface MarkupRenderContext {
+  dialogueColor: string;
+  dialogueStyle: DialogueStyle;
+  dialogueAnimation: DialogueAnimation;
+  markup: MarkupPresets;
+  /** Resolved once by the caller via `resolveCharColors()`; a channel present
+   *  here overrides that channel's own color, leaving style/animation
+   *  untouched. */
+  charColors?: CharColorBundle;
+  /** Suppress animation while a passage is still streaming in. */
+  animate?: boolean;
+}
+
 export interface BookBlock {
   /** Full outer HTML of the block, ready for both measuring and rendering. */
   html: string;
@@ -30,11 +54,42 @@ const escapeHtml = (s: string): string =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 /**
+ * Run a global-regex replace only on text OUTSIDE HTML tags.
+ *
+ * The channel-aware path (below) tags `<em>`/`<strong>` with a `class="…"`
+ * attribute — so by the time the quote-detection passes run, the string
+ * already contains literal `"` characters that have nothing to do with
+ * dialogue. A plain `String.replace` would match INSIDE that attribute and
+ * splice a `<span>` into the middle of it, corrupting the markup. Same
+ * tag-skipping shape as `markPerformHtml` in `performMarkup.ts`.
+ */
+const replaceOutsideTags = (
+  html: string, re: RegExp, replacer: (...args: any[]) => string,
+): string => {
+  let out = '';
+  let i = 0;
+  while (i < html.length) {
+    const lt = html.indexOf('<', i);
+    const text = html.slice(i, lt === -1 ? html.length : lt);
+    if (text) out += text.replace(re, replacer);
+    if (lt === -1) break;
+    const gt = html.indexOf('>', lt);
+    if (gt === -1) { out += html.slice(lt); break; }
+    out += html.slice(lt, gt + 1);
+    i = gt + 1;
+  }
+  return out;
+};
+
+/**
  * Minimal inline markdown → HTML for book prose. The book view is a reading
  * surface: paragraphs, emphasis, dialogue and the odd image plate — tables
  * and the rest stay with the chat/storybook views.
  */
-export const renderInline = (md: string, opts?: { images?: boolean }): string => {
+export const renderInline = (
+  md: string,
+  opts?: { images?: boolean; markupCtx?: MarkupRenderContext },
+): string => {
   let s = escapeHtml(md);
   // Generated HTML is parked behind private-use sentinels until the end —
   // otherwise later passes chew it up (the dialogue pass used to wrap the
@@ -49,6 +104,8 @@ export const renderInline = (md: string, opts?: { images?: boolean }): string =>
     opts?.images === false
       ? ''
       : guard(`<span class="book-plate"><img src="${src}" alt="" loading="lazy" referrerpolicy="no-referrer"></span>`));
+  const ctx = opts?.markupCtx;
+  if (!ctx) {
   s = s.replace(/\*\*\*([^*]+)\*\*\*/g, '<strong><em>$1</em></strong>');
   s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   s = s.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
@@ -72,6 +129,54 @@ export const renderInline = (md: string, opts?: { images?: boolean }): string =>
   // tint speech without touching narration.
   s = s.replace(/(["“])([^"“”\n]+)(["”])/g,
     (_m, o, body, c) => `<span class="book-say">${o}${body}${c}</span>`);
+  s = s.replace(/\n/g, '<br>');
+    return s.replace(/\uE000(\d+)\uE001/g, (_m, i) => guarded[Number(i)]);
+  }
+
+  /**
+   * The channel-aware path \u2014 mirrors `MessageBlock`'s `em`/`strong` renderers
+   * so Book, Stage, VN, Atlas and the HTML export show the same
+   * colors/styles/animation (and, where enabled, the same per-character
+   * color) as the default chat reader. Built as HTML strings rather than
+   * React elements, so classes are computed once up front and spliced in by
+   * `String.replace`, same architecture as the plain path above.
+   */
+  const cls = (channel: Exclude<StoredChannel, 'heading'>, weight: 'font-medium' | 'font-bold'): string => {
+    const base = ctx.markup[channel];
+    const preset = { ...base, color: ctx.charColors?.[channel] || base.color };
+    return markupClass(preset, { animate: ctx.animate && preset.animation !== 'none', baseWeight: weight });
+  };
+  const speechCls = markupClass(
+    { color: ctx.charColors?.speech || ctx.dialogueColor, style: ctx.dialogueStyle, animation: ctx.dialogueAnimation },
+    { animate: ctx.animate && ctx.dialogueAnimation !== 'none', baseWeight: 'font-medium' },
+  );
+  const asideCls = cls('aside', 'font-medium');
+  const boldCls = cls('bold', 'font-bold');
+  const shoutCls = cls('shout', 'font-bold');
+  const emClass = 'italic opacity-90';
+
+  // Shout (****\u2026****) first \u2014 its four-star delimiter would otherwise be
+  // half-eaten by the three-star (bold+em) rule below.
+  s = s.replace(/\*\*\*\*([^*]+)\*\*\*\*/g, (_m, t) => `<strong class="mk-shout ${shoutCls}">${t}</strong>`);
+  s = s.replace(/\*\*\*([^*]+)\*\*\*/g,
+    (_m, t) => `<strong class="mk-bold ${boldCls}"><em class="${emClass}">${t}</em></strong>`);
+  s = s.replace(/\*\*([^*]+)\*\*/g, (_m, t) => `<strong class="mk-bold ${boldCls}">${t}</strong>`);
+  s = s.replace(/\*([^*\n]+)\*/g, (_m, t) => `<em class="${emClass}">${t}</em>`);
+  s = s.replace(/(^|[^\w\\])___([^_\n]+)___(?![\w])/g,
+    (_m, pre, t) => `${pre}<strong class="mk-bold ${boldCls}"><em class="${emClass}">${t}</em></strong>`);
+  s = s.replace(/(^|[^\w\\])__([^_\n]+)__(?![\w])/g,
+    (_m, pre, t) => `${pre}<strong class="mk-bold ${boldCls}">${t}</strong>`);
+  s = s.replace(/(^|[^\w\\])_([^_\n]+)_(?![\w])/g, (_m, pre, t) => `${pre}<em class="${emClass}">${t}</em>`);
+  // Dialogue (straight or curly quotes) \u2014 parked behind a sentinel so the
+  // aside pass below can't reach inside it (mirrors the nested-quote parking
+  // in textProcessor's styleQuotes: a scare quote INSIDE a spoken line stays
+  // part of that line, not a second, competing channel).
+  s = replaceOutsideTags(s, /(["\u201C])([^"\u201C\u201D\n]+)(["\u201D])/g,
+    (_m, o, body, c) => guard(`<span class="mk-speech ${speechCls}">${o}${body}${c}</span>`));
+  // Asides ('\u2026') \u2014 same boundary rule as textProcessor's aside wrap, so an
+  // apostrophe (don't, readin') is never mistaken for one.
+  s = replaceOutsideTags(s, /(^|[\s({[\u2014\u2013-])'([^'\n]+)'(?=[\s.,!?;:)}\]\u2014\u2013-]|$)/g,
+    (_m, pre, body) => `${pre}<span class="mk-aside ${asideCls}">'${body}'</span>`);
   s = s.replace(/\n/g, '<br>');
   return s.replace(/\uE000(\d+)\uE001/g, (_m, i) => guarded[Number(i)]);
 };
@@ -125,6 +230,7 @@ export const paragraphBlocks = (
   isUser: boolean,
   maxChars: number,
   showImages = true,
+  markupCtx?: MarkupRenderContext,
 ): BookBlock[] => {
   const blocks: BookBlock[] = [];
   for (const rawPara of processedText.split(/\n{2,}/)) {
@@ -141,7 +247,7 @@ export const paragraphBlocks = (
       continue;
     }
     for (const chunk of chunkParagraph(para, maxChars)) {
-      const html = renderInline(chunk, { images: showImages });
+      const html = renderInline(chunk, { images: showImages, markupCtx });
       if (!html.trim()) continue; // e.g. an image-only paragraph with images off
       blocks.push({
         html: `<p class="book-para${isUser ? ' book-user' : ''}" data-msg="${messageId}">${html}</p>`,

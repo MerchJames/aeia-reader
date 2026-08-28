@@ -25,7 +25,8 @@
  * the slice is read by exactly one component.
  */
 
-import { ChatMsg, SamplerParams, chatCompletion, isLocalBase, mergeSamplers } from './aiClient';
+import { ChatMsg, SamplerParams, isLocalBase } from './aiClient';
+import { askText } from './aiCall';
 import { cardToPromptBlock } from './cardContext';
 import { bucketFor, EmotionBucket } from '../lib/spriteStorage';
 import type { CardInfo } from '../types';
@@ -96,6 +97,10 @@ export const castOf = (
 
 /** How much story the character is allowed to have in mind, in characters. */
 export const HISTORY_BUDGET = 6000;
+/** Extra share of the budget spent making sure every voice is represented. */
+const SPEAKER_RESERVE = 0.25;
+/** Longest a rescued turn may be — proof the speaker exists, not their story. */
+const MAX_RESCUED_CHARS = 400;
 /** How many prior interview turns are replayed, so a thread stays coherent. */
 export const THREAD_TURNS = 8;
 
@@ -126,15 +131,54 @@ export const clampHistory = (
   // the opening — walking backwards until the budget is spent. The anchored
   // message itself is always included, however long it is.
   const out: HistoryMessage[] = [];
+  const taken = new Set<string>();
   let used = 0;
   for (let i = upto.length - 1; i >= 0; i--) {
     const m = upto[i];
     const cost = m.content.length + m.name.length + 2;
     if (out.length && used + cost > budget) break;
     out.unshift(m);
+    taken.add(m.id);
     used += cost;
   }
-  return out;
+
+  /*
+   * …then make sure nobody in the story is missing from it entirely.
+   *
+   * A pure recency window is right for a two-hander and quietly wrong for a
+   * group chat: whoever has been talking lately fills the budget, and a
+   * character who spoke earlier falls off the end completely. Measured on a
+   * 42-message chat, the window kept 16 messages and ONE speaker — so the
+   * system prompt named Bram in the cast while the transcript contained not one
+   * word he had ever said, and the interviewee could not be asked about him.
+   * That reads as the model being stupid; it was the payload being empty.
+   *
+   * So every voice present before the anchor keeps at least their most recent
+   * turn, paid for out of a small reserve on top of the budget. Bounded on
+   * purpose: it is one line each, not a second transcript.
+   */
+  const seen = new Set(out.map(m => m.name.trim().toLowerCase()));
+  const rescued: HistoryMessage[] = [];
+  let spare = Math.round(budget * SPEAKER_RESERVE);
+  for (let i = upto.length - 1; i >= 0 && spare > 0; i--) {
+    const m = upto[i];
+    const who = m.name.trim().toLowerCase();
+    if (!who || seen.has(who) || taken.has(m.id)) continue;
+    seen.add(who);
+    // A long-winded turn is trimmed rather than skipped: the point is that the
+    // character EXISTS in the transcript and said something recognisable.
+    const clipped = m.content.length > MAX_RESCUED_CHARS
+      ? `${m.content.slice(0, MAX_RESCUED_CHARS)}…`
+      : m.content;
+    rescued.push({ ...m, content: clipped });
+    spare -= clipped.length + m.name.length + 2;
+  }
+  if (!rescued.length) return out;
+
+  // Back into reading order — a transcript out of sequence is worse than a
+  // short one, because the model will infer a sequence from it.
+  const order = new Map(messages.map((m, i) => [m.id, i]));
+  return [...rescued, ...out].sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
 };
 
 /**
@@ -148,7 +192,28 @@ export const clampHistory = (
 export const historyBlock = (messages: HistoryMessage[], userName?: string): string => {
   const label = (name: string) =>
     userName && /^(you|user|\{\{user\}\})$/i.test(name.trim()) ? userName : name;
-  return messages.map(m => `${label(m.name)}: ${m.content}`).join('\n\n');
+
+  /*
+   * In a GROUP chat each turn gets a rule above it.
+   *
+   * `Name: content` is unambiguous when there are two people and one line each.
+   * It stops being unambiguous the moment a passage is three paragraphs long
+   * and contains quoted speech of its own — the next `Bram:` reads as a line
+   * INSIDE Mara's narration rather than as Bram taking a turn, and the model
+   * ends up attributing half the chat to whoever spoke last. That is what "it
+   * ignores the other character's messages" looks like from the outside: the
+   * words were in the payload and the turn boundary was not.
+   *
+   * Only when it is actually needed. A two-hander is easier to read compactly,
+   * and rules between every line of a back-and-forth are noise.
+   */
+  const speakers = new Set(messages.map(m => label(m.name).trim().toLowerCase()));
+  if (speakers.size <= 2) {
+    return messages.map(m => `${label(m.name)}: ${m.content}`).join('\n\n');
+  }
+  return messages
+    .map(m => `--- ${label(m.name)} ---\n${m.content}`)
+    .join('\n\n');
 };
 
 export interface AskInput {
@@ -414,10 +479,20 @@ export interface AskConfig {
 export const askCharacter = async (
   input: AskInput, cfg: AskConfig, signal?: AbortSignal,
 ): Promise<ParsedAnswer | null> => {
-  const reply = await chatCompletion(
-    cfg.base, cfg.key, cfg.model, buildAskMessages(input),
-    mergeSamplers({ ...askSamplers(cfg.base), max_tokens: ASK_TOKENS }, cfg.params),
-    signal,
+  // Through the shared layer, which strips a chain of thought before the words
+  // reach the reader. A thinking model used to answer this interview with its
+  // own deliberation about how the character would answer — in the character's
+  // speech bubble, in their voice's place.
+  const reply = await askText(
+    { base: cfg.base, key: cfg.key, model: cfg.model },
+    buildAskMessages(input),
+    {
+      label: `Asking ${input.characterName}`,
+      params: askSamplers(cfg.base),
+      reader: cfg.params,
+      budget: ASK_TOKENS,
+      signal,
+    },
   );
   return parseAnswer(reply, input.characterName);
 };

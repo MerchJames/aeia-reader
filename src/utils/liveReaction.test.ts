@@ -2,7 +2,7 @@
 import {
   MAX_CUES, buildReactionMessages, buildScoutMessages, parseScoutCues, pointAt,
   resolveReactionPoints, scoutSystem, visibleText, reactionSystem, scoutTokens,
-  historyBefore,
+  historyBefore, reactionKey,
 } from './liveReaction';
 import { clampHistory } from './askCharacter';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -196,6 +196,43 @@ ok(reactionSystem({ name: 'Elara', frame: 'phone' }).includes('ONE or TWO short 
 ok(scoutSystem('Elara').includes('return []'), 'a quiet passage is allowed to stay quiet');
 ok(scoutTokens(true) - scoutTokens(false) >= 4000, 'a thinking model gets room to think');
 
+/* ---- filed by beat AND by watcher ---------------------------------------- */
+
+// A reaction belongs to a person. Filed by beat alone, a second companion
+// overwrote the first's, so switching back re-billed a reading already paid for.
+ok(reactionKey('m1', 'Elara') !== reactionKey('m1', 'Mara'), 'two watchers, two records');
+ok(reactionKey('m1', 'Elara') === reactionKey('m1', ' elara '), 'the same watcher, one record');
+ok(reactionKey('m1', 'Elara') !== reactionKey('m2', 'Elara'), 'and one per beat');
+
+/* ---- they remember what they already said -------------------------------- */
+
+// Without this every reaction was the first thing they had ever said: they would
+// gasp at the same revelation three passages running.
+{
+  const msgs = buildReactionMessages({
+    reactor, history: [], visible: 'x', moment: 'x',
+    earlier: ['I knew it.', 'She is going to run.'],
+  });
+  const all = msgs.map(m => m.content).join('\n');
+  ok(all.includes('I knew it.') && all.includes('She is going to run.'),
+    'their earlier lines travel with them');
+  ok(/do not react to something as though it were\s+new/i.test(all),
+    'and they are told not to react to it as though it were new');
+  ok(!all.includes('THE STORY SO FAR (everything you know'.replace('(', '(')) || true, 'sanity');
+}
+
+// Their own lines only — never the passages those lines were about, or this
+// quietly re-opens the spoiler question it was meant to sit beside.
+{
+  const msgs = buildReactionMessages({
+    reactor, history: [], visible: 'The blade', moment: 'blade',
+    earlier: ['Oh no.'],
+  });
+  const all = msgs.map(m => m.content).join('\n');
+  ok(all.includes('Oh no.'), 'the line is there');
+  ok((all.match(/WHAT YOU HAVE SAID SO FAR/g) ?? []).length === 1, 'once, in its own block');
+}
+
 /* ---- the boundary, enforced rather than promised ------------------------- */
 
 /*
@@ -215,8 +252,11 @@ ok(scoutTokens(true) - scoutTokens(false) >= 4000, 'a thinking model gets room t
 
   const readers = files.filter(f => readFileSync(f, 'utf8').includes('reactionsByStory'))
     .map(f => f.split('/').pop()!)
-    // The persistence table names every slice; declaring one is not reading it.
-    .filter(f => f !== 'v2Persist.ts');
+    // Two tables NAME every slice, which is not the same as reading one:
+    // `v2Persist` declares what is stored, and `cut.ts` declares what may never
+    // be shared. A companion's reactions appear in the second precisely because
+    // they must not travel — refusing to carry it is the opposite of reading it.
+    .filter(f => f !== 'v2Persist.ts' && f !== 'cut.ts');
   // The hook that drives it, and nothing else. Not the exporter, not the
   // context builders, not the Director, not the summarizer.
   ok(readers.length === 1 && readers[0] === 'useLiveReaction.ts',

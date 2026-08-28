@@ -14,6 +14,7 @@ import { useSceneDirectorStore } from '../stores/useSceneDirectorStore';
 import { resolveContent } from './lens';
 import { EnrichConfig, enrichPassages, ScenePassage, selectStale } from './sceneDirector';
 import { StoryRead, isStoryReadStale, readStory } from './storyRead';
+import { tasteBlock } from './tasteBlock';
 
 let controller: AbortController | null = null;
 
@@ -138,6 +139,9 @@ const run = async (storyId: string, passages: ScenePassage[]): Promise<void> => 
     await enrichPassages(stale, cfg, {
       signal: controller.signal,
       storyRead,
+      // Built once per run, not per batch: the log cannot change mid-run, and a
+      // stable block keeps every batch in a run sharing a prompt prefix.
+      taste: tasteBlock(useAuraV2Store.getState().tasteMarks),
       prevLocation: seedLocation(storyId, stale[0]?.messageId),
       onBatch: (descriptors, done, _total, unread) => {
         if (descriptors.length) useAuraV2Store.getState().putScenes(storyId, descriptors);
