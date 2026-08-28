@@ -5,9 +5,11 @@ import { resolveContent } from '../utils/lens';
 import { useScenes } from '../hooks/useScenes';
 import { useSceneDirector } from '../hooks/useSceneDirector';
 import { SceneAtmosphere } from './SceneAtmosphere';
+import { useSceneVfx, useSceneWeather } from '../hooks/useSceneWeather';
 import { SceneSpine } from './SceneSpine';
 import { processText, balanceEmphasis, truncateToWord } from '../utils/textProcessor';
-import { renderInline } from '../utils/bookLayout';
+import { MarkupRenderContext, renderInline } from '../utils/bookLayout';
+import { resolveCharColors } from '../utils/markupStyles';
 import { MOOD_COLOR, sceneAtmosphere } from '../utils/sceneMood';
 import { bucketFor } from '../lib/spriteStorage';
 import { spriteFor, useSpriteStore } from '../stores/useSpriteStore';
@@ -47,9 +49,11 @@ export const renderWithEmphasis = (
    * every tick — 268 restarts on one word in six seconds. A cue fires on the
    * reveal of its word; strobing afterwards reads as a fault.
    */
-  played?: Set<string>,
+  played?: Map<string, number>,
   /** This message's cadence matcher, shared across its paragraphs — see runMatcher. */
   match?: RunMatcher,
+  /** Channel colors/styles (+ resolved per-character color) — see MarkupRenderContext. */
+  markupCtx?: MarkupRenderContext,
 ): string => {
   // Emphasis still fences whole spans — a whisper is a phrase, and shrinking
   // it word by word would read as a stutter. Performance does NOT: it marks
@@ -70,7 +74,7 @@ export const renderWithEmphasis = (
 
   let html: string;
   if (!marks.length) {
-    html = renderInline(para, { images });
+    html = renderInline(para, { images, markupCtx });
   } else {
     let marked = para;
     const used: number[] = [];
@@ -79,7 +83,7 @@ export const renderWithEmphasis = (
       marked = marked.replace(mk.text, `\uE010${i}\uE011${mk.text}\uE014${i}\uE015`);
       used.push(i);
     });
-    html = renderInline(marked, { images });
+    html = renderInline(marked, { images, markupCtx });
     for (const i of used) {
       html = html
         .replace(`\uE010${i}\uE011`, `<span class="${marks[i].cls}">`)
@@ -210,9 +214,26 @@ export const StageView = () => {
     : undefined;
   // Survives re-renders, reset when the passage changes: a cue animates the
   // first time its word appears and holds still after.
-  const playedRef = useRef<{ key: string; set: Set<string> }>({ key: '', set: new Set() });
+  const playedRef = useRef<{ key: string; set: Map<string, number> }>({ key: '', set: new Map() });
   const playedKey = current?.id ?? '';
-  if (playedRef.current.key !== playedKey) playedRef.current = { key: playedKey, set: new Set() };
+  if (playedRef.current.key !== playedKey) playedRef.current = { key: playedKey, set: new Map() };
+
+  // Stage shows one passage at a time, so its speaker (for per-character
+  // color) is simply that message's own name.
+  const markupCtx: MarkupRenderContext = useMemo(() => ({
+    dialogueColor: store.dialogueColor,
+    dialogueStyle: store.dialogueStyle,
+    dialogueAnimation: store.dialogueAnimation,
+    markup: store.markupPresets,
+    charColors: resolveCharColors(
+      current?.name, store.characterColors, store.characterChannelColors, store.characterColorsEnabled,
+    ),
+    animate: !store.streamingMessage,
+  }), [
+    store.dialogueColor, store.dialogueStyle, store.dialogueAnimation, store.markupPresets,
+    store.characterColors, store.characterChannelColors, store.characterColorsEnabled,
+    current?.name, store.streamingMessage,
+  ]);
 
   const bodyHtml = useMemo(
     () => {
@@ -225,10 +246,10 @@ export const StageView = () => {
         .split(/\n{2,}/)
         .map(p => p.trim())
         .filter(Boolean)
-        .map(p => `<p>${renderWithEmphasis(p, emphasis, false, perform, claimed, playedRef.current.set, match)}</p>`)
+        .map(p => `<p>${renderWithEmphasis(p, emphasis, false, perform, claimed, playedRef.current.set, match, markupCtx)}</p>`)
         .join('');
     },
-    [rawText, emphasis, perform],
+    [rawText, emphasis, perform, markupCtx],
   );
 
   // The stage CG: like a VN, the most recent image (attached OR inline in
@@ -259,10 +280,7 @@ export const StageView = () => {
   // Screen special effect for this passage — the Director's vfx, else a mood
   // punch (heuristic scene mood/tension when there's no AI descriptor, so it
   // works AI-off). `shake` moves the stage itself (root class); rest is overlay.
-  const vfxSource = descriptor ?? (scene && current
-    ? { mood: scene.mood, tension: scene.tensionById[current.id] ?? scene.peakTension }
-    : undefined);
-  const vfx = store.themeEffects ? deriveVfx(vfxSource) : undefined;
+  const vfx = useSceneVfx(scene, current?.id);
   const [shakeNow, setShakeNow] = React.useState(false);
   const shakenMsg = useRef('');
   useEffect(() => {
@@ -275,11 +293,7 @@ export const StageView = () => {
   }, [vfx, current?.id]);
 
   // Weather lingers across the scene, then this passage's own fx wins.
-  const weather = resolveWeather(
-    descriptor,
-    rawText,
-    stickyWeather(scene, current?.id, storyId ? v2.sceneByStory[storyId] : undefined),
-  );
+  const weather = useSceneWeather(scene, current ? { id: current.id, content: rawText } : undefined);
   const sprites = useSpriteStore(s => s.sprites);
   const spriteUrls = useSpriteStore(s => s.urls);
 
@@ -442,6 +456,9 @@ export const StageView = () => {
           <div
             ref={boxRef}
             className="stage-text markdown-body"
+            /* Where the magnifier looks. The stage box is the only place words
+             * appear in this view, streaming or not. */
+            data-reveal-edge=""
             style={{ fontSize: `${store.fontSize}px` }}
             dangerouslySetInnerHTML={{ __html: bodyHtml }}
           />

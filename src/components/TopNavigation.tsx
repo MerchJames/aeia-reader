@@ -1,10 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft, BookMarked, BookOpen, Bot, ChevronLeft, ChevronRight, Clapperboard, Film, Focus,
-  GitBranch, Highlighter, Info, List, MessageSquare, MoreHorizontal, MoreVertical, Network, Pencil,
-  Pin, PinOff, Search, Settings, Table2, Wand2, X,
+  GitBranch, Highlighter, Info, LayoutGrid, List, Map, MessageSquare, MoreHorizontal, MoreVertical,
+  Network, Pencil, ScrollText, SquareDashedMousePointer,
+  Pin, PinOff, Search, Settings, Table2, Wand2, X, Gamepad2,
 } from 'lucide-react';
-import { useIsMobile, useIsTouch } from '../hooks/useMediaQuery';
+import { useIsMobile, useIsTouch, useMediaQuery } from '../hooks/useMediaQuery';
 import { useAppStore } from '../store';
 import { useAuraV2Store, committedCount, flatMessages } from '../stores/useAuraV2Store';
 import { wordsPerSecond } from '../hooks/useStreamer';
@@ -18,8 +19,12 @@ import { VIEW_HINT, VIEW_LABEL, overflowViews, resolveVisibleViews } from '../ut
 const VIEW_ICON: Record<ViewMode, React.ReactNode> = {
   storybook: <BookOpen size={18} />,
   book: <BookMarked size={18} />,
+  script: <ScrollText size={18} />,
+  panels: <LayoutGrid size={18} />,
+  atlas: <Map size={18} />,
   stage: <Clapperboard size={18} />,
   vn: <Film size={18} />,
+  rpg: <Gamepad2 size={18} />,
   sandbox: <Wand2 size={18} />,
   chat: <MessageSquare size={18} />,
   branches: <GitBranch size={18} />,
@@ -62,11 +67,28 @@ export const TopNavigation = () => {
   // phone and a tablet are wide enough for the desktop header and still have
   // no mouse — sizing off `isMobile` alone left them with 30px icon targets.
   const touchSized = useIsTouch() || isMobile;
+  /**
+   * Show the tools as one menu button rather than a row of icons.
+   *
+   * Not a phone thing — a ROOM thing. Touch targets are 44px wide against a
+   * mouse's ~36px, so a tablet spends a third more header on the same tools; add
+   * one more tool and the header stops fitting. It did: the Frame tool pushed a
+   * 768px tablet 22px into a sideways scroll, and the next tool would have done
+   * it again on a slightly wider one.
+   *
+   * So the row collapses whenever the buttons are finger-sized and the window is
+   * not wide enough to spend the extra on. Nothing is lost — `toolsMenu` lists
+   * exactly the same tools, with labels.
+   */
+  const roomForTools = useMediaQuery('(min-width: 1024px)');
+  const compactTools = isMobile || (touchSized && !roomForTools);
   const [toolsOpen, setToolsOpen] = useState(false);
   const toolsRef = useRef<HTMLDivElement>(null);
   const searchQuery = useAppStore(s => s.searchQuery);
   const setSearchQuery = useAppStore(s => s.setSearchQuery);
   const isAutofocusMode = useAppStore(s => s.isAutofocusMode);
+  const isBoxMode = useAppStore(s => s.isBoxMode);
+  const setIsBoxMode = useAppStore(s => s.setIsBoxMode);
   const setIsAutofocusMode = useAppStore(s => s.setIsAutofocusMode);
   const setSettingsOpen = useAppStore(s => s.setSettingsOpen);
   const aiOpen = useAppStore(s => s.aiOpen);
@@ -260,6 +282,11 @@ export const TopNavigation = () => {
       id: 'ai', label: 'Assistant', hint: 'Reading assistant (AI)',
       icon: <Bot size={18} />, active: aiOpen, onClick: () => setAiOpen(!aiOpen),
     }] : []),
+    {
+      id: 'frame', label: 'Frame', hint: 'Frame — drag a box over words (B)',
+      icon: <SquareDashedMousePointer size={18} />, active: isBoxMode,
+      onClick: () => setIsBoxMode(!isBoxMode),
+    },
     {
       id: 'autofocus', label: 'Autofocus', hint: 'Autofocus handsfree mode',
       icon: <Focus size={18} />, active: isAutofocusMode, warm: true,
@@ -525,7 +552,7 @@ export const TopNavigation = () => {
         {/* Desktop: the tools as bare icons. Phone: one button, a labelled
           * menu behind it — see `toolsMenu`. Both read from `tools`, so a tool
           * added in one place cannot go missing in the other. */}
-        {!isMobile && tools.map(t => (
+        {!compactTools && tools.map(t => (
           <button
             key={t.id}
             onClick={t.onClick}
@@ -570,7 +597,7 @@ export const TopNavigation = () => {
             )}
           </div>
         )}
-        {isMobile && (
+        {compactTools && (
           <div className="relative shrink-0" ref={toolsRef}>
             <button
               onClick={() => setToolsOpen(!toolsOpen)}

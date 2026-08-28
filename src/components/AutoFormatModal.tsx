@@ -4,7 +4,7 @@ import {
 } from 'lucide-react';
 import { useAppStore } from '../store';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
-import { chatCompletion } from '../utils/aiClient';
+import { askText } from '../utils/aiCall';
 import { AutoFormatRule, RuleTarget, StatDisplay, StatRule } from '../types';
 import { RPG_SAMPLE_TEXT, RPG_STAT_PRESET, RULE_PRESETS, SAMPLE_TEXT } from '../utils/rulePresets';
 import { processText, ruleError } from '../utils/textProcessor';
@@ -335,10 +335,11 @@ export const AutoFormatModal = ({ onClose }: { onClose: () => void }) => {
         if (signal.aborted) break;
         const m = messages[i];
         try {
-          const text = (await chatCompletion(app.aiBaseUrl, app.aiApiKey, app.aiModel, [
-            { role: 'system', content: system },
-            { role: 'user', content: m.content },
-          ], {}, signal)).trim();
+          const text = await askText(
+            { base: app.aiBaseUrl, key: app.aiApiKey, model: app.aiModel },
+            [{ role: 'system', content: system }, { role: 'user', content: m.content }],
+            { label: 'Repairing formatting', signal },
+          );
           // The prompt forbids removing content — a reply that's empty or
           // dramatically shorter means the model misbehaved; keep the original.
           const destructive = !text

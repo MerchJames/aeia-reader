@@ -9,7 +9,7 @@ import { useAppStore } from '../store';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { Pin } from '../types';
 import { cn } from '../utils/cn';
-import { chatCompletion } from '../utils/aiClient';
+import { askText } from '../utils/aiCall';
 import { resolveContent } from '../utils/lens';
 import { buildPinUpdateMessages, PinUpdateMode } from '../utils/pinUpdate';
 
@@ -127,7 +127,8 @@ const PinCard = ({
         sourceText: mode === 'source' ? collectPinSource(pin) : undefined,
         card: app.currentStory?.card,
       });
-      const reply = (await chatCompletion(base, key, model, messages, { temperature: 0.4 })).trim();
+      const reply = await askText({ base, key, model }, messages,
+        { label: 'Reworking a pin', params: { temperature: 0.4 } });
       if (!reply) { setError('Empty reply'); return; }
       addPinVersion(storyId, pin.id, {
         content: reply,

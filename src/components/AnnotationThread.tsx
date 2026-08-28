@@ -4,7 +4,7 @@ import { useAppStore } from '../store';
 import {
   committedCount, flatMessages, useAuraV2Store, visibleEntities,
 } from '../stores/useAuraV2Store';
-import { chatCompletion } from '../utils/aiClient';
+import { askText } from '../utils/aiCall';
 import { cardToPromptBlock, pinsToPromptBlock, sheetsToPromptBlock } from '../utils/cardContext';
 import { cn } from '../utils/cn';
 import { resolveContent } from '../utils/lens';
@@ -117,13 +117,13 @@ export const AnnotationThread = ({ messageId, anchorText, onClose }: {
             role: a.role === 'ai' ? ('assistant' as const) : ('user' as const),
             content: a.note,
           }));
-        const reply = await chatCompletion(s.aiBaseUrl, s.aiApiKey, s.aiModel, [
+        const reply = await askText({ base: s.aiBaseUrl, key: s.aiApiKey, model: s.aiModel }, [
           { role: 'system', content: `${THREAD_SYSTEM}\n\n${grounding}` },
           ...(anchorText
             ? [{ role: 'user' as const, content: `The passage in question: "${anchorText}"` }]
             : []),
           ...history,
-        ]);
+        ], { label: 'Talking it over' });
         useAuraV2Store.getState().addAnnotation(storyId, {
           messageId: message.id, anchorText, note: reply.trim(), role: 'ai',
         });
@@ -152,11 +152,11 @@ export const AnnotationThread = ({ messageId, anchorText, onClose }: {
         const user = anchorText
           ? `Rewrite this passage: "${anchorText}"${recentNotes ? `\n\nDiscussion so far:\n${recentNotes}` : ''}`
           : `Rewrite the ">>>" message.${recentNotes ? `\n\nDiscussion so far:\n${recentNotes}` : ''}`;
-        const text = await chatCompletion(s.aiBaseUrl, s.aiApiKey, s.aiModel, [
+        const text = await askText({ base: s.aiBaseUrl, key: s.aiApiKey, model: s.aiModel }, [
           { role: 'system', content: system },
           { role: 'user', content: user },
-        ]);
-        setSuggestedRewrite(text.trim());
+        ], { label: 'Drafting a rewrite' });
+        setSuggestedRewrite(text);
       } catch (e: any) {
         setAiError(e?.message ?? 'The rewrite request failed');
       }

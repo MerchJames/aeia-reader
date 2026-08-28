@@ -5,7 +5,8 @@ import { wordsPerSecond } from '../hooks/useStreamer';
 import {
   committedCount, flatMessages, useAuraV2Store, visibleEntities,
 } from '../stores/useAuraV2Store';
-import { chatCompletion, listModels } from '../utils/aiClient';
+import { listModels } from '../utils/aiClient';
+import { askText } from '../utils/aiCall';
 import { cardToPromptBlock } from '../utils/cardContext';
 import { plainTextForSpeech } from '../utils/textProcessor';
 import { segmentScenes } from '../utils/sceneSegment';
@@ -123,11 +124,11 @@ export const RecapCard = () => {
             ].join('\n')
           : '';
         const system = [RECAP_SYSTEM, cardBlock, sheetBlock].filter(Boolean).join('\n\n');
-        const text = await chatCompletion(base, s.aiApiKey, s.aiModel, [
+        const text = await askText({ base, key: s.aiApiKey, model: s.aiModel }, [
           { role: 'system', content: system },
           { role: 'user', content: excerpt },
-        ]);
-        setAiRecap(text.trim());
+        ], { label: 'Catching you up' });
+        setAiRecap(text);
       } catch (e: any) {
         setAiError(e?.message ?? 'Recap failed');
       }

@@ -1,10 +1,16 @@
 import React, { useMemo, useRef, useState } from 'react';
 import {
   AlignLeft, ChevronDown, Clapperboard, Download, FileText, Focus, ImageIcon, LayoutTemplate, Loader2, MessageSquareQuote,
-  Headphones, MessageCircle, Music2, PauseCircle, Play, PlayCircle, Quote, RefreshCw, Save, Sparkles, Square, Terminal, Trash2, Type,
-  Pause, Popcorn, UserRound, Volume2, Wand2, X, Zap, ZoomIn,
+  Headphones, MessageCircle, Music2, Palette, PauseCircle, Play, PlayCircle, Quote, RefreshCw, Save, Sparkles, Square, Terminal, Trash2, Type,
+  Pause, Plus, Popcorn, Share2, UserRound, Volume2, Wand2, X, Zap, ZoomIn,
 } from 'lucide-react';
 import { castOf } from '../utils/askCharacter';
+import { MAGNIFIER_STYLES } from '../utils/readingFocus';
+import { ColorableChannel, MagnifierStyle, MarkupPreset, StoredChannel } from '../types';
+import {
+  CHARACTER_COLOR_NONE, MARKUP_CHANNELS, MARKUP_COLORS, isDefaultMarkup, sanitizeMarkupPresets,
+} from '../utils/markupStyles';
+import { InviteSheet } from './InviteSheet';
 import { useAppStore } from '../store';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { useSceneDirectorStore } from '../stores/useSceneDirectorStore';
@@ -21,6 +27,7 @@ import {
   downloadBlob, downloadText, exportStoryWithEdits, safeFilename, storyToMarkdown,
 } from '../utils/exporter';
 import { exportStoryHtml } from '../utils/htmlExport';
+import { CutSummary, buildCut, cutFilename, cutToText, describeCut } from '../utils/cut';
 import { embedFontsFor, resolveExportFont } from '../utils/fontEmbed';
 import { AudiobookModal } from './AudiobookModal';
 import { AudioLibraryModal } from './AudioLibraryModal';
@@ -32,6 +39,7 @@ import { artDataUri } from '../lib/artStorage';
 import { resolveTheme, accentHex } from '../themes';
 import { cn } from '../utils/cn';
 import { READING_MODE_DEFS, modeDef, modeDiff, modeMatches } from '../utils/readingModes';
+import { selectTaste, tasteBlock } from '../utils/tasteBlock';
 
 const readImageFile = (file: File): Promise<string> =>
   new Promise((resolve, reject) => {
@@ -221,6 +229,15 @@ const ExportAsPageButton = () => {
         highlights: story.highlights,
         sceneMood: store.sceneTheming,
         streaming: true,
+        markup: {
+          dialogueColor: store.dialogueColor,
+          dialogueStyle: store.dialogueStyle,
+          dialogueAnimation: store.dialogueAnimation,
+          markupPresets: store.markupPresets,
+          characterColors: store.characterColors,
+          characterChannelColors: store.characterChannelColors,
+          characterColorsEnabled: store.characterColorsEnabled,
+        },
       });
 
       downloadBlob(
@@ -254,6 +271,93 @@ const ExportAsPageButton = () => {
         {busy ? <Loader2 size={16} className="animate-spin" /> : <FileText size={16} />}
         <span>{busy ? 'Embedding fonts…' : 'Export as a readable page (.html)'}</span>
       </button>
+      {note && <p className="text-[11px] text-muted px-2 leading-snug">{note}</p>}
+    </>
+  );
+};
+
+/**
+ * Export a Cut — the story plus the way it was directed, as one file another
+ * copy of Aeia can open.
+ *
+ * The sibling of the HTML export, and the answer to a different question. That
+ * one makes a page anybody can read anywhere; this one makes a file that opens
+ * HERE, with the five views, the weather and the performance intact, and with
+ * no endpoint, no key and no hardware needed to see any of it — because the
+ * direction is already baked.
+ *
+ * It says what it contains before it writes, in counts rather than adjectives,
+ * because a file meant to be handed to somebody else has to be inspectable
+ * first. What it will never contain is the reader's own notes: see
+ * `NEVER_IN_A_CUT` in `utils/cut.ts`.
+ */
+const ExportCutButton = () => {
+  const store = useAppStore();
+  const v2 = useAuraV2Store();
+  const [note, setNote] = useState<string | null>(null);
+  const [preview, setPreview] = useState<CutSummary | null>(null);
+
+  const story = store.currentStory;
+  if (!story) return null;
+
+  const make = () => buildCut(story, v2 as unknown as Record<string, unknown>, {
+    presentation: { readingMode: store.readingMode, viewMode: store.viewMode, theme: store.theme },
+  });
+
+  const run = () => {
+    try {
+      const cut = make();
+      downloadBlob(cutFilename(story.title), new Blob([cutToText(cut)], { type: 'application/json' }));
+      setPreview(null);
+      setNote('Saved. Anyone with Aeia Reader can open it — no endpoint needed.');
+    } catch (e) {
+      setNote(`Export failed: ${(e as Error).message}`);
+    }
+  };
+
+  const summary = preview;
+  return (
+    <>
+      <button
+        onClick={() => { setNote(null); setPreview(preview ? null : describeCut(make())); }}
+        data-testid="export-cut"
+        className="flex items-center gap-2 p-2 min-h-11 rounded-lg hover:bg-app-text/5 transition-colors text-sm"
+      >
+        <Share2 size={16} />
+        <span>Export as a Cut (.cut.json)</span>
+      </button>
+      {summary && (
+        <div
+          className="mx-2 rounded-lg border border-app-border/70 p-2 flex flex-col gap-1.5"
+          data-testid="cut-preview"
+        >
+          <p className="text-[11px] text-muted leading-snug">
+            <b>{summary.passages.toLocaleString()}</b> passages ·{' '}
+            <b>{summary.words.toLocaleString()}</b> words ·{' '}
+            <b>{summary.directed.toLocaleString()}</b> directed ·{' '}
+            <b>{summary.marks.toLocaleString()}</b> hand marks ·{' '}
+            <b>{summary.edits.toLocaleString()}</b> Lens edits ·{' '}
+            <b>{Math.max(1, Math.round(summary.bytes / 1024)).toLocaleString()} KB</b>
+          </p>
+          <p className="text-[11px] text-muted leading-snug">
+            Your notes stay here: highlights, margin notes, interviews, companion
+            reactions and anyone you brought in from another chat are not in the file.
+          </p>
+          {summary.art > 0 && (
+            <p className="text-[11px] text-muted leading-snug">
+              Your {summary.art} generated picture{summary.art === 1 ? '' : 's'} stay
+              here too — a Cut carries the direction, not the media.
+            </p>
+          )}
+          <button
+            onClick={run}
+            data-testid="cut-confirm"
+            className="self-start px-2.5 py-1 rounded-md text-[11px] bg-accent/15 text-accent font-medium"
+          >
+            Save it
+          </button>
+        </div>
+      )}
       {note && <p className="text-[11px] text-muted px-2 leading-snug">{note}</p>}
     </>
   );
@@ -520,19 +624,213 @@ const Toggle = ({
   </button>
 );
 
+/**
+ * One markup channel: what the mark looks like written, and the three knobs.
+ *
+ * The mark itself is shown in a monospace chip beside the label because the
+ * NAME of a channel is not what the reader recognises — `****` is. A reader
+ * scanning this panel is looking for the punctuation they keep seeing in their
+ * own logs, not for our word for it.
+ */
+const ChannelRow = ({
+  channel, preset, onChange,
+}: {
+  channel: { id: StoredChannel; label: string; mark: string; hint: string; sample: string };
+  preset: MarkupPreset;
+  onChange: (patch: Partial<MarkupPreset>) => void;
+}) => {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <div className="rounded-lg border border-app-border/60" data-testid={`markup-${channel.id}`}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center gap-2 px-2 py-2 text-sm text-left hover:bg-app-text/5 rounded-lg"
+      >
+        <code className="shrink-0 px-1.5 py-0.5 rounded bg-app-text/10 font-mono text-[11px]">
+          {channel.mark}
+        </code>
+        <span className="flex-1 min-w-0">
+          <span className="block">{channel.label}</span>
+          <span className="block text-[10px] opacity-60 truncate">{channel.hint}</span>
+        </span>
+        <span className="opacity-50 text-xs">{open ? '\u2212' : '+'}</span>
+      </button>
+      {open && (
+        <div className="flex flex-col gap-2 px-2 pb-2.5">
+          <SelectRow
+            label="Style"
+            value={preset.style}
+            onChange={(v) => onChange({ style: v as MarkupPreset['style'] })}
+            testId={`markup-${channel.id}-style`}
+            options={[
+              { value: 'normal', label: 'Normal' },
+              { value: 'italic', label: 'Italic' },
+              { value: 'bold', label: 'Bold' },
+              { value: 'bold-italic', label: 'Bold Italic' },
+            ]}
+          />
+          <SelectRow
+            label="Animation"
+            value={preset.animation}
+            onChange={(v) => onChange({ animation: v as MarkupPreset['animation'] })}
+            testId={`markup-${channel.id}-animation`}
+            options={[
+              { value: 'none', label: 'None' },
+              { value: 'zoom', label: 'Zoom' },
+              { value: 'pulse', label: 'Pulse' },
+              { value: 'wave', label: 'Wave' },
+              { value: 'glow', label: 'Glow' },
+              { value: 'rise', label: 'Rise' },
+            ]}
+          />
+          <SelectRow
+            label="Color"
+            value={preset.color}
+            onChange={(v) => onChange({ color: v })}
+            testId={`markup-${channel.id}-color`}
+            options={MARKUP_COLORS.map(c => ({ value: c.value, label: c.label }))}
+          />
+          <code className="px-1 font-mono text-[10px] opacity-50">{channel.sample}</code>
+        </div>
+      )}
+    </div>
+  );
+};
+
+/**
+ * Optional layer on top of the channel colors above: color speech/asides/
+ * beats/shouts by WHO said or thought them instead of one fixed color for
+ * everyone. Off by default — every channel keeps behaving exactly as
+ * configured above until this is turned on.
+ */
+const CHARACTER_COLOR_OPTIONS = [
+  { value: '', label: 'Auto' },
+  ...MARKUP_COLORS.filter(c => c.value),
+  { value: CHARACTER_COLOR_NONE, label: 'No color' },
+];
+
+/** The advanced, per-channel layer: a specific action for a specific
+ *  character, e.g. Kara's dialogue stays her color but her thoughts don't. */
+const CHARACTER_CHANNELS: { id: ColorableChannel; label: string }[] = [
+  { id: 'speech', label: 'Speech' },
+  { id: 'aside', label: 'Aside' },
+  { id: 'bold', label: 'Beat' },
+  { id: 'shout', label: 'Shout' },
+];
+
+const CHARACTER_CHANNEL_OPTIONS = [
+  { value: '', label: 'Same as character' },
+  ...MARKUP_COLORS.filter(c => c.value),
+  { value: CHARACTER_COLOR_NONE, label: 'No color' },
+];
+
+/**
+ * One character's color, plus a collapsed-by-default "Advanced" disclosure
+ * for per-channel overrides — so a reader who only wants the simple case
+ * (one color per character) never sees the extra four dropdowns.
+ */
+const CharacterColorRow = ({ name }: { name: string }) => {
+  const store = useAppStore();
+  const [open, setOpen] = useState(false);
+  const channelColors = store.characterChannelColors[name];
+  const overrideCount = channelColors ? Object.keys(channelColors).length : 0;
+
+  return (
+    <div className="flex flex-col gap-1">
+      <SelectRow
+        label={name}
+        value={store.characterColors[name] ?? ''}
+        onChange={(v) => store.setCharacterColor(name, v || undefined)}
+        testId={`character-color-${name}`}
+        options={CHARACTER_COLOR_OPTIONS}
+      />
+      <button
+        onClick={() => setOpen(o => !o)}
+        data-testid={`character-color-${name}-advanced`}
+        className={cn(
+          'self-start ml-24 -mt-1 px-1.5 py-0.5 text-[10px] rounded hover:bg-app-text/10',
+          overrideCount > 0 ? 'text-accent' : 'opacity-50',
+        )}
+      >
+        Advanced{overrideCount > 0 ? ` (${overrideCount})` : ''} {open ? '−' : '+'}
+      </button>
+      {open && (
+        <div className="ml-24 pl-2 border-l border-app-border/40 flex flex-col gap-1.5">
+          {CHARACTER_CHANNELS.map(ch => (
+            <SelectRow
+              key={ch.id}
+              label={ch.label}
+              value={channelColors?.[ch.id] ?? ''}
+              onChange={(v) => store.setCharacterChannelColor(name, ch.id, v || undefined)}
+              testId={`character-color-${name}-${ch.id}`}
+              options={CHARACTER_CHANNEL_OPTIONS}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const CharacterColorSection = () => {
+  const store = useAppStore();
+  const story = store.currentStory;
+  const names = useMemo(() => {
+    if (!story) return [];
+    const cast = castOf(story.messages, story.userName);
+    return [story.userName || 'You', ...cast];
+  }, [story]);
+
+  return (
+    <Section title="Character Colors">
+      <Toggle
+        icon={<Palette size={16} />}
+        label="Color by character"
+        hint="Each speaker's dialogue, asides, beats and shouts use their own color instead of one color for everyone."
+        value={store.characterColorsEnabled}
+        onChange={store.setCharacterColorsEnabled}
+        testId="character-colors-toggle"
+      />
+      {store.characterColorsEnabled && (
+        story && names.length > 0 ? (
+          <div className="flex flex-col gap-2.5 px-1">
+            {names.map(name => (
+              <CharacterColorRow key={name} name={name} />
+            ))}
+            <span className="text-[11px] text-muted px-1">
+              Auto assigns each character a consistent color automatically; No
+              color always falls back to the channel's own color above.
+              Advanced lets one character's specific action (their dialogue,
+              asides, beats or shouts) use a different color than the rest of
+              theirs.
+            </span>
+          </div>
+        ) : (
+          <p className="px-1 text-[11px] opacity-60">
+            Open a story to assign colors per character — until then, everyone
+            gets an automatically assigned color.
+          </p>
+        )
+      )}
+    </Section>
+  );
+};
+
 const SelectRow = ({
-  label, value, onChange, options,
+  label, value, onChange, options, testId,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
   options: { value: string; label: string }[];
+  testId?: string;
 }) => (
   <div className="flex gap-2 items-center text-sm">
     <span className="w-24 shrink-0">{label}</span>
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
+      data-testid={testId}
       className="flex-1 bg-app-text/5 border border-app-border rounded-md px-2 min-h-10 outline-none min-w-0"
     >
       {options.map(o => (
@@ -766,6 +1064,68 @@ const AmbientSettings = () => {
 };
 
 /**
+ * What the Director has learned from this reader's own marks.
+ *
+ * The block is built from `tasteMarks` and spliced into every enrichment
+ * prompt, which makes it exactly the kind of thing the app refuses to do
+ * invisibly. Same rule as the visitor brief: the reader sees the payload,
+ * verbatim, before it is ever sent, and can throw it away. A feature that
+ * silently learns is a feature the reader cannot correct.
+ */
+const TasteControls = () => {
+  const marks = useAuraV2Store(s => s.tasteMarks);
+  const clearTaste = useAuraV2Store(s => s.clearTaste);
+  const [show, setShow] = useState(false);
+  const block = useMemo(() => tasteBlock(marks), [marks]);
+
+  // Nothing marked yet. Say what would start it rather than showing an empty box.
+  if (!block) {
+    return (
+      <p className="text-[11px] text-muted leading-snug">
+        <b>Your marks teach it.</b> Select a span and give it a performance or a
+        colour of your own, and the Director starts seeing a few of your calls
+        before it reads. Clearing one of its cues teaches it just as much.
+      </p>
+    );
+  }
+  const shown = selectTaste(marks).length;
+  return (
+    <div className="rounded-lg border border-app-border/60 px-2 py-2 flex flex-col gap-1.5">
+      <div className="flex items-center justify-between">
+        <button
+          onClick={() => setShow(!show)}
+          className="inline-flex items-center gap-1 text-[11px] text-muted hover:text-app-text transition-colors"
+          data-testid="taste-toggle"
+        >
+          <ChevronDown size={13} className={cn('transition-transform', show && 'rotate-180')} />
+          Your marks in its prompt · {shown}
+        </button>
+        <button
+          onClick={clearTaste}
+          className="px-2 py-1 rounded-md text-[11px] bg-app-text/10 hover:bg-app-text/20"
+          title="Forget every mark the Director has learned from. Your marks on the page stay exactly as they are."
+          data-testid="taste-forget"
+        >
+          Forget
+        </button>
+      </div>
+      {show && (
+        <pre
+          className="text-[10px] leading-snug text-muted whitespace-pre-wrap font-mono max-h-48 overflow-y-auto"
+          data-testid="taste-block"
+        >
+          {block}
+        </pre>
+      )}
+      <span className="text-[11px] text-muted leading-snug">
+        Sent with every scene read, so it directs more like you do. Forgetting
+        this does not touch the marks on your pages.
+      </span>
+    </div>
+  );
+};
+
+/**
  * Live Reaction — reading with someone beside you.
  *
  * Sits under Ask Character because it is the same idea inverted: there you ask
@@ -791,6 +1151,7 @@ const LiveReactionControls = () => {
   const frame = useAppStore(s => s.liveReactionFrame);
   const setFrame = useAppStore(s => s.setLiveReactionFrame);
   const visitors = useAuraV2Store(s => (storyId ? s.visitorsByStory[storyId] : undefined));
+  const [inviting, setInviting] = useState(false);
 
   // Everyone who could watch with you: the cast, plus anyone brought in.
   const who = useMemo(() => {
@@ -815,15 +1176,36 @@ const LiveReactionControls = () => {
       {on && (
         <div className="flex flex-col gap-1.5 px-2 pb-1">
           <label className="text-[11px] text-muted">Who is watching</label>
-          <select
-            className={field}
-            value={reactor}
-            onChange={(e) => setReactor(e.target.value)}
-            data-testid="live-reactor"
-          >
-            <option value="">{story?.characterName || 'The character'}</option>
-            {who.map(n => <option key={n} value={n}>{n}</option>)}
-          </select>
+          <div className="flex items-center gap-1.5">
+            <select
+              className={field}
+              value={reactor}
+              onChange={(e) => setReactor(e.target.value)}
+              data-testid="live-reactor"
+            >
+              <option value="">{story?.characterName || 'The character'}</option>
+              {who.map(n => <option key={n} value={n}>{n}</option>)}
+            </select>
+            {/* The same door as the interview's cast strip: the moment you are
+              * choosing who watches with you is the moment you notice the person
+              * you want is not on the list. */}
+            <button
+              onClick={() => setInviting(true)}
+              title="Bring someone in from another chat, or from a card"
+              data-testid="live-invite"
+              className="shrink-0 grid place-items-center min-h-9 min-w-9 rounded-md border
+                border-dashed border-app-text/20 text-app-text/50 hover:text-app-text
+                hover:border-app-text/40"
+            >
+              <Plus size={14} />
+            </button>
+          </div>
+          {inviting && (
+            <InviteSheet
+              onClose={() => setInviting(false)}
+              onInvited={(name) => setReactor(name)}
+            />
+          )}
 
           <label className="text-[11px] text-muted mt-1">How much they can see</label>
           <select
@@ -1025,6 +1407,7 @@ const SceneDirectorSection = () => {
             onChange={setAskCharacter}
             testId="ask-character-toggle"
           />
+          <TasteControls />
           <LiveReactionControls />
           <span className="text-[11px] text-muted">
             The Director reads each passage's mood, location, and feeling so the
@@ -1055,6 +1438,9 @@ const SceneDirectorSection = () => {
 
 export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFormat: () => void; onOpenRefine: () => void }) => {
   const store = useAppStore();
+  // Same sanitiser the renderer runs, so the panel can never show a channel the
+  // page is not actually drawing.
+  const markupPresets = useMemo(() => sanitizeMarkupPresets(store.markupPresets), [store.markupPresets]);
   const [configName, setConfigName] = useState('');
   const voices = useVoices();
   const customFonts = useFontStore(s => s.fonts);
@@ -1152,6 +1538,7 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
                 { value: 'typewriter', label: 'Typewriter' },
                 { value: 'medieval', label: 'Medieval' },
                 { value: 'comic', label: 'Comic' },
+                { value: 'calligraphy', label: 'Calligraphy' },
                 { value: 'dyslexic', label: 'OpenDyslexic' },
                 ...customFonts.map(f => ({ value: `custom:${f.id}`, label: `${f.name} (yours)` })),
               ]}
@@ -1282,7 +1669,7 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
               <div className="pt-2">
                 <p className="text-xs font-medium mb-1.5 opacity-80">Streaming text effect</p>
                 <div className="grid grid-cols-3 gap-2">
-                  {(['none', 'fade', 'blur', 'ink', 'glitch', 'rise'] as const).map(effect => (
+                  {(['none', 'fade', 'blur', 'ink', 'glitch', 'rise', 'quill', 'type'] as const).map(effect => (
                     <button
                       key={effect}
                       onClick={() => store.setStreamEffect(effect)}
@@ -1387,6 +1774,20 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
                   onChange={store.setFocusMagnifier}
                   testId="focus-magnifier"
                 />
+                {store.focusMagnifier && (
+                  <SelectRow
+                    label="Look"
+                    value={store.magnifierStyle}
+                    onChange={(v) => store.setMagnifierStyle(v as MagnifierStyle)}
+                    testId="magnifier-style"
+                    options={MAGNIFIER_STYLES.map(m => ({ value: m.id, label: m.label }))}
+                  />
+                )}
+                {store.focusMagnifier && (
+                  <p className="px-2 -mt-1 text-[11px] opacity-60">
+                    {MAGNIFIER_STYLES.find(m => m.id === store.magnifierStyle)?.hint}
+                  </p>
+                )}
                 <div className="flex gap-2 items-center text-sm px-2 py-1">
                   <span className="w-20 shrink-0">Zoom</span>
                   <input
@@ -1778,7 +2179,37 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
                 { value: '', label: 'Match Theme' },
               ]}
             />
+            <p className="px-1 text-[11px] opacity-60">
+              Double-quoted speech. The other marks in the prose have their own
+              settings below.
+            </p>
           </Section>
+
+          <Section title="Other Markup">
+            <p className="px-1 -mt-1 text-[11px] opacity-60">
+              What the rest of the AI’s punctuation means. Each ships with a
+              default and is on already — change one only if you want to.
+            </p>
+            {MARKUP_CHANNELS.map(ch => (
+              <ChannelRow
+                key={ch.id}
+                channel={ch}
+                preset={markupPresets[ch.id]}
+                onChange={(patch) => store.setMarkupPreset(ch.id, patch)}
+              />
+            ))}
+            {!isDefaultMarkup(markupPresets) && (
+              <button
+                onClick={store.resetMarkupPresets}
+                data-testid="markup-reset"
+                className="self-start px-2 py-1 text-[11px] rounded-md hover:bg-app-text/5 opacity-70"
+              >
+                Reset to defaults
+              </button>
+            )}
+          </Section>
+
+          <CharacterColorSection />
 
           {store.currentStory && (
             <Section title="Profile Pictures">
@@ -1915,6 +2346,7 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
                 <span>Export story as Markdown</span>
               </button>
               <ExportAsPageButton />
+              <ExportCutButton />
               <AudiobookButton />
               <ExportWithEditsButton story={store.currentStory} />
             </Section>

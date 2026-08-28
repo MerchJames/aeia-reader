@@ -10,7 +10,8 @@ import { resolveContent } from '../utils/lens';
 import { readerEmphasis } from '../utils/performMarkup';
 import { mergePerformCues } from '../utils/scenePerform';
 import { resolveWeather } from '../utils/sceneWeather';
-import { stickyWeather } from '../utils/sceneVfx';
+import { useSceneVfx, useSceneWeather } from '../hooks/useSceneWeather';
+import { SceneVfx } from './SceneVfx';
 import { SceneFx } from './SceneFx';
 import { useEntityHighlighter } from './EntityTooltip';
 import { useSceneDirector } from '../hooks/useSceneDirector';
@@ -25,45 +26,9 @@ import { AskCharacter } from './AskCharacter';
 import { LiveReactor } from './LiveReactor';
 import { SceneImageModal } from './SceneImageModal';
 import { deleteArt, releaseArtUrl } from '../lib/artStorage';
-import { FocusVars, focusMoved, focusVars } from '../utils/readingFocus';
-
-/**
- * The rect of the newest revealed character — where the reader's eye is.
- *
- * The obvious version of this (a Range over the element, collapsed to the end)
- * silently returns NO rects: the end boundary of a block element sits after its
- * last child, not inside any text. That measured zero for every reader, and the
- * magnifier only appeared to work because it fell through to a `.word-reveal`
- * span — which exists only when the stream effect is on, so with default
- * settings the feature did nothing at all. Select the final CHARACTER of the
- * last text node instead: a non-collapsed range always has a real box, and its
- * height is the line height the focus band is sized from.
- */
-/**
- * The rect of the newest revealed character — where the reader's eye is.
- *
- * The DOM of a streaming passage holds exactly the text revealed so far, so its
- * last glyph IS the reveal edge. Measure it; never count words to find it (a
- * derived index drifted behind by however many words the markdown renderer
- * handled differently) and never search the whole message row (that finds
- * trailing chrome — swipe controls, the caret — instead of the prose).
- */
-const revealEdgeRect = (row: HTMLElement): DOMRect | undefined => {
-  const prose = (row.querySelector('.markdown-body') as HTMLElement | null) ?? row;
-  const walker = document.createTreeWalker(prose, NodeFilter.SHOW_TEXT);
-  let last: Text | null = null;
-  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
-    if ((n.textContent ?? '').trim()) last = n as Text;
-  }
-  if (!last?.data.length) return undefined;
-  const end = last.data.replace(/\s+$/, '').length || last.data.length;
-  const range = document.createRange();
-  range.setStart(last, Math.max(0, end - 1));
-  range.setEnd(last, end);
-  const rects = range.getClientRects();
-  const r = rects[rects.length - 1] ?? range.getBoundingClientRect();
-  return r.height > 0 ? r : undefined;
-};
+import { resolveCharColors, sanitizeMarkupPresets } from '../utils/markupStyles';
+import { BoxSelect } from './BoxSelect';
+import { Capture, describeCapture } from '../utils/boxSelect';
 
 /** Themes that read better without chat bubbles. */
 const MINIMAL_BUBBLE_THEMES = new Set(['book', 'notebook', 'essay', 'newspaper']);
@@ -99,23 +64,15 @@ export const ReaderDisplay = () => {
   const { scenes, active: scene, activeId: activeSceneId } = useScenes();
   const atmosphereOn = store.sceneTheming && store.themeEffects;
 
-  // Particle weather for the passage being read. The Director's call wins; with
-  // no read (or none named) the prose itself is enough — "snow was falling"
-  // should snow whether or not the AI ever looked at it. Falls back to whatever
-  // weather the scene already established, so fog doesn't blink out mid-scene.
-  const weather = React.useMemo(() => {
-    if (!atmosphereOn) return undefined;
-    const msg = store.streamingMessage
-      ?? [...store.visibleMessages].reverse().find(m => m.role !== 'user');
-    if (!msg) return undefined;
-    const d = storyId ? v2.sceneByStory[storyId]?.[msg.id] : undefined;
-    return resolveWeather(
-      d,
-      msg.content,
-      stickyWeather(scene, msg.id, storyId ? v2.sceneByStory[storyId] : undefined),
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [atmosphereOn, store.streamingMessage?.id, store.visibleMessages, storyId, scene, v2.sceneByStory]);
+  // Particle weather for the passage being read — see `useSceneWeather`, which
+  // is where the rules live now that all five views share them.
+  const weatherMsg = store.streamingMessage
+    ?? [...store.visibleMessages].reverse().find(m => m.role !== 'user');
+  const weather = useSceneWeather(scene, weatherMsg);
+  // Screen effects — a flash on an impact, a desaturate over grief. These
+  // existed only on the Stage and in the VN, which is what "Scene Read effects
+  // don't show in Story and Chat" actually meant.
+  const vfx = useSceneVfx(scene, weatherMsg?.id);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   // The currently-streaming message element — the focus target that the
@@ -137,7 +94,7 @@ export const ReaderDisplay = () => {
   const wasHighlightRef = useRef(false);
 
   const [selPopover, setSelPopover] = React.useState<
-    { x: number; y: number; text: string; messageId?: string } | null
+    { x: number; y: number; bottom?: number; text: string; messageId?: string; framed?: boolean } | null
   >(null);
   const [noteDraft, setNoteDraft] = React.useState('');
   const [threadOpen, setThreadOpen] = React.useState<
@@ -220,38 +177,6 @@ export const ReaderDisplay = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [store.isAutofocusMode]);
 
-  /* ── The reading magnifier ────────────────────────────────────────────────
-   * Autofocus scales the whole page; this lights the words as they arrive.
-   *
-   * The reveal edge is found with a collapsed Range at the end of the active
-   * message rather than by hunting for a `.word-reveal` span — those only exist
-   * while `streamEffect` is on, and the magnifier has to work regardless. The
-   * result is written to CSS custom properties, so the paint is a mask and no
-   * glyph ever moves (see utils/readingFocus for why that matters).
-   */
-  const focusRef = useRef<FocusVars | null>(null);
-  const spotRef = useRef<HTMLDivElement>(null);
-  const magnify = store.isAutofocusMode && store.focusMagnifier;
-
-  /* The spotlight. Measured off the reveal edge and written to the scrim's own
-   * custom properties — the text is never touched, which is what keeps this
-   * clear of the font-size zoom, the bubble chrome and every other view. */
-  useLayoutEffect(() => {
-    const spot = spotRef.current;
-    if (!magnify || !spot) return;
-    // The streaming passage while one is revealing; otherwise the last one the
-    // reader arrived at, so the light does not vanish the moment playback stops.
-    const row = activeRef.current
-      ?? (scrollRef.current?.querySelector('.message-block:last-of-type') as HTMLElement | null);
-    if (!row) return;
-    const edge = revealEdgeRect(row);
-    if (!edge) return;
-    const next = focusVars(edge);
-    if (!next || !focusMoved(focusRef.current, next)) return;
-    focusRef.current = next;
-    for (const [k, v] of Object.entries(next)) spot.style.setProperty(k, v);
-  });
-
   const handleScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
@@ -303,32 +228,48 @@ export const ReaderDisplay = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [store.isHighlightMode]);
 
+  /* The frame tool. Streaming pauses on entry for the same reason highlight
+   * mode pauses it: the words are the target, and a target that is still
+   * growing moves out from under the box between the drag and the release. */
+  const boxMode = store.isBoxMode;
+  useEffect(() => {
+    if (!boxMode) return;
+    if (store.isStreaming) store.setIsStreaming(false);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { e.preventDefault(); useAppStore.getState().setIsBoxMode(false); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [boxMode]);
+
+  /* A frame produces exactly what a text selection produces, so it goes to the
+   * same popover — every action the reader already knows works on it unchanged.
+   * Anchored to the frame's own edges, not to a DOM range. */
+  const onFramed = useCallback((result: Capture, anchor: { x: number; y: number; bottom: number }) => {
+    const st = useAppStore.getState();
+    st.setIsBoxMode(false);
+    setNoteDraft('');
+    setSelPopover({ ...anchor, text: result.text, messageId: result.messageId, framed: true });
+    setToast(describeCapture(result));
+  }, []);
+
+  const onFrameCancel = useCallback((reason: 'empty' | 'tiny' | 'escape') => {
+    if (reason === 'tiny') return;   // a click, not a frame — stay in the tool
+    useAppStore.getState().setIsBoxMode(false);
+    if (reason === 'empty') setToast('Nothing in the frame');
+  }, []);
+
   useEffect(() => {
     if (!toast) return;
     const t = setTimeout(() => setToast(null), 1400);
     return () => clearTimeout(t);
   }, [toast]);
 
-  useEffect(() => {
-    if (!store.isAutofocusMode) return;
-
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-      const s = useAppStore.getState();
-      const ZOOM_STEP = 0.1;
-      const PAN_STEP = 30;
-
-      switch (e.key.toLowerCase()) {
-        case 'w': s.setAutofocusZoom(Math.min(3, s.autofocusZoom + ZOOM_STEP)); break;
-        case 's': s.setAutofocusZoom(Math.max(0.5, s.autofocusZoom - ZOOM_STEP)); break;
-        case 'a': s.setAutofocusPanX(s.autofocusPanX + PAN_STEP); break;
-        case 'd': s.setAutofocusPanX(s.autofocusPanX - PAN_STEP); break;
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [store.isAutofocusMode]);
+  /* Rebuilt through the sanitiser rather than read raw: persisted settings
+   * outlive the build that wrote them, and a channel this build does not know
+   * about must not reach a className. */
+  const markup = useMemo(() => sanitizeMarkupPresets(store.markupPresets), [store.markupPresets]);
 
   const themeDef = THEMES[store.theme] ?? THEMES.dark;
   const minimalBubbles = MINIMAL_BUBBLE_THEMES.has(store.theme);
@@ -385,6 +326,23 @@ export const ReaderDisplay = () => {
     }
     return map;
   }, [store.chains]);
+
+  /**
+   * The word-arrival effect actually in force.
+   *
+   * Exactly the rule `resolveMsgAnim` uses for the block animation just below:
+   * while ambient effects are on, a theme's signature wins — and the settings
+   * panel already tells the reader that in those words ("Some themes bring
+   * their own signature reveal while ambient effects are on"). Turning ambient
+   * effects off hands every choice back.
+   *
+   * Not conditioned on the reader's value being "still the default": the
+   * reading modes set `streamEffect` themselves, so "default" is three
+   * different values depending on the mode, and a rule nobody can predict is
+   * worse than one that is simply stated.
+   */
+  const effectiveStreamEffect =
+    (store.themeEffects && themeDef.streamEffect) || store.streamEffect;
 
   const resolveMsgAnim = useCallback((msg: Message) => {
     const chain = chainByMessageId.get(msg.id);
@@ -445,7 +403,7 @@ export const ReaderDisplay = () => {
       node = node.parentNode;
     }
     setNoteDraft('');
-    setSelPopover({ x: rect.left + rect.width / 2, y: rect.top, text, messageId });
+    setSelPopover({ x: rect.left + rect.width / 2, y: rect.top, bottom: rect.bottom, text, messageId });
   };
 
   const saveHighlight = (color: string) => {
@@ -477,6 +435,9 @@ export const ReaderDisplay = () => {
     setNoteDraft('');
     setToast('Note saved');
   };
+
+  /** The last passage the reader has arrived at, for the magnifier's fallback. */
+  const lastReadId = store.visibleMessages[store.visibleMessages.length - 1]?.id;
 
   const renderBlock = (msg: Message, content: string, isStreamingMsg = false) => {
     const chain = chainByMessageId.get(msg.id);
@@ -520,7 +481,7 @@ export const ReaderDisplay = () => {
         onSceneImage={store.imageBaseUrl ? sceneImage : undefined}
         sceneArt={storyId ? v2.artByStory[storyId]?.[msg.id] : undefined}
         onRemoveArt={removeArt}
-        streamEffect={store.streamEffect}
+        streamEffect={effectiveStreamEffect}
         expressiveText={store.expressiveText}
         ttsReading={store.ttsEnabled && store.ttsPending && isStreamingMsg}
         emphasis={emphasis}
@@ -539,7 +500,11 @@ export const ReaderDisplay = () => {
         phoneDialogueOnly={store.phoneDialogueOnly}
         dialogueColor={store.dialogueColor}
         dialogueStyle={store.dialogueStyle}
+        markup={markup}
         dialogueAnimation={store.dialogueAnimation}
+        charColors={resolveCharColors(
+          msg.name, store.characterColors, store.characterChannelColors, store.characterColorsEnabled,
+        )}
         hideMetadata={store.hideMetadata}
         oocHandling={store.oocHandling}
         autoFormat={store.autoFormat}
@@ -555,6 +520,10 @@ export const ReaderDisplay = () => {
         showImages={store.showImages}
         swipeSelections={store.swipeSelections}
         activeRef={activeRef}
+        /* Where the magnifier looks. The streaming passage while one is
+         * revealing, and otherwise the last one the reader reached — so the
+         * light does not go out the moment playback stops. */
+        revealEdge={isStreamingMsg || (!store.streamingMessage && msg.id === lastReadId)}
         onMessageClick={handleMessageClick}
         onImageClick={setLightbox}
         onShowDialogueTip={showDialogueTip}
@@ -575,6 +544,7 @@ export const ReaderDisplay = () => {
     <>
     <SceneAtmosphere scene={scene} activeId={activeSceneId} enabled={atmosphereOn} />
     {weather && <SceneFx fx={weather.fx} level={weather.level} fixed />}
+    <SceneVfx kind={vfx} beatKey={weatherMsg?.id ?? 'x'} />
     {store.sceneTheming && !store.isAutofocusMode && (
       <SceneSpine scenes={scenes} activeSceneId={scene?.id} />
     )}
@@ -597,6 +567,11 @@ export const ReaderDisplay = () => {
           {store.isHighlightMode && (
             <div className="bg-blue-500 text-white px-4 py-1.5 rounded-full shadow-lg text-xs font-bold tracking-widest uppercase">
               Highlighting
+            </div>
+          )}
+          {store.isBoxMode && (
+            <div className="bg-accent text-white px-4 py-1.5 rounded-full shadow-lg text-xs font-bold tracking-widest uppercase">
+              Framing
             </div>
           )}
         </div>
@@ -685,9 +660,16 @@ export const ReaderDisplay = () => {
       </div>
     </div>
 
+    {/* The frame tool's surface. Above the prose and below the card it produces,
+      * so the card it opens is immediately clickable. */}
+    {store.isBoxMode && (
+      <BoxSelect rootRef={scrollRef} onCapture={onFramed} onCancel={onFrameCancel} />
+    )}
+
     {selPopover && (
       <SelectionPopover
         sel={selPopover}
+        prefer={selPopover.framed ? 'below' : 'above'}
         noteDraft={noteDraft}
         setNoteDraft={setNoteDraft}
         onClose={() => setSelPopover(null)}
@@ -705,6 +687,12 @@ export const ReaderDisplay = () => {
           setSelPopover(null);
           setNoteDraft('');
         }}
+        onRewrite={store.aiBaseUrl && store.aiModel ? () => {
+          if (!selPopover.messageId) return;
+          store.sendToRewrite(selPopover.messageId, selPopover.text);
+          window.getSelection()?.removeAllRanges();
+          setSelPopover(null);
+        } : undefined}
         onPerform={store.scenePerformance ? (kind) => {
           if (storyId && selPopover.messageId) {
             const text = selPopover.text.trim();
@@ -749,12 +737,6 @@ export const ReaderDisplay = () => {
       />
     )}
 
-    {/* The reading spotlight: one fixed scrim with a hole where the words are
-      * arriving. It sits ABOVE the text and below the app's controls, and never
-      * touches the passage itself — which is why it works the same in every
-      * view and cannot interfere with the autofocus zoom. */}
-    {magnify && <div ref={spotRef} className="reading-spotlight" aria-hidden="true" />}
-
     {/* Anchored to the beat on screen — the streaming one while it reads, else
       * the last one the reader has arrived at. Scroll back and the interview you
       * had at that beat is the one that reopens. */}
@@ -770,7 +752,7 @@ export const ReaderDisplay = () => {
     />
 
     {toast && (
-      <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[75] px-4 py-2 rounded-full bg-app-text text-app-bg text-sm font-medium shadow-xl pointer-events-none">
+      <div className="fixed bottom-48 left-1/2 -translate-x-1/2 z-[75] px-4 py-2 rounded-full bg-app-text text-app-bg text-sm font-medium shadow-xl pointer-events-none">
         {toast}
       </div>
     )}

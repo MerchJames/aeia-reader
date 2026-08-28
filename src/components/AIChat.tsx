@@ -18,15 +18,21 @@ import { cardToPromptBlock, pinsToPromptBlock, sheetsToPromptBlock } from '../ut
 import { cn } from '../utils/cn';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { buildZoneBody, flatWithIndex, zoneSummary } from '../utils/contextZone';
-import { visitorsToPromptBlock } from '../utils/visitor';
+import { buildVisitorTurnMessages, visitorsToPromptBlock } from '../utils/visitor';
+import { arcsBefore, throughlineBlock, throughlineFor } from '../utils/throughline';
+import { ThroughlinePanel } from './ThroughlinePanel';
+import { askText } from '../utils/aiCall';
+import { getStory } from '../lib/storage';
 import type { CardInfo } from '../types';
 import { resolveContent } from '../utils/lens';
 import { buildCowritePayload } from '../utils/cowrite';
+import { narrativeBlocksFor, renderNarrativeBlocks } from '../utils/narrativeBlocks';
+import { castOf } from '../utils/askCharacter';
 import { ContextZoneBuilder } from './ContextZoneBuilder';
 import { VisitorPanel } from './VisitorPanel';
 import { CowritePanel } from './CowritePanel';
 import { SummarizePanel } from './SummarizePanel';
-import { AiAdvancedConfig, ChatTurn, CowriteRunSpec, Message } from '../types';
+import { AiAdvancedConfig, CardInfo as Card, ChatTurn, CowriteRunSpec, Message, VisitorTurnSpec } from '../types';
 
 type Scope = 'page' | 'here' | 'all' | 'swipes' | 'zones';
 
@@ -41,14 +47,21 @@ interface ContextOpts {
   zoneId?: string;
 }
 
-/** Gather the transcript for the chosen scope, resolving the live streaming text. */
-const collectTranscript = (scope: Scope): { name: string; content: string }[] => {
+/**
+ * Gather the transcript for the chosen scope, resolving the live streaming text.
+ *
+ * Message ids ride along because a visitor's turn needs the same scene the
+ * reader chose, in a form `clampHistory` can budget — and inventing ids for it
+ * would let a clamp silently fail open, which for this feature means handing a
+ * stranger the end of the story.
+ */
+const collectTranscript = (scope: Scope): { id: string; name: string; content: string }[] => {
   const { chains, currentChainIndex, currentMessageIndex, streamingMessage, streamedText } = useAppStore.getState();
   const text = (m: { id: string; content: string }) =>
     m.id === streamingMessage?.id ? streamedText : m.content;
 
   if (scope === 'page') {
-    return (chains[currentChainIndex]?.messages ?? []).map(m => ({ name: m.name, content: text(m) }));
+    return (chains[currentChainIndex]?.messages ?? []).map(m => ({ id: m.id, name: m.name, content: text(m) }));
   }
   if (scope === 'swipes') {
     // Every alternate version (swipe) of the message the reader is sitting on —
@@ -56,13 +69,13 @@ const collectTranscript = (scope: Scope): { name: string; content: string }[] =>
     const m = chains[currentChainIndex]?.messages?.[currentMessageIndex];
     if (!m) return [];
     const variants = m.swipes && m.swipes.length > 1 ? m.swipes : [m.content];
-    return variants.map((v, i) => ({ name: `${m.name} — version ${i + 1}`, content: v }));
+    return variants.map((v, i) => ({ id: `${m.id}#${i}`, name: `${m.name} — version ${i + 1}`, content: v }));
   }
-  const flat: { name: string; content: string }[] = [];
+  const flat: { id: string; name: string; content: string }[] = [];
   outer: for (let ci = 0; ci < chains.length; ci++) {
     for (let mi = 0; mi < chains[ci].messages.length; mi++) {
       const m = chains[ci].messages[mi];
-      flat.push({ name: m.name, content: text(m) });
+      flat.push({ id: m.id, name: m.name, content: text(m) });
       if (scope === 'here' && ci === currentChainIndex && mi === currentMessageIndex) break outer;
     }
   }
@@ -161,6 +174,23 @@ const buildContext = (opts: ContextOpts): string => {
     )
     : '';
 
+  /**
+   * Who the reader is playing, and what has already happened to them elsewhere.
+   *
+   * Placed BEFORE the story text, unlike the visitor block: a visitor is
+   * somebody arriving into this scene and belongs in the high-attention tail,
+   * while the protagonist is who the reader has been all along and reads as
+   * setup. It is also clamped — only arcs ordered before this one — so it can
+   * never hand the model the end of a story the reader has not reached.
+   */
+  const spineBlock = currentStory
+    ? throughlineBlock(
+      throughlineFor(useAuraV2Store.getState().throughlines, currentStory.id),
+      currentStory.id,
+      currentStory.characterName,
+    )
+    : '';
+
   const assembled = [
     `You are a reading assistant embedded in "Aeia Reader", helping the reader with a story / roleplay chat titled "${currentStory?.title ?? 'Untitled'}".`,
     currentStory?.characterName ? `Main character: ${currentStory.characterName}.` : '',
@@ -169,6 +199,7 @@ const buildContext = (opts: ContextOpts): string => {
     `Help them summarize, recap, explain, discuss, synthesize, or write in-character — using ONLY the material below. Reply in markdown; LaTeX in $…$ / $$…$$ is supported.`,
     focusBlock,
     cardBlock ? `\n${cardBlock}` : '',
+    spineBlock ? `\n${spineBlock}` : '',
     '',
     '--- STORY TEXT ---',
     body,
@@ -245,6 +276,10 @@ const estimateContextChars = (opts: ContextOpts): number => {
   // approximating it, and keeps the readout exact for the one thing a reader
   // is most likely to wonder about the cost of.
   extra += visitorsToPromptBlock(v2.visitorsByStory[sid], currentStory?.characterName).length;
+  // Counted too, so the size readout stays honest about what is actually sent.
+  extra += throughlineBlock(
+    throughlineFor(v2.throughlines, sid), sid, currentStory?.characterName,
+  ).length;
 
   return body + extra + 700;
 };
@@ -294,8 +329,27 @@ const TurnView = React.memo(({
   const content = turn.variants[turn.activeVariant] ?? turn.variants[0] ?? '';
   const many = turn.variants.length > 1;
   const isAssistant = turn.role === 'assistant';
+  // Provenance, but only where it changes what the text IS: a visitor's voice,
+  // a Lens draft, a cowrite. `scopeLabel` is set on ordinary replies too, and
+  // stamping "Up to here" over every bubble would be noise rather than
+  // information. A visitor's turn gets the accent, because a line written by a
+  // character on loan from another chat must never read as the assistant's.
+  const provenance = isAssistant && turn.scopeLabel
+    && (turn.visitorSpec || turn.lensTargetId || turn.cowriteSpec)
+    ? turn.scopeLabel : null;
   return (
     <div className={cn('flex flex-col', turn.role === 'user' ? 'items-end' : 'items-start')}>
+      {provenance && (
+        <span
+          className={cn(
+            'text-[10px] uppercase tracking-wide mb-0.5 px-1',
+            turn.visitorSpec ? 'text-accent font-bold' : 'text-muted',
+          )}
+          data-testid="turn-provenance"
+        >
+          {provenance}
+        </span>
+      )}
       <div
         className={cn(
           'max-w-[85%] px-3.5 py-2.5 rounded-2xl text-sm',
@@ -477,6 +531,7 @@ export const AIChat = () => {
     aiModel: s.aiModel,
     aiAdvanced: s.aiAdvanced,
     lensEditTarget: s.lensEditTarget,
+    lensEditFocus: s.lensEditFocus,
     // Actions are stable references, so including them never triggers a re-render.
     setAiModel: s.setAiModel,
     setAiBaseUrl: s.setAiBaseUrl,
@@ -485,6 +540,7 @@ export const AIChat = () => {
     setAiOpen: s.setAiOpen,
     restreamFromId: s.restreamFromId,
     setLensEditTarget: s.setLensEditTarget,
+    setLensEditFocus: s.setLensEditFocus,
   })));
   const [input, setInput] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -553,6 +609,13 @@ export const AIChat = () => {
 
   // Lens Edit: draft an AI rewrite of a chosen message into the Lens override layer.
   const [lensMode, setLensMode] = useState(false);
+  const [spineOpen, setSpineOpen] = useState(false);
+  /** How many earlier stories travel into this one — the button's count. */
+  const throughlines = useAuraV2Store(s => s.throughlines);
+  const spineArcs = useMemo(() => {
+    const t = throughlineFor(throughlines, storyId);
+    return t && storyId ? arcsBefore(t, storyId).length : 0;
+  }, [throughlines, storyId]);
   const [lensTargetId, setLensTargetId] = useState<string>('');
   // flatWithIndex allocates an object per message across the whole story — a real
   // cost on mount for long stories. Only Lens needs it, so build it lazily: when
@@ -719,6 +782,13 @@ export const AIChat = () => {
     const v2 = useAuraV2Store.getState();
     // Rewrite whatever is currently shown, so successive edits build on each other.
     const current = resolveContent(entry.msg, v2.overridesByStory[storyId], !!v2.lensOnByStory[storyId]);
+    // Passage structure — dialogue/thought/beat/shout, each attributed to a
+    // speaker — supplements the raw passage so the rewrite is less likely to
+    // conflate who said or thought what, especially on a multi-voice passage.
+    const cast = castOf(flat.map(f => f.msg), store.currentStory?.userName);
+    const structure = renderNarrativeBlocks(narrativeBlocksFor(
+      current, entry.msg.name, { cast, dialogue: v2.sceneByStory[storyId]?.[targetId]?.dialogue },
+    ));
 
     setError(null);
     setStreaming(true);
@@ -736,7 +806,11 @@ export const AIChat = () => {
       ].filter(Boolean).join('\n');
       const apiMsgs: ChatMsg[] = [
         { role: 'system', content: system },
-        { role: 'user', content: `INSTRUCTION: ${instruction}\n\nPASSAGE (speaker: ${entry.msg.name}):\n${current}` },
+        {
+          role: 'user',
+          content: `INSTRUCTION: ${instruction}\n\nPASSAGE (speaker: ${entry.msg.name}):\n${current}`
+            + (structure ? `\n\nPASSAGE STRUCTURE:\n${structure}` : ''),
+        },
       ];
       const params = samplerParamsFrom(adv);
       let full: string;
@@ -818,6 +892,85 @@ export const AIChat = () => {
     }
   };
 
+  /**
+   * Write one turn AS a visiting character.
+   *
+   * The counterpart to interviewing them in Ask Character: there they answer a
+   * question about a beat, here they act in one. Same boundary in both — the
+   * turn lands in the reader's chat as a DRAFT and nothing writes it into the
+   * story. A character on loan from another chat is the last thing that should
+   * get to edit this one.
+   *
+   * What they are shown is the scene the reader's own context scope selected,
+   * and the prompt says which scope that was, so a visitor shown one page does
+   * not talk as though they had read the book.
+   */
+  const runVisitorTurn = async (
+    threadId: string, regenTurnId: string | null, spec: VisitorTurnSpec,
+  ) => {
+    if (!storyId) return;
+    const v2 = useAuraV2Store.getState();
+    const visitor = (v2.visitorsByStory[storyId] ?? []).find(v => v.id === spec.visitorId);
+    if (!visitor) { setError(`${spec.name} is no longer in this story.`); return; }
+    setError(null);
+    setStreaming(true);
+    setStreamText('');
+    const controller = new AbortController();
+    abortRef.current = controller;
+    try {
+      const scene = collectTranscript(scope === 'zones' || scope === 'swipes' ? 'here' : scope);
+      // Their own card, when the reader has left it switched on: the brief is
+      // what they KNOW, the card is how they SOUND, and a brief alone writes a
+      // character who is factually right and generically voiced.
+      const card: Card | undefined = visitor.useCard === false
+        ? undefined
+        : (await getStory(visitor.sourceStoryId))?.card;
+      const full = (await askText(
+        { base: resolvedBase || candidateBases(store.aiBaseUrl)[0], key: store.aiApiKey, model: store.aiModel },
+        buildVisitorTurnMessages({
+          visitor,
+          card,
+          hostTitle: store.currentStory?.title ?? 'this story',
+          hostCharacter: store.currentStory?.characterName,
+          hostUser: store.currentStory?.userName,
+          scene,
+          sceneLabel: SCOPES.find(sc => sc.value === scope)?.label,
+          instruction: spec.instruction,
+        }),
+        {
+          label: `${visitor.name} is writing`,
+          reader: samplerParamsFrom(adv),
+          signal: controller.signal,
+        },
+      )).trim();
+      if (!full) throw new Error('The model returned an empty turn.');
+      if (regenTurnId) appendVariant(storyId, threadId, regenTurnId, full);
+      else addTurn(storyId, threadId, {
+        role: 'assistant', variants: [full], activeVariant: 0,
+        scopeLabel: `⁘ ${visitor.name} speaks`, visitorSpec: { ...spec, name: visitor.name },
+      });
+    } catch (e: any) {
+      if (e?.name !== 'AbortError') setError(e?.message ?? 'Request failed.');
+    } finally {
+      setStreaming(false);
+      setStreamText('');
+      abortRef.current = null;
+    }
+  };
+
+  const startVisitorTurn = (visitorId: string, name: string, instruction?: string) => {
+    if (!storyId || streaming) return;
+    const threadId = ensureActiveThread(storyId);
+    addTurn(storyId, threadId, {
+      role: 'user', variants: [`⁘ ${name}, take a turn${instruction ? `: ${instruction}` : ''}`], activeVariant: 0,
+    });
+    // Get out of the way, as Cowrite does when it runs. The drawer is a tall
+    // panel directly above the conversation, and leaving it open pushes the
+    // turn the reader just asked for below the fold of its own thread.
+    setVisitorsOpen(false);
+    void runVisitorTurn(threadId, null, { visitorId, name, instruction });
+  };
+
   const startCowrite = (spec: CowriteRunSpec) => {
     if (!storyId || streaming) return;
     const threadId = ensureActiveThread(storyId);
@@ -835,11 +988,22 @@ export const AIChat = () => {
 
     if (lensMode) {
       if (!lensTarget) { setError('Pick a message to edit.'); return; }
+      /* A framed span becomes part of the INSTRUCTION, not a separate field:
+       * the Lens already sends the whole passage as the thing being revised,
+       * so what the focus adds is "this part of it", in the reader's own
+       * words. Quoted with a delimiter the prose cannot contain. */
+      const focus = store.lensEditFocus?.trim();
+      const instruction = focus
+        ? `${content}\n\nApply this to the following part of the passage, and leave the rest as written:\n<<<\n${focus}\n>>>`
+        : content;
       addTurn(storyId, threadId, {
-        role: 'user', variants: [`✎ Lens edit #${lensTarget.index}: ${content}`], activeVariant: 0,
+        role: 'user',
+        variants: [`✎ Lens edit #${lensTarget.index}: ${content}${focus ? ' — on the framed span' : ''}`],
+        activeVariant: 0,
       });
       setInput('');
-      await runLens(threadId, null, lensTarget.msg.id, content);
+      store.setLensEditFocus(null);
+      await runLens(threadId, null, lensTarget.msg.id, instruction);
       return;
     }
 
@@ -852,7 +1016,8 @@ export const AIChat = () => {
     if (streaming || !storyId || !activeThread) return;
     const last = turns[turns.length - 1];
     if (last?.role !== 'assistant') return;
-    if (last.cowriteSpec) void runCowrite(activeThread.id, last.id, last.cowriteSpec);
+    if (last.visitorSpec) void runVisitorTurn(activeThread.id, last.id, last.visitorSpec);
+    else if (last.cowriteSpec) void runCowrite(activeThread.id, last.id, last.cowriteSpec);
     else if (last.lensTargetId) void runLens(activeThread.id, last.id, last.lensTargetId, last.lensInstruction ?? '');
     else void runAssistant(activeThread.id, last.id);
   };
@@ -1143,10 +1308,34 @@ export const AIChat = () => {
               >
                 ⁘ Visitors{activeVisitors > 0 ? ` ${activeVisitors}` : ''}
               </button>
+              {/* Beside Visitors, and deliberately: a visitor is somebody ELSE
+                * arriving from another chat, and a throughline is YOU arriving
+                * from one. Same machinery, opposite direction. */}
+              <button
+                onClick={() => setSpineOpen(v => !v)}
+                title="Who you are across your chats"
+                data-testid="throughline-toggle"
+                className={cn(
+                  'text-[11px] px-2 py-1 rounded-md border whitespace-nowrap transition-colors',
+                  spineArcs > 0
+                    ? 'border-accent bg-accent/10 text-accent font-bold'
+                    : 'border-app-border hover:bg-app-text/5',
+                )}
+              >
+                ⟜ Throughline{spineArcs > 0 ? ` ${spineArcs}` : ''}
+              </button>
             </div>
             {visitorsOpen && (
               <div className="pt-1">
-                <VisitorPanel />
+                <VisitorPanel
+                  busy={streaming}
+                  onSpeak={(v, instruction) => startVisitorTurn(v.id, v.name, instruction)}
+                />
+              </div>
+            )}
+            {spineOpen && (
+              <div className="pt-1 max-h-[60vh] overflow-hidden rounded-lg border border-app-border">
+                <ThroughlinePanel onClose={() => setSpineOpen(false)} />
               </div>
             )}
           </div>
@@ -1244,7 +1433,28 @@ export const AIChat = () => {
                 <span className="flex-1 min-w-0 truncate text-muted" title={lensTarget?.msg.content}>
                   {lensTarget ? `${lensTarget.msg.name}: ${lensTarget.msg.content.replace(/\s+/g, ' ').slice(0, 40)}` : 'no message selected'}
                 </span>
-                <button onClick={() => setLensMode(false)} className="p-0.5 rounded hover:bg-app-text/10 opacity-70 hover:opacity-100 shrink-0" title="Exit Lens edit"><X size={13} /></button>
+                <button onClick={() => { setLensMode(false); store.setLensEditFocus(null); }} className="p-0.5 rounded hover:bg-app-text/10 opacity-70 hover:opacity-100 shrink-0" title="Exit Lens edit"><X size={13} /></button>
+              </div>
+            )}
+            {/* A span the reader framed on the page. Shown, never implied: this
+              * is what will be quoted to the model, so they get to read it and
+              * to take it off again. */}
+            {lensMode && store.lensEditFocus && (
+              <div
+                className="flex items-center gap-1.5 text-[11px] rounded-md bg-app-text/5 border border-app-border px-2 py-1.5"
+                data-testid="lens-focus"
+              >
+                <span className="opacity-60 shrink-0">On</span>
+                <span className="flex-1 min-w-0 truncate italic" title={store.lensEditFocus}>
+                  &ldquo;{store.lensEditFocus.replace(/\s+/g, ' ')}&rdquo;
+                </span>
+                <button
+                  onClick={() => store.setLensEditFocus(null)}
+                  className="p-0.5 rounded hover:bg-app-text/10 opacity-70 hover:opacity-100 shrink-0"
+                  title="Revise the whole passage instead"
+                >
+                  <X size={12} />
+                </button>
               </div>
             )}
             <div className="flex items-end gap-2">

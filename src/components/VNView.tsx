@@ -5,12 +5,15 @@ import { resolveContent } from '../utils/lens';
 import { useScenes } from '../hooks/useScenes';
 import { useSceneDirector } from '../hooks/useSceneDirector';
 import { SceneAtmosphere } from './SceneAtmosphere';
+import { useSceneVfx, useSceneWeather } from '../hooks/useSceneWeather';
 import { processText, balanceEmphasis, truncateToWord } from '../utils/textProcessor';
 import { MOOD_COLOR, sceneAtmosphere } from '../utils/sceneMood';
 import { bucketFor } from '../lib/spriteStorage';
 import { spriteFor, useSpriteStore } from '../stores/useSpriteStore';
 import { backdropForScene, useBackdropStore } from '../stores/useBackdropStore';
 import { reactionFor, renderWithEmphasis } from './StageView';
+import { MarkupRenderContext } from '../utils/bookLayout';
+import { resolveCharColors } from '../utils/markupStyles';
 import { latestSpeech } from '../utils/dialogueSegments';
 import { readerEmphasis } from '../utils/performMarkup';
 import { mergePerformCues, performMatcher } from '../utils/scenePerform';
@@ -110,19 +113,11 @@ export const VNView = () => {
     : undefined;
   // See StageView: this view rebuilds its markup every reveal tick, so without
   // a set that outlives the render a cue restarts on every one of them.
-  const vnPlayedRef = useRef<{ key: string; set: Set<string> }>({ key: '', set: new Set() });
+  const vnPlayedRef = useRef<{ key: string; set: Map<string, number> }>({ key: '', set: new Map() });
   const vnPlayedKey = current?.id ?? '';
   if (vnPlayedRef.current.key !== vnPlayedKey) {
-    vnPlayedRef.current = { key: vnPlayedKey, set: new Set() };
+    vnPlayedRef.current = { key: vnPlayedKey, set: new Map() };
   }
-  const primaryHtml = useMemo(
-    () => renderWithEmphasis(
-      beat.primary, emphasis, false, perform, undefined, vnPlayedRef.current.set,
-      performMatcher(perform),
-    ),
-    [beat.primary, emphasis, perform],
-  );
-
   // ----- the cast on stage --------------------------------------------------
   // The character HOLDS the scene (dimmed while the reader speaks — never a
   // bare stage during user turns); the reader joins beside them when they
@@ -133,6 +128,33 @@ export const VNView = () => {
   const speakerName = beat.primaryIsSpeech && speech?.attributed
     ? speech.speaker
     : (current?.name ?? story?.characterName ?? 'Story');
+
+  // The dialogue box's speaker for per-character color: the same attributed
+  // speaker the name band already shows, not just the message's own author —
+  // a voiced NPC's line gets that NPC's color, not the lead's.
+  const markupCtx: MarkupRenderContext = useMemo(() => ({
+    dialogueColor: store.dialogueColor,
+    dialogueStyle: store.dialogueStyle,
+    dialogueAnimation: store.dialogueAnimation,
+    markup: store.markupPresets,
+    charColors: resolveCharColors(
+      speakerName, store.characterColors, store.characterChannelColors, store.characterColorsEnabled,
+    ),
+    animate: !store.streamingMessage,
+  }), [
+    store.dialogueColor, store.dialogueStyle, store.dialogueAnimation, store.markupPresets,
+    store.characterColors, store.characterChannelColors, store.characterColorsEnabled,
+    speakerName, store.streamingMessage,
+  ]);
+
+  const primaryHtml = useMemo(
+    () => renderWithEmphasis(
+      beat.primary, emphasis, false, perform, undefined, vnPlayedRef.current.set,
+      performMatcher(perform), markupCtx,
+    ),
+    [beat.primary, emphasis, perform, markupCtx],
+  );
+
   const sprites = useSpriteStore(s => s.sprites);
   const spriteUrls = useSpriteStore(s => s.urls);
 
@@ -199,10 +221,7 @@ export const VNView = () => {
   // derived from the passage's read. Falls back to the ASSET-FREE heuristic
   // scene mood/tension when no AI descriptor exists, so effects work AI-off.
   const beatKey = `${current?.id ?? 'x'}:${beat.primary.slice(0, 32)}`;
-  const vfxSource = descriptor ?? (scene && current
-    ? { mood: scene.mood, tension: scene.tensionById[current.id] ?? scene.peakTension }
-    : undefined);
-  const vfx = store.themeEffects ? deriveVfx(vfxSource) : undefined;
+  const vfx = useSceneVfx(scene, current?.id);
 
   // A `shake` moves the frame itself, so it rides a root class (not the overlay).
   const [shakeNow, setShakeNow] = useState(false);
@@ -218,11 +237,7 @@ export const VNView = () => {
 
   // Weather lingers across a scene (Fablekin's stickyUntil), then the current
   // passage's own fx wins.
-  const weather = resolveWeather(
-    descriptor,
-    rawText,
-    stickyWeather(scene, current?.id, storyId ? v2.sceneByStory[storyId] : undefined),
-  );
+  const weather = useSceneWeather(scene, current ? { id: current.id, content: rawText } : undefined);
 
   // A VN emote pop over the lit sprite at a loud emotion.
   const emote = store.themeEffects ? emoteFor(descriptor?.speaker?.emotion) : null;
@@ -393,6 +408,8 @@ export const VNView = () => {
           <div
             ref={boxRef}
             className={cn('vn-text markdown-body', !beat.primaryIsSpeech && 'vn-narration')}
+            /* Where the magnifier looks — the dialogue box holds the words. */
+            data-reveal-edge=""
             style={{ fontSize: `${store.fontSize}px` }}
             dangerouslySetInnerHTML={{ __html: primaryHtml }}
           />

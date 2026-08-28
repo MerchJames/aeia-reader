@@ -4,18 +4,25 @@ import { useAppStore } from '../store';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { useSummaryStore } from '../stores/useSummaryStore';
 import { resolveContent } from '../utils/lens';
-import { chatCompletion } from '../utils/aiClient';
-import {
-  estimateBudgetChars, runSheetFill, runSummary, SUMMARY_FORMATS, SummaryPassage,
-} from '../utils/summarizer';
+import { askText } from '../utils/aiCall';
+import { estimateBudgetChars, runSheetFill, SummaryPassage } from '../utils/summarizer';
+import { LONG_READ_JOBS, runLongRead } from '../utils/longRead';
 import { cn } from '../utils/cn';
 
 type Mode = 'summary' | 'sheet';
 
 /**
- * Agentic summarizer panel — map-reduce the whole story into one doc that lands
- * in a versioned "Story summary" pin. Runs as a single-model queue (one request
- * at a time) with live progress; re-running appends a new version to the pin.
+ * The long read — turn a story no context could hold into one designed
+ * document, landed in a versioned pin.
+ *
+ * Four jobs over one engine (`utils/longRead.ts`): a running account, a
+ * timeline, a cast chart, and a priming brief for continuing the story
+ * elsewhere. Each pass carries a small digest to the next, which is what stops
+ * section nine introducing a character section two already met.
+ *
+ * Runs as a single-model queue by default. The lanes control trades that
+ * coherence for speed and says so — parallel passes cannot hand notes to each
+ * other, so they read blind.
  */
 export const SummarizePanel = ({
   base, apiKey, model, onClose,
@@ -32,7 +39,8 @@ export const SummarizePanel = ({
   const error = useSummaryStore(s => s.error);
 
   const [mode, setMode] = useState<Mode>('summary');
-  const [formatId, setFormatId] = useState(SUMMARY_FORMATS[0].id);
+  const [jobId, setJobId] = useState(LONG_READ_JOBS[0].id);
+  const [lanes, setLanes] = useState(1);
   const [instruction, setInstruction] = useState('');
   const [sheetTitle, setSheetTitle] = useState('Story sheet');
   const [sheetColumns, setSheetColumns] = useState('Character, Role, Status');
@@ -56,13 +64,18 @@ export const SummarizePanel = ({
       .filter(p => p.content.trim());
     if (passages.length === 0) return;
 
-    const fmt = SUMMARY_FORMATS.find(f => f.id === formatId) ?? SUMMARY_FORMATS[0];
+    const job = LONG_READ_JOBS.find(j => j.id === jobId) ?? LONG_READ_JOBS[0];
     const store = useSummaryStore.getState();
     const controller = new AbortController();
     abortRef.current = controller;
     setResult(null);
+    // Every summariser request goes through the shared layer, so a thinking
+    // model's deliberation never lands in the summary the reader reads — and a
+    // reply that ran out of room mid-thought is retried with more, instead of
+    // being reported as an empty summary.
     const send = (messages: any, signal?: AbortSignal) =>
-      chatCompletion(base, apiKey, model, messages, { temperature: 0.3 }, signal);
+      askText({ base, key: apiKey, model }, messages,
+        { label: 'Summarising', params: { temperature: 0.3 }, signal });
 
     // --- Sheet mode: fill a structured table with deduped rows. ---
     if (mode === 'sheet') {
@@ -92,17 +105,22 @@ export const SummarizePanel = ({
 
     store.begin();
     try {
-      const doc = await runSummary({
+      const read = await runLongRead({
+        job,
         passages,
         budgetChars,
-        instruction: instruction.trim() || fmt.instruction,
         card: story.card,
+        title: story.title,
+        instruction: instruction.trim() || undefined,
+        concurrency: lanes,
         send,
         signal: controller.signal,
-        onPhase: (p, d, t) => useSummaryStore.getState().step(p, d, t),
+        onPhase: (p, d, t) => useSummaryStore.getState().step(
+          p === 'assembling' ? 'reducing' : 'mapping', d, t),
       });
+      const doc = read.document;
       if (controller.signal.aborted) { store.end(); return; }
-      if (!doc) { store.fail('No summary was produced.'); return; }
+      if (!doc) { store.fail('Nothing came back to build a document from.'); return; }
 
       // Land in the story's summary pin — version it if it already exists.
       const v2now = useAuraV2Store.getState();
@@ -112,7 +130,7 @@ export const SummarizePanel = ({
         : undefined;
       if (existing) {
         v2now.addPinVersion(story.id, existing.id, {
-          content: doc, source: 'ai', instruction: `Summary — ${fmt.name}`,
+          content: doc, source: 'ai', instruction: job.label,
         });
       } else {
         v2now.addPin(story.id, {
@@ -167,25 +185,53 @@ export const SummarizePanel = ({
       </div>
 
       {mode === 'summary' ? (
-        <div>
-          <p className="text-xs font-medium mb-1.5 opacity-80">Format</p>
-          <div className="grid grid-cols-2 gap-1.5">
-            {SUMMARY_FORMATS.map(f => (
-              <button
-                key={f.id}
-                onClick={() => setFormatId(f.id)}
-                disabled={running}
-                className={cn(
-                  'py-1.5 text-xs rounded-md border transition-colors',
-                  formatId === f.id
-                    ? 'border-accent bg-accent/10 text-accent font-bold'
-                    : 'border-transparent bg-app-text/5 hover:bg-app-text/10',
-                )}
-              >
-                {f.name}
-              </button>
-            ))}
+        <div className="space-y-2">
+          <div>
+            <p className="text-xs font-medium mb-1.5 opacity-80">Document</p>
+            <div className="grid grid-cols-2 gap-1.5">
+              {LONG_READ_JOBS.map(j => (
+                <button
+                  key={j.id}
+                  onClick={() => setJobId(j.id)}
+                  disabled={running}
+                  title={j.purpose}
+                  data-testid={`long-read-${j.id}`}
+                  className={cn(
+                    'py-1.5 text-xs rounded-md border transition-colors capitalize',
+                    jobId === j.id
+                      ? 'border-accent bg-accent/10 text-accent font-bold'
+                      : 'border-transparent bg-app-text/5 hover:bg-app-text/10',
+                  )}
+                >
+                  {j.id}
+                </button>
+              ))}
+            </div>
           </div>
+          {/* The trade, stated where it is made. One lane is the whole reason
+            * this engine beats the map-reduce it replaced; more lanes give that
+            * back for speed, and a reader who is not told will read the seams
+            * as the model being bad at its job. */}
+          <label className="flex items-center gap-2 text-xs">
+            <span className="opacity-80">At once</span>
+            <input
+              type="range"
+              min={1}
+              max={4}
+              step={1}
+              value={lanes}
+              disabled={running}
+              onChange={e => setLanes(Number(e.target.value))}
+              data-testid="long-read-lanes"
+              className="flex-1 accent-current"
+            />
+            <span className="tabular-nums w-4 text-right">{lanes}</span>
+          </label>
+          <p className="text-[11px] text-muted leading-snug">
+            {lanes === 1
+              ? 'One at a time: each stretch is handed what the last one learned, so the document stays coherent end to end.'
+              : `${lanes} at a time — faster, and each stretch reads blind. Sections will not know about each other, and the seams show.`}
+          </p>
         </div>
       ) : (
         <div className="space-y-1.5">

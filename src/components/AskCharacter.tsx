@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Eye, EyeOff, Loader2, MessageCircle, Send, Trash2, X } from 'lucide-react';
+import { Eye, EyeOff, Loader2, MessageCircle, Plus, Send, Trash2, X } from 'lucide-react';
+import { InviteSheet } from './InviteSheet';
 import { useAppStore } from '../store';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { useSpriteStore, spriteFor } from '../stores/useSpriteStore';
@@ -9,7 +10,7 @@ import {
 } from '../utils/askCharacter';
 import { bucketFor, EmotionBucket } from '../lib/spriteStorage';
 import { buildVisitorAskMessages, isUsable, type Visitor } from '../utils/visitor';
-import { chatCompletion, mergeSamplers } from '../utils/aiClient';
+import { askText } from '../utils/aiCall';
 import { parseAnswer } from '../utils/askCharacter';
 import { getStory } from '../lib/storage';
 import type { CardInfo } from '../types';
@@ -149,6 +150,7 @@ export const AskCharacter = ({ messageId, mood }: Props) => {
   const onScreen = store.streamingMessage?.name?.trim()
     ?? store.visibleMessages[store.visibleMessages.length - 1]?.name?.trim();
   const [pinnedSubject, setPinnedSubject] = useState<string | null>(null);
+  const [inviting, setInviting] = useState(false);
   const subject = (pinnedSubject && cast.includes(pinnedSubject) ? pinnedSubject : null)
     ?? (onScreen && cast.includes(onScreen) ? onScreen : null)
     ?? cast[0]
@@ -229,8 +231,8 @@ export const AskCharacter = ({ messageId, mood }: Props) => {
       // memory. A cast member gets the ordinary interview.
       const answer = guest
         ? parseAnswer(
-          await chatCompletion(
-            store.aiBaseUrl, store.aiApiKey, store.aiModel,
+          await askText(
+            { base: store.aiBaseUrl, key: store.aiApiKey, model: store.aiModel },
             buildVisitorAskMessages({
               visitor: guest,
               card: guest.useCard === false ? undefined : guestCards[guest.name],
@@ -243,8 +245,13 @@ export const AskCharacter = ({ messageId, mood }: Props) => {
               question: q,
               mood,
             }),
-            mergeSamplers({ temperature: 0.85, max_tokens: 500 }, samplerParamsFrom(store.aiAdvanced)),
-            abort.current.signal,
+            {
+              label: `Asking ${subject}`,
+              params: { temperature: 0.85 },
+              reader: samplerParamsFrom(store.aiAdvanced),
+              budget: 500,
+              signal: abort.current.signal,
+            },
           ),
           guest.name,
         )
@@ -374,7 +381,10 @@ export const AskCharacter = ({ messageId, mood }: Props) => {
             </div>
           </div>
 
-          {cast.length > 1 && (
+          {/* The strip always shows now, even for a lone character — it is where
+            * "invite someone" lives, and hiding the door until there are already
+            * two people in the room is exactly backwards. */}
+          {(
             <div className="shrink-0 flex items-center gap-1 px-3 py-1.5 border-b border-app-text/10
               overflow-x-auto" data-testid="ask-cast">
               {cast.map(name => {
@@ -407,6 +417,16 @@ export const AskCharacter = ({ messageId, mood }: Props) => {
                   </button>
                 );
               })}
+              <button
+                onClick={() => setInviting(true)}
+                title="Bring someone in from another chat, or from a card"
+                data-testid="ask-invite"
+                className="flex items-center gap-1 rounded-full px-2 py-0.5 text-xs shrink-0
+                  border border-dashed border-app-text/20 text-app-text/45 hover:text-app-text/80
+                  hover:border-app-text/40 transition-colors"
+              >
+                <Plus size={11} /> Invite
+              </button>
               {pinnedSubject && (
                 <button
                   onClick={() => setPinnedSubject(null)}
@@ -417,6 +437,14 @@ export const AskCharacter = ({ messageId, mood }: Props) => {
                 </button>
               )}
             </div>
+          )}
+          {inviting && (
+            <InviteSheet
+              onClose={() => setInviting(false)}
+              // Straight to them — the reader asked for this person because they
+              // wanted to talk to them, not to admire the roster.
+              onInvited={(name) => setPinnedSubject(name)}
+            />
           )}
 
           <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-3">

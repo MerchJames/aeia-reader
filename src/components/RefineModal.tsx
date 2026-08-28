@@ -6,6 +6,8 @@ import { resolveContent } from '../utils/lens';
 import { samplerParamsFrom } from '../utils/aiClient';
 import { extract, buildGrounding, fidelity, entitySet, Extraction, PosClass } from '../utils/narrativeExtractor';
 import { generateRefinement, RefineMode } from '../utils/narrativeDirector';
+import { narrativeBlocksFor, renderNarrativeBlocks } from '../utils/narrativeBlocks';
+import { castOf } from '../utils/askCharacter';
 import { cn } from '../utils/cn';
 
 /**
@@ -69,6 +71,19 @@ export const RefineModal = ({ onClose }: { onClose: () => void }) => {
   const source = useMemo(() => (msg ? resolveContent(msg, overrides, lensOn) : ''), [msg, overrides, lensOn]);
   const ex = useMemo(() => extract(source), [source]);
 
+  // Passage structure — dialogue/thought/beat/shout, each attributed to a
+  // speaker — handed to the model alongside the grounding, so a rewrite is
+  // less likely to conflate who said or thought what.
+  const cast = useMemo(
+    () => castOf(store.chains.flatMap(c => c.messages), store.currentStory?.userName),
+    [store.chains, store.currentStory?.userName],
+  );
+  const descriptor = storyId && msg ? v2.sceneByStory[storyId]?.[msg.id] : undefined;
+  const structure = useMemo(
+    () => (msg ? renderNarrativeBlocks(narrativeBlocksFor(source, msg.name, { cast, dialogue: descriptor?.dialogue })) : ''),
+    [source, msg, cast, descriptor],
+  );
+
   const [mode, setMode] = useState<RefineMode>('restyle');
   const [target, setTarget] = useState('');
   const [showHl, setShowHl] = useState(true);
@@ -93,7 +108,7 @@ export const RefineModal = ({ onClose }: { onClose: () => void }) => {
     abort.current = new AbortController();
     try {
       const out = await generateRefinement(
-        { text: source, mode, target, grounding: buildGrounding(ex) },
+        { text: source, mode, target, grounding: buildGrounding(ex), structure },
         { base: store.aiBaseUrl, key: store.aiApiKey, model: store.aiModel, params: samplerParamsFrom(store.aiAdvanced) },
         abort.current.signal,
       );

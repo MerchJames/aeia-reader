@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Bot, Clapperboard, MessageSquare, Pin, Type, X, Volume2 } from 'lucide-react';
+import React, { useLayoutEffect, useRef, useState } from 'react';
+import { Bot, Clapperboard, MessageSquare, Pin, Type, Wand2, X, Volume2 } from 'lucide-react';
 import { HIGHLIGHT_COLORS, SceneEmphasis, ScenePerformKind } from '../types';
 
 /**
@@ -29,13 +29,20 @@ const PERFORM_CHOICES: { kind: ScenePerformKind; label: string; hint: string }[]
  * it. A highlight paints BEHIND the words and belongs to the reader's notes;
  * these change the words themselves and belong to the performance.
  */
+/** Breathing room between the card and the words it belongs to. */
+const GAP = 10;
+/** How close to the top edge the card may sit before it flips. */
+const EDGE = 8;
+
 const EMPHASIS_CHOICES: { kind: SceneEmphasis['kind']; label: string; hint: string; cls: string }[] = [
   { kind: 'underline', label: 'Underline', hint: 'Stress, without raising the voice', cls: 'expr-underline' },
   { kind: 'strike', label: 'Strike out', hint: 'Said, then taken back', cls: 'expr-strike' },
 ];
 
 interface SelectionPopoverProps {
-  sel: { x: number; y: number; text: string; messageId?: string };
+  /** `y` is the TOP of the selection, `bottom` its underside — the card sits
+   *  above the words, and flips below them when there is no room. */
+  sel: { x: number; y: number; bottom?: number; text: string; messageId?: string };
   noteDraft: string;
   setNoteDraft: (v: string) => void;
   onClose: () => void;
@@ -43,6 +50,8 @@ interface SelectionPopoverProps {
   onNote: () => void;
   onAskAi: () => void;
   onPin: () => void;
+  /** Send the span to the Lens as the focus of a revision (AI configured). */
+  onRewrite?: () => void;
   /** Attach a reader-authored SFX to the selected span (audio service on). */
   onSfx?: (prompt: string, slow: boolean) => void;
   /** Direct how the selected span performs as it streams; null clears it. */
@@ -53,11 +62,20 @@ interface SelectionPopoverProps {
   onEmphasis?: (mark: { kind: SceneEmphasis['kind']; color?: string } | null) => void;
   /** The treatment already on this span, if any. */
   emphasis?: { kind: SceneEmphasis['kind']; color?: string } | null;
+  /**
+   * Which side to hang from when there is room on both.
+   *
+   * A text selection hangs ABOVE, so the card never covers the words being
+   * marked. A FRAME hangs below, because the reader drew it top-down and their
+   * hand and eye finished at the bottom edge — a card above it appears behind
+   * where they were just looking. Either way, running out of room still wins.
+   */
+  prefer?: 'above' | 'below';
 }
 
 export const SelectionPopover = ({
-  sel, noteDraft, setNoteDraft, onClose, onHighlight, onNote, onAskAi, onPin, onSfx,
-  onPerform, performKind, onEmphasis, emphasis,
+  sel, noteDraft, setNoteDraft, onClose, onHighlight, onNote, onAskAi, onPin, onRewrite, onSfx,
+  onPerform, performKind, onEmphasis, emphasis, prefer = 'above',
 }: SelectionPopoverProps) => {
   const [sfxOpen, setSfxOpen] = useState(false);
   const [performOpen, setPerformOpen] = useState(false);
@@ -70,10 +88,35 @@ export const SelectionPopover = ({
     onSfx(p, sfxSlow);
     setSfxPrompt(''); setSfxOpen(false);
   };
+
+  /**
+   * Flip below the selection when the card would run off the top of the screen.
+   *
+   * It hangs UPWARD from the words by default, which is right — it must not
+   * cover the span you are marking. But opening a panel makes it two or three
+   * times taller, and a span near the top of the page then pushes the card's
+   * own buttons above the viewport, where they cannot be clicked and cannot be
+   * scrolled to (it is `fixed`). Found by an e2e that marked a span, reloaded,
+   * and reached for Clear on the first passage — exactly where a reader lands.
+   */
+  const ref = useRef<HTMLDivElement>(null);
+  const [flip, setFlip] = useState(false);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const height = el.getBoundingClientRect().height;
+    const noRoomAbove = sel.y - GAP - height < EDGE;
+    const noRoomBelow = (sel.bottom ?? sel.y) + GAP + height > window.innerHeight - EDGE;
+    setFlip(prefer === 'below' ? !noRoomBelow : noRoomAbove);
+  }, [sel.y, sel.bottom, prefer, sfxOpen, performOpen, emphOpen]);
+
+  // The underside of the selected words, so a flipped card clears them.
+  const below = (sel.bottom ?? sel.y + 20) + GAP;
   return (
   <div
-    className="fixed z-[70] -translate-x-1/2 -translate-y-full flex flex-col gap-2 p-2.5 rounded-xl bg-surface border border-app-border shadow-2xl w-64"
-    style={{ left: sel.x, top: sel.y - 10 }}
+    ref={ref}
+    className={`fixed z-[70] -translate-x-1/2 flex flex-col gap-2 p-2.5 rounded-xl bg-surface border border-app-border shadow-2xl w-64${flip ? '' : ' -translate-y-full'}`}
+    style={{ left: sel.x, top: flip ? below : sel.y - GAP }}
     onMouseUp={(e) => e.stopPropagation()}
   >
     <div className="flex items-center gap-1.5">
@@ -130,6 +173,19 @@ export const SelectionPopover = ({
       >
         <Bot size={13} /> Ask AI
       </button>
+      {/* Full width under the pair: a revision changes what the passage SAYS,
+        * and it should not sit in a row of things that only annotate it. */}
+      {onRewrite && (
+        <button
+          onClick={onRewrite}
+          disabled={!sel.messageId}
+          data-testid="sel-rewrite"
+          className="col-span-2 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg border border-accent/40 bg-accent/10 text-accent text-xs hover:bg-accent/20 disabled:opacity-40"
+          title="Open the Lens on this passage, focused on these words"
+        >
+          <Wand2 size={13} /> Rewrite this part
+        </button>
+      )}
     </div>
 
     {onPerform && (

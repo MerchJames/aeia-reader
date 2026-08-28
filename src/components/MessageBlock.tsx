@@ -22,7 +22,6 @@ import {
 import { ThemeDef } from '../themes';
 import {
   balanceEmphasis,
-  isDialogueText,
   processText,
   truncateToWord,
 } from '../utils/textProcessor';
@@ -30,9 +29,14 @@ import { isShoutWord, normalizeWord } from '../utils/expressive';
 import {
   PerformKind, RunMatcher, isMarkableWord, performRuns, performWordKinds, runMatcher,
 } from '../utils/scenePerform';
-import { emphasisClass, emphasisKindKey, MARKABLE_EMPHASIS } from '../utils/performMarkup';
+import {
+  FX_LIFETIME_MS, emphasisClass, emphasisKindKey, MARKABLE_EMPHASIS,
+} from '../utils/performMarkup';
 import { attributeSpeaker, aiSpeakerFor, DialogueAttribution } from '../utils/dialogueSegments';
 import { buildStatPanel, isBarStat, StatEntry } from '../utils/statFormatter';
+import {
+  CharColorBundle, MarkupPreset, MarkupPresets, markupClass, quoteChannel,
+} from '../utils/markupStyles';
 import { SceneArtStrip } from './SceneArtStrip';
 
 /** Strip markdown markers for a plain-text context preview. */
@@ -240,7 +244,7 @@ const wrapWords = (
    * fault rather than as direction. Once a word has played, it keeps the LOOK
    * (the classes carry static styling too) and drops the motion.
    */
-  played: Set<number>,
+  played: Map<number, number>,
   /** True when this message has cadence runs to mark — see counter.runs. */
   runs: boolean,
 ): React.ReactNode => {
@@ -273,10 +277,19 @@ const wrapWords = (
       const perf = (perform && first ? perform.get(norm) : undefined) ?? run?.kind;
       if (dir || (perf && !run)) counter.claimed.add(norm);
       const reading = readingWord != null && idx === readingWord;
-      // First render that shows this word gets the motion; every later one
-      // keeps the look and holds still.
-      const settledFx = played.has(idx);
-      if (dir || perf) played.add(idx);
+      // How far into its treatment this word already is (see `played`). A
+      // rebuilt element resumes rather than restarting, and stops for good once
+      // it has had its full run.
+      let fxDelay = 0;
+      let fxDone = false;
+      if (dir || perf) {
+        const first = played.get(idx);
+        if (first === undefined) played.set(idx, Date.now());
+        else {
+          fxDelay = Date.now() - first;
+          fxDone = fxDelay >= FX_LIFETIME_MS;
+        }
+      }
       const inTail = !!style && idx >= settled && idx < settled + WORD_REVEAL_CAP;
       if (!inTail && !emphCls && !reading && !perf) {
         // Ordinary settled/out-of-window word — emit as plain text. Keyed, so a
@@ -295,14 +308,26 @@ const wrapWords = (
               inTail && `word-reveal word-reveal-${style}`,
               emphCls,
               reading && 'tts-reading',
-              settledFx && emphCls && 'fx-played',
+              fxDone && emphCls && 'fx-played',
             )}
-            style={inTail ? { animationDelay: `${delays.get(idx)}ms` } : undefined}
+            style={
+              inTail
+                ? { animationDelay: `${delays.get(idx)}ms` }
+                // Not in the tail, but mid-treatment: resume where it was.
+                : (emphCls && fxDelay && !fxDone ? { animationDelay: `-${fxDelay}ms` } : undefined)
+            }
           >
             {/* The performance treatment nests INSIDE the reveal span so the two
                 animations (arrival + swell/tremble) don't overwrite each other. */}
             {perf
-              ? <span className={cn(`perf-${perf}`, settledFx && 'fx-played')}>{word}</span>
+              ? (
+                <span
+                  className={cn(`perf-${perf}`, fxDone && 'fx-played')}
+                  style={fxDelay && !fxDone ? { animationDelay: `-${fxDelay}ms` } : undefined}
+                >
+                  {word}
+                </span>
+              )
               : word}
           </span>,
         );
@@ -394,6 +419,12 @@ export interface MessageBlockProps {
   dialogueColor: string;
   dialogueStyle: DialogueStyle;
   dialogueAnimation: DialogueAnimation;
+  /** The other four markup channels — aside, beat, shout, heading. */
+  markup: MarkupPresets;
+  /** Resolved per-character (and, advanced, per-channel) color overrides —
+   *  see `resolveCharColors()`. Each channel present overrides that
+   *  channel's own configured color. */
+  charColors?: CharColorBundle;
   hideMetadata: boolean;
   oocHandling: OocHandling;
   autoFormat: boolean;
@@ -409,6 +440,14 @@ export interface MessageBlockProps {
   showImages: boolean;
   swipeSelections: Record<string, number>;
   activeRef?: React.RefObject<HTMLDivElement>;
+  /**
+   * Marks this row as where the newest words are, for the reading magnifier.
+   *
+   * Not the same thing as `isStreamingMsg`: when playback stops there is no
+   * streaming message, and the light has to stay on the last passage the reader
+   * reached rather than vanishing. ReaderDisplay decides which row that is.
+   */
+  revealEdge?: boolean;
   onMessageClick: (id: string) => void;
   onImageClick: (src: string) => void;
   onShowDialogueTip: (e: React.MouseEvent<HTMLElement>, text: string) => void;
@@ -416,6 +455,76 @@ export interface MessageBlockProps {
   markLore: (children: React.ReactNode) => React.ReactNode;
   onSelectSwipe: (id: string, index: number) => void;
 }
+
+/* ------------------------------------------------------------------ */
+/* Markup channels                                                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * How deep inside `**` we are.
+ *
+ * `****shout****` is a strong node inside a strong node, and react-markdown
+ * renders each one with the same component — so the inner node has no way to
+ * know it is the loud one except by being told. React context is that telling:
+ * one provider, set by the outer node, read by the inner.
+ */
+const StrongDepth = React.createContext(0);
+
+const StrongMark = ({
+  markup, charColors, expressiveText, animate, children, ...props
+}: {
+  markup: MarkupPresets;
+  /** Per-character (and, advanced, per-channel) color overrides — see
+   *  `MessageBlockProps.charColors`. */
+  charColors?: CharColorBundle;
+  expressiveText: boolean;
+  animate: boolean;
+  children?: React.ReactNode;
+} & React.HTMLAttributes<HTMLElement>) => {
+  const depth = React.useContext(StrongDepth);
+  const base = depth > 0 ? markup.shout : markup.bold;
+  const charColor = depth > 0 ? charColors?.shout : charColors?.bold;
+  const preset = charColor ? { ...base, color: charColor } : base;
+  return (
+    <strong
+      className={cn(
+        depth > 0 ? 'mk-shout' : 'mk-bold',
+        markupClass(preset, {
+          animate: animate && preset.animation !== 'none',
+          baseWeight: 'font-bold',
+        }),
+        expressiveText && 'expr-key',
+      )}
+      {...props}
+    >
+      {children}
+    </strong>
+  );
+};
+
+/**
+ * `h1`–`h6` overrides for one heading preset.
+ *
+ * All six levels share the channel on purpose: the reader chose a look for "a
+ * heading the AI wrote", and an RP log's `#` versus `###` is not a considered
+ * hierarchy — it is whatever the model felt like that turn. Sizes still come
+ * from the prose stylesheet, so the levels stay distinguishable.
+ */
+const headingRenderers = (
+  preset: MarkupPreset,
+  animate: boolean,
+  wrap: (children: React.ReactNode) => React.ReactNode,
+) => {
+  const className = cn(
+    'mk-heading',
+    markupClass(preset, { animate: animate && preset.animation !== 'none' }),
+  );
+  const make = (Tag: 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6') =>
+    ({ node: _node, children, ...props }: { node?: unknown; children?: React.ReactNode }) => (
+      <Tag className={className} {...props}>{wrap(children)}</Tag>
+    );
+  return { h1: make('h1'), h2: make('h2'), h3: make('h3'), h4: make('h4'), h5: make('h5'), h6: make('h6') };
+};
 
 const MessageContent = React.memo(({
   msg,
@@ -426,6 +535,8 @@ const MessageContent = React.memo(({
   dialogueColor,
   dialogueStyle,
   dialogueAnimation,
+  markup,
+  charColors,
   hideMetadata,
   oocHandling,
   autoFormat,
@@ -455,7 +566,7 @@ const MessageContent = React.memo(({
   wordDelays,
   playedFx,
 }: Pick<MessageBlockProps, 'msg' | 'content' | 'isStreamingMsg' | 'revealComplete' | 'msgAnim' | 'dialogueColor'
-  | 'dialogueStyle' | 'dialogueAnimation' | 'hideMetadata' | 'oocHandling' | 'autoFormat'
+  | 'dialogueStyle' | 'dialogueAnimation' | 'markup' | 'charColors' | 'hideMetadata' | 'oocHandling' | 'autoFormat'
   | 'autoFormatRules' | 'statRules' | 'paragraphSpacing' | 'dialogueOwnLine' | 'smartTypography'
   | 'styleQuotes' | 'substituteNames' | 'characterName' | 'userName' | 'showImages'
   | 'swipeSelections' | 'onImageClick' | 'onSelectSwipe' | 'markLore' | 'onPinContent'
@@ -463,7 +574,7 @@ const MessageContent = React.memo(({
     settledCount: number;
     wordRevealStyle: string | null;
     wordDelays: Map<number, number>;
-    playedFx: Set<number>;
+    playedFx: Map<number, number>;
   }) => {
   const { entries: statEntries, prose: statProse } = buildStatPanel(content, statRules);
   const processedText = isStreamingMsg
@@ -539,41 +650,72 @@ const MessageContent = React.memo(({
             expressiveText
               ? <div className="scene-break" aria-hidden="true">✦ ✦ ✦</div>
               : <hr />,
+          /* An emphasis span is one of three things: speech, an aside, or plain
+           * emphasis. `styleQuotes` delivers the first two here already wrapped
+           * in `*…*`; which quote opened them is what tells them apart. */
           em: ({ node: _node, ...props }) => {
-            const dialogue = isDialogueText(textOf(props.children));
-            if (!dialogue) {
+            const channel = quoteChannel(textOf(props.children));
+            if (!channel) {
               return (
                 <em className="italic opacity-90" {...props}>
                   {wrapWords(markLore(props.children), counter, settledCount, wordRevealStyle, wordDelays, expressiveText, readingWord, emphasisMap, performMap, playedFx, !!runs)}
                 </em>
               );
             }
-            const animate = !isStreamingMsg && dialogueAnimation !== 'none';
+            // The speech channel is still the legacy dialogue settings.
+            // `charColors` (per-character, and advanced per-channel, when the
+            // reader turned that on) overrides whichever channel color would
+            // otherwise apply.
+            const preset = channel === 'speech'
+              ? { color: charColors?.speech || dialogueColor, style: dialogueStyle, animation: dialogueAnimation }
+              : { ...markup.aside, color: charColors?.aside || markup.aside.color };
             return (
               <em
                 className={cn(
-                  dialogueColor,
-                  dialogueStyle === 'italic' || dialogueStyle === 'bold-italic'
-                    ? 'italic' : 'not-italic',
-                  dialogueStyle === 'bold' || dialogueStyle === 'bold-italic'
-                    ? 'font-bold' : 'font-medium',
-                  animate && dialogueAnimation === 'zoom' && 'animate-dialogue-zoom inline-block',
-                  animate && dialogueAnimation === 'pulse' && 'animate-dialogue-pulse inline-block',
-                  animate && dialogueAnimation === 'wave' && 'animate-dialogue-wave inline-block',
-                  animate && dialogueAnimation === 'glow' && 'animate-dialogue-glow',
-                  animate && dialogueAnimation === 'rise' && 'animate-dialogue-rise',
+                  `mk-${channel}`,
+                  markupClass(preset, {
+                    animate: !isStreamingMsg && preset.animation !== 'none',
+                    baseWeight: 'font-medium',
+                  }),
                 )}
                 {...props}
               />
             );
           },
-          strong: ({ node: _node, ...props }) => (
-            <strong
-              className={cn('font-bold text-amber-600 dark:text-amber-400', expressiveText && 'expr-key')}
-              {...props}
-            >
-              {wrapWords(props.children, counter, settledCount, wordRevealStyle, wordDelays, expressiveText, readingWord, emphasisMap, performMap, playedFx, !!runs)}
-            </strong>
+          /* `**beat**` and `****shout****` are the same mdast node at two
+           * depths, and only the parent knows which. The outer node of a
+           * doubled pair renders nothing of its own and hands the depth down;
+           * the inner one dresses itself as the louder channel. */
+          strong: ({ node, ...props }) => {
+            // The node here is HAST, not MDAST — react-markdown hands components
+            // the tree AFTER remark-rehype, so the child to look for is an
+            // `element` with a tagName, not a `strong`. Getting this wrong is
+            // silent: `****` simply renders as `**` and the channel looks dead.
+            const kid = (node as any)?.children?.length === 1
+              ? (node as any).children[0] : null;
+            const doubled = kid?.type === 'element' && kid.tagName === 'strong';
+            if (doubled) {
+              return <StrongDepth.Provider value={1}>{props.children}</StrongDepth.Provider>;
+            }
+            return (
+              <StrongMark
+                markup={markup}
+                charColors={charColors}
+                expressiveText={expressiveText}
+                animate={!isStreamingMsg}
+                {...props}
+              >
+                {wrapWords(props.children, counter, settledCount, wordRevealStyle, wordDelays, expressiveText, readingWord, emphasisMap, performMap, playedFx, !!runs)}
+              </StrongMark>
+            );
+          },
+          /* Headings the AI wrote into a passage. They were never word-wrapped,
+           * which quietly desynced the reveal: `countWords` counts their words
+           * towards `settledCount` and nothing was claiming them back. */
+          ...headingRenderers(
+            markup.heading,
+            !isStreamingMsg,
+            (children) => wrapWords(markLore(children), counter, settledCount, wordRevealStyle, wordDelays, expressiveText, readingWord, emphasisMap, performMap, playedFx, !!runs),
           ),
           // AI-written tables get a hover pin — captured verbatim from the
           // processed source so the dock re-renders exactly what's shown.
@@ -713,6 +855,13 @@ const MessageContent = React.memo(({
     && prev.dialogueColor === next.dialogueColor
     && prev.dialogueStyle === next.dialogueStyle
     && prev.dialogueAnimation === next.dialogueAnimation
+    && prev.markup === next.markup
+    // A fresh bundle is built every render (ReaderDisplay resolves it inline),
+    // so compare the four fields rather than object identity.
+    && prev.charColors?.speech === next.charColors?.speech
+    && prev.charColors?.aside === next.charColors?.aside
+    && prev.charColors?.bold === next.charColors?.bold
+    && prev.charColors?.shout === next.charColors?.shout
     && prev.hideMetadata === next.hideMetadata
     && prev.oocHandling === next.oocHandling
     && prev.autoFormat === next.autoFormat
@@ -767,6 +916,7 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
     viewMode,
     phoneDialogueOnly,
     activeRef,
+    revealEdge,
     onMessageClick,
     onShowDialogueTip,
     onHideDialogueTip,
@@ -793,9 +943,9 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
 
   // Same lifetime as the delays, and for the same reason: a fact about a word's
   // FIRST appearance, which a re-render must not be able to undo.
-  const playedFxRef = useRef<{ key: string; set: Set<number> }>({ key: '', set: new Set() });
+  const playedFxRef = useRef<{ key: string; set: Map<number, number> }>({ key: '', set: new Map() });
   if (playedFxRef.current.key !== delayKey) {
-    playedFxRef.current = { key: delayKey, set: new Set() };
+    playedFxRef.current = { key: delayKey, set: new Map() };
   }
   const playedFx = playedFxRef.current.set;
 
@@ -816,6 +966,7 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
         key={msg.id}
         data-msg-id={msg.id}
         ref={isStreamingMsg ? activeRef : undefined}
+        data-reveal-edge={revealEdge ? '' : undefined}
         onClick={() => onMessageClick(msg.id)}
         data-streaming={isStreamingMsg}
         data-zoomed={isMsgZoomed}
@@ -875,6 +1026,7 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
         data-streaming={isStreamingMsg}
         data-zoomed={isMsgZoomed}
         ref={isStreamingMsg ? activeRef : undefined}
+        data-reveal-edge={revealEdge ? '' : undefined}
         onClick={() => onMessageClick(msg.id)}
         title={isStreamingMsg ? 'Click to play/pause' : 'Click to replay from here'}
         className={cn(
@@ -918,6 +1070,7 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
       data-streaming={isStreamingMsg}
       data-zoomed={isMsgZoomed}
       ref={isStreamingMsg ? activeRef : undefined}
+      data-reveal-edge={revealEdge ? '' : undefined}
       onClick={() => onMessageClick(msg.id)}
       title={isStreamingMsg ? 'Click to play/pause' : 'Click to replay from here'}
       className={cn(
@@ -1032,6 +1185,7 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
     && prev.viewMode === next.viewMode
     && prev.phoneDialogueOnly === next.phoneDialogueOnly
     && prev.activeRef === next.activeRef
+    && prev.revealEdge === next.revealEdge
     && prev.onMessageClick === next.onMessageClick
     && prev.onImageClick === next.onImageClick
     && prev.onShowDialogueTip === next.onShowDialogueTip
@@ -1042,6 +1196,13 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
     && prev.dialogueColor === next.dialogueColor
     && prev.dialogueStyle === next.dialogueStyle
     && prev.dialogueAnimation === next.dialogueAnimation
+    && prev.markup === next.markup
+    // A fresh bundle is built every render (ReaderDisplay resolves it inline),
+    // so compare the four fields rather than object identity.
+    && prev.charColors?.speech === next.charColors?.speech
+    && prev.charColors?.aside === next.charColors?.aside
+    && prev.charColors?.bold === next.charColors?.bold
+    && prev.charColors?.shout === next.charColors?.shout
     && prev.hideMetadata === next.hideMetadata
     && prev.oocHandling === next.oocHandling
     && prev.autoFormat === next.autoFormat

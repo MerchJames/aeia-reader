@@ -16,12 +16,13 @@
 
 import { useEffect, useState } from 'react';
 import { Loader2, Plus, Trash2, UserPlus } from 'lucide-react';
+import { useInviteVisitor } from '../hooks/useInviteVisitor';
 import { useAppStore } from '../store';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { getAllStoryMetas, getStory } from '../lib/storage';
 import { chatCompletion, mergeSamplers, samplerParamsFrom } from '../utils/aiClient';
 import {
-  DOSSIER_FIELDS, FIELD_LABEL, buildDossier, historyFrom, isUsable,
+  DOSSIER_FIELDS, FIELD_LABEL, historyFrom, isUsable, type DossierScope,
   type DossierField, type Visitor,
 } from '../utils/visitor';
 import type { CardInfo, StoryMeta } from '../types';
@@ -32,7 +33,14 @@ const newId = () => `vis-${Date.now().toString(36)}-${Math.random().toString(36)
 const field = 'w-full bg-app-text/5 border border-app-border rounded-md px-2 py-1.5 min-h-11 text-sm outline-none focus:border-accent/50';
 
 /** One dossier, open for reading and correcting. */
-const VisitorCard = ({ visitor, storyId }: { visitor: Visitor; storyId: string }) => {
+const VisitorCard = ({ visitor, storyId, onSpeak, busy }: {
+  visitor: Visitor;
+  storyId: string;
+  /** Have them write one turn into the chat. Absent where there is no chat to
+   *  write into — the panel is also rendered from Settings. */
+  onSpeak?: (visitor: Visitor, instruction?: string) => void;
+  busy?: boolean;
+}) => {
   const update = useAuraV2Store(s => s.updateVisitor);
   const remove = useAuraV2Store(s => s.removeVisitor);
   const [open, setOpen] = useState(false);
@@ -76,6 +84,19 @@ const VisitorCard = ({ visitor, storyId }: { visitor: Visitor; storyId: string }
             {visitor.edited ? ' · edited' : ''}
           </div>
         </button>
+        {onSpeak && (
+          <button
+            onClick={() => onSpeak(visitor)}
+            disabled={!!busy || !isUsable(visitor.fields)}
+            title={isUsable(visitor.fields)
+              ? `Have ${visitor.name} write one turn into the chat. It stays a draft — nothing is written into the story.`
+              : 'Their brief is too thin to write from yet'}
+            data-testid="visitor-speak"
+            className="text-[11px] px-2 py-1 rounded-md border border-app-border hover:bg-app-text/5 disabled:opacity-40 shrink-0"
+          >
+            Take a turn
+          </button>
+        )}
         <button
           onClick={() => remove(storyId, visitor.id)}
           aria-label={`Remove ${visitor.name}`}
@@ -205,8 +226,8 @@ const AddVisitor = ({ storyId, onDone }: { storyId: string; onDone: () => void }
   const [beat, setBeat] = useState(1);
   const [cast, setCast] = useState<string[]>([]);
   const [count, setCount] = useState(0);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [scope, setScope] = useState<DossierScope>('spread');
+  const { invite, busy, progress, error } = useInviteVisitor();
 
   useEffect(() => {
     void getAllStoryMetas().then(list => setMetas(list.filter(m => m.id !== storyId)));
@@ -227,52 +248,11 @@ const AddVisitor = ({ storyId, onDone }: { storyId: string; onDone: () => void }
     });
   }, [sourceId]);
 
+  // The generation itself lives in `useInviteVisitor`, shared with the invite
+  // sheet in the cast strips — one clamp, one record shape, one place to fix.
   const generate = async () => {
     if (!sourceId || !character) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const source = await getStory(sourceId);
-      if (!source) throw new Error('That story could not be loaded.');
-      const history = historyFrom(source.messages);
-      const anchor = history[Math.min(Math.max(1, beat), history.length) - 1];
-      if (!anchor) throw new Error('That story has no readable messages.');
-
-      const { fields, quotes } = await buildDossier(
-        {
-          characterName: character,
-          storyTitle: source.title,
-          userName: source.userName,
-          card: source.card,
-          messages: history,
-          anchorMessageId: anchor.id,
-          hostName: store.currentStory?.characterName,
-        },
-        async (messages) => chatCompletion(
-          store.aiBaseUrl, store.aiApiKey, store.aiModel, messages,
-          mergeSamplers({ temperature: 0.3 }, samplerParamsFrom(store.aiAdvanced)),
-        ),
-      );
-
-      addVisitor(storyId, {
-        id: newId(),
-        name: character,
-        sourceStoryId: sourceId,
-        sourceStoryTitle: source.title,
-        anchorMessageId: anchor.id,
-        anchorBeat: Math.min(Math.max(1, beat), history.length),
-        fields,
-        quotes,
-        met: false,
-        active: true,
-        createdAt: Date.now(),
-      });
-      onDone();
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
+    if (await invite({ sourceId, character, beat, scope })) onDone();
   };
 
   return (
@@ -322,6 +302,30 @@ const AddVisitor = ({ storyId, onDone }: { storyId: string; onDone: () => void }
             They arrive knowing their story only up to this point — nothing past it. Drag back to
             bring in an earlier version of them.
           </p>
+
+          <label className="block">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-muted">
+              How much of their story to read
+            </span>
+            <select
+              value={scope}
+              onChange={e => setScope(e.target.value as DossierScope)}
+              data-testid="visitor-scope"
+              className="w-full mt-1 bg-app-text/5 border border-app-border rounded-md px-2 min-h-10 text-xs"
+            >
+              <option value="spread">Their whole story, sampled</option>
+              <option value="recent">Just where they are now</option>
+              <option value="whole">Read all of it (several calls)</option>
+            </select>
+          </label>
+          {/* The reason this control exists, said plainly — a reader who does
+            * not know the default was the TAIL cannot know why their visitor
+            * came out as a single mood. */}
+          <p className="text-[11px] text-muted leading-snug">
+            A brief written from the last few messages of a long chat reads as a
+            caricature — whatever they happened to be feeling at the end. Sampling
+            spreads the reading across the whole story for the same cost.
+          </p>
         </>
       )}
 
@@ -335,7 +339,9 @@ const AddVisitor = ({ storyId, onDone }: { storyId: string; onDone: () => void }
           className="flex items-center justify-center gap-2 px-3 min-h-11 flex-1 rounded-lg bg-accent text-white text-sm font-medium disabled:opacity-50"
         >
           {busy ? <Loader2 size={15} className="animate-spin" /> : <UserPlus size={15} />}
-          {busy ? 'Reading their story…' : 'Bring them in'}
+          {busy
+            ? (progress ? `Reading their story… ${progress.done}/${progress.total}` : 'Writing their brief…')
+            : 'Bring them in'}
         </button>
         <button
           onClick={onDone}
@@ -348,7 +354,11 @@ const AddVisitor = ({ storyId, onDone }: { storyId: string; onDone: () => void }
   );
 };
 
-export const VisitorPanel = () => {
+export const VisitorPanel = ({ onSpeak, busy }: {
+  /** Wired from the chat panel, where a generated turn has somewhere to land. */
+  onSpeak?: (visitor: Visitor, instruction?: string) => void;
+  busy?: boolean;
+} = {}) => {
   const storyId = useAppStore(s => s.currentStory?.id);
   const aiReady = useAppStore(s => !!s.aiBaseUrl && !!s.aiModel);
   const visitors = useAuraV2Store(s => (storyId ? s.visitorsByStory[storyId] : undefined));
@@ -366,12 +376,22 @@ export const VisitorPanel = () => {
       </p>
       {list.length > 0 && (
         <p className="text-[11px] text-muted leading-snug">
-          To hear one of them speak, open <strong>Ask {'{char}'}</strong> — they appear in its cast,
-          and answer from this brief.
+          {onSpeak
+            ? <>
+                <strong>Take a turn</strong> has one of them write into this chat — a draft, like
+                any other, that never touches the story. To ask them something instead, open{' '}
+                <strong>Ask {'{char}'}</strong>: they appear in its cast and answer from this brief.
+              </>
+            : <>
+                To hear one of them speak, open <strong>Ask {'{char}'}</strong> — they appear in its
+                cast, and answer from this brief.
+              </>}
         </p>
       )}
 
-      {list.map(v => <VisitorCard key={v.id} visitor={v} storyId={storyId} />)}
+      {list.map(v => (
+        <VisitorCard key={v.id} visitor={v} storyId={storyId} onSpeak={onSpeak} busy={busy} />
+      ))}
 
       {adding ? (
         <AddVisitor storyId={storyId} onDone={() => setAdding(false)} />

@@ -5,7 +5,7 @@ import {
 import { useAppStore } from '../store';
 import { committedCount, flatMessages, useAuraV2Store } from '../stores/useAuraV2Store';
 import { Sheet } from '../types';
-import { chatCompletion } from '../utils/aiClient';
+import { askText, salvageArray, salvageObject } from '../utils/aiCall';
 import { cn } from '../utils/cn';
 import { downloadText, safeFilename } from '../utils/exporter';
 
@@ -89,7 +89,10 @@ const locateQuote = (quote: string): string | undefined => {
 
 const parseFindings = (reply: string): Finding[] | null => {
   try {
-    const parsed = JSON.parse(reply.replace(/^```(?:json)?\s*|\s*```$/gi, '').trim());
+    // Shared salvage: fences, prose either side, a chain of thought, and a
+    // reply cut off at the token limit are all ordinary here, and a strict
+    // parse turned any of them into "AI action failed".
+    const parsed = salvageArray(reply);
     if (!Array.isArray(parsed)) return null;
     return parsed
       .filter((f: any) => f && typeof f.issue === 'string')
@@ -257,18 +260,19 @@ export const SheetsSidebar = () => {
           system = 'You are a continuity checker. Compare the provided tracking sheet against the story text and find contradictions, outdated facts, or sheet entries the text disagrees with. Reply ONLY as a JSON array (no markdown, no prose): [{"quote": "<short verbatim excerpt (max 120 chars) copied exactly from the story text where the problem shows>", "issue": "<one-sentence description of the contradiction>"}]. Reply [] if everything is consistent.';
           user = `Sheet:\n${sheetJson}\n\nStory text:\n${text}`;
         }
-        const reply = await chatCompletion(s.aiBaseUrl, s.aiApiKey, s.aiModel, [
+        const reply = await askText({ base: s.aiBaseUrl, key: s.aiApiKey, model: s.aiModel }, [
           { role: 'system', content: system },
           { role: 'user', content: user },
-        ]);
+        ], { label: action === 'continuity' ? 'Checking continuity' : 'Filling the sheet' });
         if (action === 'continuity') {
-          const parsed = parseFindings(reply.trim());
+          const parsed = parseFindings(reply);
           // Structured findings with jump links when the model cooperates;
           // its raw text as a plain report when it doesn't.
           if (parsed) setFindings(parsed);
           else setAiReport(reply.trim());
         } else {
-          const parsed = JSON.parse(reply.replace(/^```json\s*|\s*```$/gi, '').trim());
+          const parsed = salvageObject<any>(reply);
+          if (!parsed) throw new Error('the reply had no sheet in it');
           updateSheet(story.id, currentSheet.id, {
             title: String(parsed.title || currentSheet.title),
             columns: Array.isArray(parsed.columns) && parsed.columns.length

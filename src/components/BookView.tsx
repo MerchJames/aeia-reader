@@ -8,13 +8,17 @@ import { resolveContent } from '../utils/lens';
 import { useScenes } from '../hooks/useScenes';
 import { useSceneDirector } from '../hooks/useSceneDirector';
 import { SceneAtmosphere } from './SceneAtmosphere';
+import { SceneFx } from './SceneFx';
+import { useSceneVfx, useSceneWeather } from '../hooks/useSceneWeather';
+import { SceneVfx } from './SceneVfx';
 import { SceneSpine } from './SceneSpine';
 import { MOOD_COLOR, sceneAtmosphere } from '../utils/sceneMood';
 import { processText, balanceEmphasis, truncateToWord } from '../utils/textProcessor';
 import {
-  BookBlock, BookPage, attachedPlateBlock, chapterBlock, inkWrapTail, pageHtml, paginate,
+  BookBlock, BookPage, MarkupRenderContext, attachedPlateBlock, chapterBlock, inkWrapTail, pageHtml, paginate,
   paginateTail, paragraphBlocks,
 } from '../utils/bookLayout';
+import { resolveCharColors } from '../utils/markupStyles';
 import { cn } from '../utils/cn';
 
 /** ms between tail re-flows while text streams in. */
@@ -125,6 +129,12 @@ export const BookView = () => {
   // continuous semantics regardless of layoutMode. (visibleMessages is
   // per-chain in paginated mode and clears at chain boundaries, which made
   // the book collapse to a blank page whenever streaming crossed a chain.)
+  // Weather follows the beat being read, exactly as it does in the other views.
+  const weatherMsg = store.streamingMessage
+    ?? [...store.visibleMessages].reverse().find(m => m.role !== 'user');
+  const weather = useSceneWeather(scene, weatherMsg);
+  const vfx = useSceneVfx(scene, weatherMsg?.id);
+
   const committedMsgs = useMemo(() => {
     const { chains, currentChainIndex: ci, currentMessageIndex: mi, streamingMessage } = store;
     const out: typeof store.visibleMessages = [];
@@ -146,7 +156,7 @@ export const BookView = () => {
    * because pagination only measures and splits blocks, never rewrites them.
    */
   /** See markSceneHtml: a cue animates once per word, not once per reveal tick. */
-  const livePlayed = useRef<{ key: string; set: Set<string> }>({ key: '', set: new Set() });
+  const livePlayed = useRef<{ key: string; set: Map<string, number> }>({ key: '', set: new Map() });
 
   /** The word map AND this message's cadence matcher — see performMatcher. */
   const performFor = (messageId: string): { kinds: ReturnType<typeof performWordKinds>; match?: RunMatcher } => {
@@ -182,6 +192,17 @@ export const BookView = () => {
     );
   };
 
+  // The channel colors/styles are global; only `charColors` varies per
+  // message (the speaker), so it's resolved fresh for each message below.
+  const markupCtxFor = (name: string, animate: boolean): MarkupRenderContext => ({
+    dialogueColor: store.dialogueColor,
+    dialogueStyle: store.dialogueStyle,
+    dialogueAnimation: store.dialogueAnimation,
+    markup: store.markupPresets,
+    charColors: resolveCharColors(name, store.characterColors, store.characterChannelColors, store.characterColorsEnabled),
+    animate,
+  });
+
   const committedBlocks = useMemo(() => {
     const blocks: BookBlock[] = [];
     for (const msg of committedMsgs) {
@@ -198,7 +219,9 @@ export const BookView = () => {
       // message: one mark stays one mark. The cadence matcher spans them the
       // same way — a run can straddle a paragraph break.
       const claimed = new Set<string>();
-      blocks.push(...paragraphBlocks(text, msg.id, msg.role === 'user', maxParaChars, store.showImages)
+      blocks.push(...paragraphBlocks(
+        text, msg.id, msg.role === 'user', maxParaChars, store.showImages, markupCtxFor(msg.name, true),
+      )
         .map(b => (kinds || match || emph || store.expressiveText
           ? { ...b, html: markSceneHtml(b.html, emph, kinds, claimed, store.expressiveText, undefined, match) }
           : b)));
@@ -213,6 +236,8 @@ export const BookView = () => {
     chapterByStartId, maxParaChars, store.showImages,
     store.scenePerformance, store.sceneEmphasis, store.expressiveText, storyId,
     v2.performMarksByStory, v2.sceneByStory, v2.sfxMarksByStory, v2.emphasisMarksByStory,
+    store.dialogueColor, store.dialogueStyle, store.dialogueAnimation, store.markupPresets,
+    store.characterColors, store.characterChannelColors, store.characterColorsEnabled,
   ]);
 
   // ----- pagination -------------------------------------------------------
@@ -259,8 +284,10 @@ export const BookView = () => {
       const liveClaimed = new Set<string>();
       // The tail is rebuilt on every reveal tick; without a set that outlives
       // the render, every already-revealed marked word re-animates each time.
-      if (livePlayed.current.key !== msg.id) livePlayed.current = { key: msg.id, set: new Set() };
-      tail.push(...paragraphBlocks(live, msg.id, msg.role === 'user', maxParaChars)
+      if (livePlayed.current.key !== msg.id) livePlayed.current = { key: msg.id, set: new Map() };
+      tail.push(...paragraphBlocks(
+        live, msg.id, msg.role === 'user', maxParaChars, true, markupCtxFor(msg.name, false),
+      )
         .map(b => (liveKinds || liveMatch || liveEmph || store.expressiveText
           ? {
             ...b,
@@ -453,6 +480,10 @@ export const BookView = () => {
       className="relative z-10 flex-1 min-h-0 flex items-center justify-center pb-36 sm:pb-24 pt-2"
     >
       <SceneAtmosphere scene={scene} activeId={activeSceneId} enabled={atmosphereOn} />
+      {/* Book had the mood wash and no weather at all, so a scene that snowed in
+        * every other view stopped snowing the moment you opened the book. */}
+      {weather && <SceneFx fx={weather.fx} level={weather.level} />}
+      <SceneVfx kind={vfx} beatKey={weatherMsg?.id ?? 'x'} />
       {store.sceneTheming && <SceneSpine scenes={scenes} activeSceneId={scene?.id} />}
 
       {/* Offscreen column the paginator measures against. */}

@@ -6,8 +6,12 @@ import { useAppStore } from '../store';
 import { ACCENTS, THEMES } from '../themes';
 import { READING_MODES, modeDef } from '../utils/readingModes';
 import { composeScene, heuristicPacket } from '../utils/stylePacket';
+import { exportStoryHtml } from '../utils/htmlExport';
+import { walkStory } from '../utils/storyWalk';
+import { FONT_STACKS } from '../utils/fontEmbed';
 import { AccentColor, Theme, UiMode, ViewMode } from '../types';
-import { chatCompletion, listModels } from '../utils/aiClient';
+import { listModels } from '../utils/aiClient';
+import { askText } from '../utils/aiCall';
 import { playSound } from '../utils/sandboxAudio';
 import { AmbientController } from '../utils/ambient';
 import { cn } from '../utils/cn';
@@ -145,6 +149,141 @@ const KineticDemo = () => {
         <span className="perf-tremble">exactly</span>{' '}
         <span className="perf-drop">what</span>{' '}
         <span className="perf-fade">it would cost her.</span>
+      </p>
+    </div>
+  );
+};
+
+/**
+ * Reading with someone — the passage arriving, and them breaking in on it.
+ *
+ * Described, this sounds like a chatbot bolted to a reader. Shown, it is
+ * obviously not one: the line lands MID-SENTENCE, over words still arriving,
+ * and it is two words long. That is the whole feature and no amount of body
+ * text conveys it.
+ */
+const CompanyDemo = () => {
+  const [beat, setBeat] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setBeat(b => b + 1), 5200);
+    return () => clearInterval(t);
+  }, []);
+  return (
+    <div key={beat} className="rounded-xl border border-app-text/10 bg-app-bg/50 px-4 py-3">
+      <p className="text-[13px] text-app-text/80 leading-relaxed">
+        She reached the last step and stopped. The door was already open, and
+        <span className="tour-late"> the blade was going to sever them, one last time.</span>
+      </p>
+      {/* Below the words, never over them. In the app the bubble is docked at
+          the screen edge with the column well clear of it; in a card this size
+          an absolutely-placed bubble lands on top of the very sentence it is
+          reacting to, which argues against the feature rather than for it. */}
+      <div className="tour-react mt-2 ml-auto flex items-end gap-1.5 w-[15rem] max-w-full">
+        <span className="w-7 h-7 rounded-full bg-accent/20 text-accent border border-app-text/10
+          grid place-items-center text-[10px] font-semibold shrink-0">E</span>
+        <span className="flex-1 min-w-0 rounded-2xl rounded-bl-sm bg-app-surface border border-app-text/10
+          shadow-lg px-2.5 py-1.5">
+          <span className="block text-[10px] text-app-text/45">Elara</span>
+          <span className="block text-[12px] leading-snug">Oh my god. What is going to happen?</span>
+          <span className="block mt-0.5 text-[9px] text-app-text/35 truncate">at “the blade was going to sever”</span>
+        </span>
+      </div>
+    </div>
+  );
+};
+
+/**
+ * A visitor's brief.
+ *
+ * The point that has to land is that this is a SHORT, READABLE, EDITABLE
+ * artifact and not a second transcript — and that the last two lines are the
+ * ones doing the work. So the demo shows the fields, and marks those two.
+ */
+const VisitorDemo = () => (
+  <div className="rounded-xl border border-app-text/10 bg-app-bg/50 p-3 text-[12px] leading-relaxed">
+    <div className="flex items-baseline gap-2 mb-1.5">
+      <span className="font-semibold text-app-text/90">Elara</span>
+      <span className="text-[10px] text-app-text/45">
+        visiting from “Salt and Ash” · as of her message 56
+      </span>
+    </div>
+    {[
+      ['WHO', 'A field surgeon who stopped counting. Dry, exact, hard to rattle.'],
+      ['WANTS', 'To get the last of her people over the pass before the snow.'],
+      ['FEARS', 'That she has already made the decision she is still pretending to weigh.'],
+    ].map(([k, v]) => (
+      <p key={k} className="text-app-text/70">
+        <span className="text-app-text/40 font-medium">{k}: </span>{v}
+      </p>
+    ))}
+    {/* These two are the hallucination control — without them the host story
+        invents a shared history within a sentence. Marked, because a reader who
+        does not know to check them cannot correct them. */}
+    <p className="mt-1.5 text-accent/90">
+      <span className="opacity-60 font-medium">DOES NOT KNOW: </span>
+      Anything that has happened here. She has not left her own valley.
+    </p>
+    <p className="text-accent/90">She and Mara have never met.</p>
+    <p className="mt-2 text-[10px] text-app-text/40">
+      You read this before it is ever used — and you can edit any line of it.
+    </p>
+  </div>
+);
+
+/**
+ * The exported file, exported by the real exporter.
+ *
+ * Genuinely `exportStoryHtml`, on a four-line fixture, dropped into a sandboxed
+ * iframe with scripts off and scaled down — the same principle as the Sandbox
+ * demo. A mock-up of an export is worth nothing, because the whole claim being
+ * made is that the file stands on its own.
+ */
+const ExportDemo = () => {
+  const theme = useAppStore(s => s.theme);
+  const html = useMemo(() => {
+    const messages = [
+      { id: 'm1', name: 'Mara', role: 'ai' as const, content: 'The hearth had burned down to **embers**.' },
+      { id: 'm2', name: 'You', role: 'user' as const, content: 'I said nothing.' },
+      { id: 'm3', name: 'Mara', role: 'ai' as const, content: '"You think I did not know," she said, quite calmly.' },
+    ];
+    const story = {
+      id: 'tour', title: 'A Night at the Hearth', format: 'sillytavern',
+      characterName: 'Mara', userName: 'You', messageCount: messages.length,
+      importedAt: 0, messages,
+    } as never;
+    const chains = [{ id: 'c1', messages, starred: false }] as never;
+    try {
+      return exportStoryHtml(walkStory(story, chains, {}), {
+        theme: THEMES[theme] ?? THEMES.dark,
+        typography: {
+          stack: FONT_STACKS.serif, fontSize: 17, contentWidth: 0, paragraphSpacing: true,
+        },
+        // No reveal script in a thumbnail — it would sit there unplayed.
+        streaming: false,
+        exportedAt: 0,
+      }).html;
+    } catch {
+      return '';
+    }
+  }, [theme]);
+
+  if (!html) return null;
+  return (
+    <div className="rounded-xl border border-app-text/10 overflow-hidden bg-app-bg/50">
+      {/* Scaled down far enough to show a WHOLE page. At half size only the top
+          of the cover was in frame, which showed the mark and not the book. */}
+      <div className="h-[12rem] overflow-hidden">
+        <iframe
+          title="What an exported file looks like"
+          // No scripts, no network — the same terms the real file ships under.
+          sandbox=""
+          srcDoc={html}
+          className="w-[400%] h-[48rem] origin-top-left border-0 pointer-events-none"
+          style={{ transform: 'scale(0.25)' }}
+        />
+      </div>
+      <p className="px-3 py-1.5 text-[10px] text-app-text/40 border-t border-app-text/10">
+        Made by the real exporter, just now. One file — no server, no fonts to fetch, nothing to install.
       </p>
     </div>
   );
@@ -486,11 +625,19 @@ const ConnectDemo = () => {
     setBusy(true); setError(null); setResult(null);
     try {
       store.setAiModel(model);
-      const reply = await chatCompletion(store.aiBaseUrl || base, store.aiApiKey, model, [
-        { role: 'system', content: 'You read a passage and name its mood in ONE short phrase, then a sentence on why. No preamble.' },
-        { role: 'user', content: CONNECT_PASSAGE },
-      ], { temperature: 0, max_tokens: 120 });
-      setResult(reply.trim() || '(the endpoint answered with nothing)');
+      // Through the shared layer for one specific reason: this is the very
+      // first thing a reader's endpoint is ever asked to do, and a thinking
+      // model answering the "is this working?" test with `<think>` reads as a
+      // broken app rather than a working one.
+      const reply = await askText(
+        { base: store.aiBaseUrl || base, key: store.aiApiKey, model },
+        [
+          { role: 'system', content: 'You read a passage and name its mood in ONE short phrase, then a sentence on why. No preamble.' },
+          { role: 'user', content: CONNECT_PASSAGE },
+        ],
+        { label: 'Testing the endpoint', params: { temperature: 0 }, budget: 120 },
+      );
+      setResult(reply || '(the endpoint answered with nothing)');
     } catch (e) {
       setError((e as Error)?.message ?? 'That request failed.');
     } finally { setBusy(false); }
@@ -569,6 +716,9 @@ const DEMOS: Record<OnboardingDemo, () => JSX.Element> = {
   audio: AudioDemo,
   connect: ConnectDemo,
   pins: PinsDemo,
+  company: CompanyDemo,
+  visitor: VisitorDemo,
+  export: ExportDemo,
 };
 
 interface Props {

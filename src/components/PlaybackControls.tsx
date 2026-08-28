@@ -17,7 +17,11 @@ export const PlaybackControls = () => {
     store.chains.length === 0 ||
     store.viewMode === 'overview' ||
     store.viewMode === 'highlights' ||
-    store.viewMode === 'branches'
+    store.viewMode === 'branches' ||
+    // RPG mode has its own transport built into the interface — the command row
+    // and the advance itself. A floating bar on top of the text window would be
+    // a second set of controls for the same job, sitting over the words.
+    store.viewMode === 'rpg'
   ) {
     return null;
   }

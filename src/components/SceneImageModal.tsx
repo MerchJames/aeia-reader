@@ -18,7 +18,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, ImageIcon, Loader2, RefreshCw, Wand2, X } from 'lucide-react';
 import { useAppStore } from '../store';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
-import { chatCompletion, mergeSamplers, samplerParamsFrom } from '../utils/aiClient';
+import { samplerParamsFrom } from '../utils/aiClient';
+import { askText } from '../utils/aiCall';
 import { resolveContent } from '../utils/lens';
 import { processText } from '../utils/textProcessor';
 import { appearanceFromCard, draftPrompt } from '../utils/imagePrompt';
@@ -93,9 +94,16 @@ export const SceneImageModal = ({ messageId, onClose }: { messageId: string; onC
         },
         // A little warmth: an image prompt written at temperature 0 comes back
         // as the same six adjectives for every passage in the story.
-        async (messages) => chatCompletion(
-          store.aiBaseUrl, store.aiApiKey, store.aiModel, messages,
-          mergeSamplers({ temperature: 0.7 }, samplerParamsFrom(store.aiAdvanced)),
+        // Shared layer: the reader edits this prompt before it fires, and a
+        // chain of thought pasted into an image prompt is not a prompt.
+        async (messages) => askText(
+          { base: store.aiBaseUrl, key: store.aiApiKey, model: store.aiModel },
+          messages,
+          {
+            label: 'Writing the image prompt',
+            params: { temperature: 0.7 },
+            reader: samplerParamsFrom(store.aiAdvanced),
+          },
         ),
       );
       setPrompt(result.prompt);
