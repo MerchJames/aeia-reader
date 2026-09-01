@@ -1,4 +1,4 @@
-import { AccentColor, AnimationStyle, FontFamily, Theme } from './types';
+import { AccentColor, AnimationStyle, FontFamily, StreamEffect, Theme } from './types';
 
 /** Accent overrides. `''` keeps the theme's own accent. */
 export const ACCENTS: { id: AccentColor; label: string; hex: string }[] = [
@@ -46,6 +46,14 @@ export interface ThemeDef {
    * on (same precedent as the forced font). User's own pick otherwise.
    */
   animation?: AnimationStyle;
+  /**
+   * Signature PER-WORD arrival, same rule as `animation`.
+   *
+   * Separate because the two are different tracks: `animation` dresses the
+   * block as it lands, this dresses each word as it is revealed. Calligraphy
+   * needs the second one — a page that fades in is not being written.
+   */
+  streamEffect?: StreamEffect;
 }
 
 export const THEMES: Record<Theme, ThemeDef> = {
@@ -86,7 +94,7 @@ export const THEMES: Record<Theme, ThemeDef> = {
   terminal: {
     id: 'terminal', label: 'Terminal (CRT)', isDark: true,
     font: 'mono',
-    rootClass: 'theme-terminal theme-crt',
+    rootClass: 'theme-crt',
     animation: 'decrypt',
     vars: {
       bg: '#000700', surface: '#0a1a0a', text: '#22c55e', muted: '#15803d',
@@ -108,7 +116,6 @@ export const THEMES: Record<Theme, ThemeDef> = {
   phone: {
     id: 'phone', label: 'Phone Chat', isDark: false,
     maxWidth: 'max-w-md',
-    rootClass: 'theme-phone',
     vars: {
       bg: '#e9edf2', surface: '#ffffff', text: '#111827', muted: '#6b7280',
       accent: '#3b82f6', border: 'rgba(17, 24, 39, 0.1)',
@@ -379,6 +386,94 @@ export const THEMES: Record<Theme, ThemeDef> = {
       bg: '#020604', surface: '#06110b', text: '#9fd8a8', muted: '#5a8a63',
       accent: '#c4f0c9', border: '#2e5c38',
       bubbleAi: '#04100a', bubbleUser: '#0a1f12', bubbleUserText: '#c4f0c9',
+    },
+  },
+  /**
+   * Risograph — spot inks on cheap paper, printed one colour at a time.
+   *
+   * The look is entirely in the FAULTS: a riso lays each ink in a separate
+   * pass, so colours never quite line up, the coverage is grainy, and where two
+   * inks overlap you get a third that neither drum could print. Clean it up and
+   * it stops being a riso and becomes flat design. So the misregistration is
+   * the feature — see `.theme-riso` for the ghosted second pass.
+   */
+  riso: {
+    id: 'riso', label: 'Risograph', isDark: false,
+    font: 'sans',
+    maxWidth: 'max-w-[64ch]',
+    rootClass: 'theme-riso',
+    animation: 'rise',
+    vars: {
+      bg: '#f2ede1', surface: '#faf6ec', text: '#22201d', muted: '#7c7466',
+      accent: '#ff4a3d', border: 'rgba(34, 32, 29, 0.22)',
+      bubbleAi: 'rgba(255, 255, 255, 0.72)',
+      bubbleUser: 'rgba(0, 116, 178, 0.16)', bubbleUserText: '#12354d',
+    },
+  },
+  /**
+   * Foil — iridescent stamp on a dark card.
+   *
+   * Modelled on the thing a holographic trading card actually does: the sheen
+   * is not painted ON the letters, it MOVES across them, because what your eye
+   * reads as "foil" is a highlight that changes with the angle you hold it at.
+   * A static rainbow gradient reads as a sticker; a travelling one reads as
+   * metal.
+   */
+  foil: {
+    id: 'foil', label: 'Foil', isDark: true,
+    font: 'sans',
+    maxWidth: 'max-w-[66ch]',
+    rootClass: 'theme-foil',
+    animation: 'blur',
+    vars: {
+      bg: '#0b0a12', surface: '#141322', text: '#eceafd', muted: '#9a95c4',
+      accent: '#8be9ff', border: 'rgba(190, 170, 255, 0.28)',
+      bubbleAi: 'rgba(30, 27, 52, 0.78)',
+      bubbleUser: 'rgba(120, 90, 220, 0.30)', bubbleUserText: '#f4f1ff',
+    },
+  },
+  /**
+   * Vector — a phosphor tube drawing strokes, not pixels.
+   *
+   * Deliberately NOT the app's other CRT: `theme-crt` is a raster screen, so it
+   * is made of scanlines. A vector display has none — the beam draws the line
+   * itself, so everything glows from its own edges, corners burn brighter where
+   * the beam turned, and the whole image swims very slightly. Same era,
+   * opposite machine.
+   */
+  vector: {
+    id: 'vector', label: 'Vector', isDark: true,
+    font: 'mono',
+    maxWidth: 'max-w-[70ch]',
+    rootClass: 'theme-vector',
+    animation: 'decrypt',
+    vars: {
+      bg: '#01060a', surface: 'rgba(6, 22, 28, 0.55)', text: '#7dfcd6', muted: '#2f9b86',
+      accent: '#f7f36a', border: 'rgba(125, 252, 214, 0.42)',
+      bubbleAi: 'transparent', bubbleUser: 'transparent', bubbleUserText: '#f7f36a',
+    },
+  },
+  /**
+   * Calligraphy — a page being written, not displayed.
+   *
+   * The font is only half of it. A script face that fades in reads as a fancy
+   * font; the same face laid down stroke by stroke reads as a hand moving. So
+   * this theme brings its own per-word arrival (`quill`), the same way Hacker
+   * brings `decrypt` — and like every signature, it yields the moment the
+   * reader picks their own.
+   */
+  calligraphy: {
+    id: 'calligraphy', label: 'Calligraphy', isDark: false,
+    font: 'calligraphy',
+    maxWidth: 'max-w-[58ch]',
+    rootClass: 'theme-calligraphy',
+    animation: 'ink',
+    streamEffect: 'quill',
+    vars: {
+      bg: '#f6f1e4', surface: '#fdfaf1', text: '#1f2436', muted: '#6f6a5c',
+      accent: '#2f3d7a', border: 'rgba(47, 61, 122, 0.26)',
+      bubbleAi: 'rgba(253, 250, 241, 0.86)',
+      bubbleUser: 'rgba(47, 61, 122, 0.10)', bubbleUserText: '#1b2340',
     },
   },
   custom: {

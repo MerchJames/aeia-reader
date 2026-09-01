@@ -11,7 +11,9 @@ import { readThread, type AskTurn } from '../utils/askCharacter';
 import type { ReactionPoint } from '../utils/liveReaction';
 import type { EmotionBucket } from '../lib/spriteStorage';
 import type { Visitor } from '../utils/visitor';
+import type { NarrativeFunction } from '../utils/narrativeFunction';
 import type { Arc, Throughline } from '../utils/throughline';
+import type { ZoneTask } from '../utils/zoneTask';
 import {
   moveArc as moveArcIn, orderedArcs, renumber as renumberArcs,
 } from '../utils/throughline';
@@ -260,6 +262,8 @@ const MAX_PIN_VERSIONS = 12;
 /** Generous cap per pinned visual (~25k words) — big summary docs fit intact. */
 const MAX_PIN_CONTENT = 150_000;
 const MAX_ZONES_PER_STORY = 40;
+/** Tasks are hand-authored and few; the cap only stops an import loop. */
+const MAX_TASKS_PER_STORY = 40;
 const MAX_THREADS_PER_STORY = 30;
 /** Trim a thread's history so a runaway conversation can't bloat localStorage. */
 const MAX_TURNS_PER_THREAD = 400;
@@ -395,6 +399,21 @@ interface AuraV2State {
    * hand-marked span exactly like a directed one; these are applied first, so
    * a reader's call always wins over the AI's on the same words. */
   /* Reader-authored typographic marks — story → messageId → spans (persisted). */
+  /**
+   * The narrative-function read of each passage, cached per message.
+   *
+   * Same bargain as `sceneByStory`: labelling is one model call per passage,
+   * decoded greedily so a re-read gives the same answer, and nothing about it
+   * changes as you read — so paying for it twice is paying twice for the same
+   * sentence. `hash` is the passage's content fingerprint (`hashContent`), so
+   * an edited or re-swiped message re-reads itself and a cached label can never
+   * end up describing prose it was not taken from.
+   */
+  functionsByStory: Record<string, Record<string, { hash: string; fns: NarrativeFunction[] }>>;
+  setFunctionRead: (
+    storyId: string, messageId: string, hash: string, fns: NarrativeFunction[],
+  ) => void;
+
   emphasisMarksByStory: Record<string, Record<string, EmphasisMark[]>>;
   addEmphasisMark: (storyId: string, messageId: string, mark: Omit<EmphasisMark, 'id'>) => void;
   /** Drop any hand-marked span on `text` (the popover's "no treatment"). */
@@ -439,6 +458,11 @@ interface AuraV2State {
 
   /* Context Zones — named AI-context selections (persisted) */
   zonesByStory: Record<string, ContextZone[]>;
+
+  /* Zone tasks — an ORDER over zones, a fixed document shape, and the pin it
+   * lands in. Persisted because the whole point is that the form outlives the
+   * run: re-running a task must produce the same shape with new material. */
+  tasksByStory: Record<string, ZoneTask[]>;
 
   /* Assistant conversation threads (persisted) */
   chatThreadsByStory: Record<string, ChatThread[]>;
@@ -592,7 +616,8 @@ interface AuraV2State {
 
   /* Pin actions */
   setPinDockOpen: (open: boolean) => void;
-  addPin: (storyId: string, pin: Omit<Pin, 'id' | 'createdAt'>) => void;
+  /** Returns the new pin's id, or '' when the per-story cap refused it. */
+  addPin: (storyId: string, pin: Omit<Pin, 'id' | 'createdAt'>) => string;
   updatePin: (storyId: string, pinId: string, updates: Partial<Omit<Pin, 'id'>>) => void;
   removePin: (storyId: string, pinId: string) => void;
   /** Append a new version (AI/manual) — seeds the current content as the
@@ -620,6 +645,13 @@ interface AuraV2State {
   updateZone: (storyId: string, zoneId: string, updates: Partial<Omit<ContextZone, 'id'>>) => void;
   removeZone: (storyId: string, zoneId: string) => void;
 
+  /* Zone task actions */
+  addTask: (storyId: string, task: Omit<ZoneTask, 'id' | 'createdAt' | 'updatedAt'>) => string;
+  updateTask: (storyId: string, taskId: string, updates: Partial<Omit<ZoneTask, 'id'>>) => void;
+  removeTask: (storyId: string, taskId: string) => void;
+  /** Stamp what a finished run produced, so the panel can say when it last ran. */
+  recordTaskRun: (storyId: string, taskId: string, sections: number, pinVersion: number | null) => void;
+
   /* Assistant thread actions */
   /** Return the active thread id for a story, creating a first thread if needed. */
   ensureActiveThread: (storyId: string) => string;
@@ -635,6 +667,18 @@ interface AuraV2State {
   setActiveVariant: (storyId: string, threadId: string, turnId: string, index: number) => void;
   /** Drop a turn and everything after it (used when a send fails before commit). */
   removeTurnsFrom: (storyId: string, threadId: string, turnId: string) => void;
+  /**
+   * Rewrite the SHOWN variant of a turn in place.
+   *
+   * Both roles, deliberately. Editing your own question and re-asking is the
+   * cheapest way to steer a model, and editing the assistant's reply is how a
+   * reader keeps a mostly-right answer they are about to build on — the same
+   * reasoning that makes a Lens override an edit rather than a regeneration.
+   * The other variants are untouched, so a swipe still reaches the original.
+   */
+  editTurn: (storyId: string, threadId: string, turnId: string, text: string) => void;
+  /** Remove ONE turn, leaving the rest of the thread in place. */
+  removeTurn: (storyId: string, threadId: string, turnId: string) => void;
 
   /* Cowriting preset actions (custom presets only; built-ins live in code) */
   addCowritePreset: (preset: Omit<CowritePreset, 'id' | 'createdAt' | 'updatedAt'>) => string;
@@ -766,6 +810,7 @@ export const useAuraV2Store = create<AuraV2State>()(
       throughlines: [],
       appearanceByStory: {},
       artSeedByStory: {},
+      functionsByStory: {},
       emphasisMarksByStory: {},
       performMarksByStory: {},
       tasteMarks: [],
@@ -773,6 +818,7 @@ export const useAuraV2Store = create<AuraV2State>()(
       pinSetsByStory: {},
       activePinSetByStory: {},
       zonesByStory: {},
+      tasksByStory: {},
       chatThreadsByStory: {},
       activeThreadByStory: {},
       cowritePresets: [],
@@ -1060,7 +1106,13 @@ export const useAuraV2Store = create<AuraV2State>()(
       setPinDockOpen: (pinDockOpen) => set({ pinDockOpen }),
       addPin: (storyId, pin) => {
         const list = get().pinsByStory[storyId] ?? [];
-        if (list.length >= MAX_PINS_PER_STORY) return;
+        // Refused at the cap. This USED to return void, and every caller then
+        // reached for `pins.slice(-1)[0]` to find "the pin it just made" — which
+        // at the cap is somebody else's pin. The summariser went on to mark that
+        // stranger as the story's summary pin, so the next run wrote a summary
+        // over an unrelated note. Returning the id (or '') is what makes the
+        // failure visible to the caller instead of silently misdirecting it.
+        if (list.length >= MAX_PINS_PER_STORY) return '';
         const next: Pin = {
           ...pin,
           content: pin.content.slice(0, MAX_PIN_CONTENT),
@@ -1080,6 +1132,7 @@ export const useAuraV2Store = create<AuraV2State>()(
           };
         }
         set(patch);
+        return next.id;
       },
       updatePin: (storyId, pinId, updates) => {
         const list = get().pinsByStory[storyId];
@@ -1269,6 +1322,52 @@ export const useAuraV2Store = create<AuraV2State>()(
         set({ zonesByStory: all });
       },
 
+      addTask: (storyId, task) => {
+        const now = Date.now();
+        const next: ZoneTask = { ...task, id: newId(), createdAt: now, updatedAt: now };
+        const list = [...(get().tasksByStory[storyId] ?? []), next].slice(-MAX_TASKS_PER_STORY);
+        const touched = [storyId, ...Object.keys(get().tasksByStory).filter(k => k !== storyId)];
+        set({ tasksByStory: pruneStories({ ...get().tasksByStory, [storyId]: list }, touched) });
+        // A task is a thing the reader authored by hand, so it writes through
+        // rather than waiting on the debounce — see the note on flushV2.
+        void flushV2();
+        return next.id;
+      },
+      updateTask: (storyId, taskId, updates) => {
+        const list = get().tasksByStory[storyId];
+        if (!list) return;
+        set({
+          tasksByStory: {
+            ...get().tasksByStory,
+            [storyId]: list.map(t =>
+              t.id === taskId ? { ...t, ...updates, updatedAt: Date.now() } : t),
+          },
+        });
+        void flushV2();
+      },
+      removeTask: (storyId, taskId) => {
+        const list = get().tasksByStory[storyId];
+        if (!list) return;
+        const next = list.filter(t => t.id !== taskId);
+        const all = { ...get().tasksByStory, [storyId]: next };
+        if (next.length === 0) delete all[storyId];
+        set({ tasksByStory: all });
+        void flushV2();
+      },
+      recordTaskRun: (storyId, taskId, sections, pinVersion) => {
+        const list = get().tasksByStory[storyId];
+        if (!list) return;
+        set({
+          tasksByStory: {
+            ...get().tasksByStory,
+            [storyId]: list.map(t =>
+              t.id === taskId
+                ? { ...t, lastRun: { at: Date.now(), sections, pinVersion } }
+                : t),
+          },
+        });
+      },
+
       ensureActiveThread: (storyId) => {
         const threads = get().chatThreadsByStory[storyId] ?? [];
         const activeId = get().activeThreadByStory[storyId];
@@ -1390,6 +1489,45 @@ export const useAuraV2Store = create<AuraV2State>()(
             }),
           },
         });
+      },
+      editTurn: (storyId, threadId, turnId, text) => {
+        const list = get().chatThreadsByStory[storyId];
+        // A blank edit would leave a bubble with nothing in it and, on a user
+        // turn, send an empty message on the next regenerate. Deleting is a
+        // separate, deliberate action.
+        if (!list || !text.trim()) return;
+        set({
+          chatThreadsByStory: {
+            ...get().chatThreadsByStory,
+            [storyId]: list.map(t =>
+              t.id === threadId
+                ? {
+                    ...t, updatedAt: Date.now(),
+                    turns: t.turns.map(tr => {
+                      if (tr.id !== turnId) return tr;
+                      const variants = [...tr.variants];
+                      variants[tr.activeVariant] = text;
+                      return { ...tr, variants };
+                    }),
+                  }
+                : t),
+          },
+        });
+        void flushV2();
+      },
+      removeTurn: (storyId, threadId, turnId) => {
+        const list = get().chatThreadsByStory[storyId];
+        if (!list) return;
+        set({
+          chatThreadsByStory: {
+            ...get().chatThreadsByStory,
+            [storyId]: list.map(t =>
+              t.id === threadId
+                ? { ...t, turns: t.turns.filter(tr => tr.id !== turnId), updatedAt: Date.now() }
+                : t),
+          },
+        });
+        void flushV2();
       },
 
       addCowritePreset: (preset) => {
@@ -1744,6 +1882,19 @@ export const useAuraV2Store = create<AuraV2State>()(
         });
         void flushV2();
       },
+      setFunctionRead: (storyId, messageId, hash, fns) => {
+        const byMsg = get().functionsByStory[storyId] ?? {};
+        if (byMsg[messageId]?.hash === hash) return; // already read, unchanged
+        set({
+          functionsByStory: {
+            ...get().functionsByStory,
+            [storyId]: { ...byMsg, [messageId]: { hash, fns } },
+          },
+        });
+        // A cached READ, not a deliberate edit — the 400ms debounce is the
+        // right home for it, unlike a mark the reader made by hand.
+      },
+
       clearEmphasisMarkFor: (storyId, messageId, text) => {
         const byMsg = get().emphasisMarksByStory[storyId];
         const list = byMsg?.[messageId];

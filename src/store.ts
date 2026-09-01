@@ -5,11 +5,16 @@ import {
 } from './types';
 import { ParsedCard, parseCompanionCard, parseFile } from './utils/parser';
 import { deleteStory, getAllStoryMetas, getStory, putStory } from './lib/storage';
+import { parseCut } from './utils/cut';
+import { openCut } from './utils/openCut';
 import {
   MIN_SHARED_PREFIX, groupBranchFamilies, timelineMessages, toTimeline,
 } from './utils/branchMerge';
 import { configForMode, nearestMode } from './utils/readingModes';
-import { VIEW_GROUP, VIEW_ORDER, moveView, resolveVisibleViews, toggleView } from './utils/viewBar';
+import {
+  VIEW_GROUP, VIEW_ORDER, isReadingView, moveView, resolveVisibleViews, toggleView,
+} from './utils/viewBar';
+import { MARKUP_DEFAULTS, sanitizeMarkupPresets } from './utils/markupStyles';
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -107,14 +112,16 @@ const CONFIG_KEYS: (keyof AppConfig)[] = [
   'theme', 'accentColor', 'fontFamily', 'fontSize', 'textColor', 'bgColor', 'animationStyle', 'streamEffect',
   'expressiveText', 'cinematicPacing', 'expressiveIntensity', 'dropCaps', 'sceneTheming',
   'sceneSoundscapes', 'emotionalTts', 'sceneEmphasis', 'scenePerformance', 'aiRepairFormatting',
-  'hideMetadata', 'showImages', 'autofocusAutoZoom', 'focusMagnifier', 'askCharacter', 'onboarded',
+  'hideMetadata', 'showImages', 'autofocusAutoZoom', 'focusMagnifier', 'magnifierStyle',
+  'askCharacter', 'onboarded',
   'playbackSpeed', 'autoStream', 'autoFormat', 'autoFormatRules', 'statRules',
   'paragraphSpacing', 'dialogueOwnLine', 'smartTypography',
   'styleQuotes', 'substituteNames', 'dialogueColor', 'dialogueStyle', 'dialogueAnimation',
+  'markupPresets', 'characterColorsEnabled', 'characterColors', 'characterChannelColors',
   'contentWidth', 'oocHandling', 'phoneDialogueOnly', 'themeEffects', 'livingBackground',
   'readingMode', 'visibleViews',
   'revealMode', 'messagePause', 'pauseAtPageEnd', 'ttsEnabled', 'ttsVoiceURI', 'ttsRate',
-  'ttsPitch', 'ttsFollowSpeed', 'ttsMultiVoice', 'ttsDialogueOnly', 'aiBaseUrl', 'aiApiKey', 'aiModel', 'aiAdvanced',
+  'ttsPitch', 'ttsFollowSpeed', 'ttsMultiVoice', 'ttsDialogueOnly', 'aiBaseUrl', 'aiApiKey', 'aiModel', 'aiAdvanced', 'aiAgentMode',
   'ttsEngine', 'kokoroBaseUrl', 'kokoroApiKey', 'kokoroVoice', 'kokoroUserVoice', 'ttsVoiceByCharacter',
   'liveReaction', 'liveReactor', 'liveReactionVisibility', 'liveReactionFreeze',
   'liveReactionFrame',
@@ -212,6 +219,7 @@ export const useAppStore = create<AppState>()(
         showImages: true,
         autofocusAutoZoom: true,
         focusMagnifier: false,
+        magnifierStyle: 'light',
         askCharacter: false,
         onboarded: false,
         playbackSpeed: 50,
@@ -273,12 +281,18 @@ export const useAppStore = create<AppState>()(
         ambientByTheme: {},
         dialogueColor: 'text-indigo-600 dark:text-indigo-300',
         dialogueStyle: 'normal',
+        markupPresets: MARKUP_DEFAULTS,
         dialogueAnimation: 'none',
+        characterColorsEnabled: false,
+        characterColors: {},
+        characterChannelColors: {},
         contentWidth: 0,
         oocHandling: 'show',
         phoneDialogueOnly: false,
         themeEffects: true,
+        pressToAdvance: false,
         livingBackground: false,
+        aiAgentMode: false,
         aiBaseUrl: '',
         aiApiKey: '',
         aiModel: '',
@@ -325,16 +339,20 @@ export const useAppStore = create<AppState>()(
         autofocusZoom: 1,
         autofocusPanX: 0,
         isHighlightMode: false,
+        isBoxMode: false,
         reverseStream: false,
         controlsMinimized: false,
         settingsOpen: false,
         savedConfigs: {},
         ttsPending: false,
         awaitingAdvance: false,
+        awaitingInput: false,
+        viewHold: false,
         ttsProgress: 1,
         swipeSelections: {},
         aiOpen: false,
         lensEditTarget: null,
+        lensEditFocus: null,
 
         /* ----- library actions ----- */
 
@@ -351,6 +369,34 @@ export const useAppStore = create<AppState>()(
         importFiles: async (files: File[], cardFiles: File[] = []) => {
           const errors: string[] = [];
           const imported: Story[] = [];
+          const notesEarly: string[] = [];
+          // Counted before Cuts are peeled off, so "one file, open it" still
+          // holds for a Cut — otherwise dropping one in lands you back on the
+          // library with a note, wondering whether it worked.
+          const droppedCount = files.length;
+
+          // A Cut is a story AND the way it was directed, so it cannot go
+          // through the parser — there is nothing to parse, and the direction
+          // has to land in the v2 store beside the story rather than inside it.
+          // Peeled off here, before anything else looks at the batch.
+          const rest: File[] = [];
+          for (const file of files) {
+            if (!/\.cut\.json$/i.test(file.name)) { rest.push(file); continue; }
+            try {
+              const { cut, error } = parseCut(await file.text());
+              if (!cut || error) { errors.push(`${file.name}: ${error ?? 'not a Cut'}`); continue; }
+              const story = await openCut(cut);
+              imported.push(story);
+              const bits = Object.keys(cut.direction).length;
+              notesEarly.push(
+                `“${story.title}” opened from a Cut — ${bits} layer${bits === 1 ? '' : 's'} of `
+                + 'direction came with it, so it reads fully with no endpoint set.',
+              );
+            } catch (e: any) {
+              errors.push(`${file.name}: ${e?.message ?? 'could not be opened'}`);
+            }
+          }
+          files = rest;
 
           // Companion character cards, matched to stories after parsing.
           const companions: ParsedCard[] = [];
@@ -375,7 +421,7 @@ export const useAppStore = create<AppState>()(
           };
 
           // Parse everything first — branch grouping needs the whole batch.
-          const notes: string[] = [];
+          const notes: string[] = [...notesEarly];
           const parsedFiles: { file: File; parsed: Awaited<ReturnType<typeof parseFile>> }[] = [];
           for (const file of files) {
             try {
@@ -486,7 +532,7 @@ export const useAppStore = create<AppState>()(
               ({ messages: _m, highlights: _h, stars: _s, card: _c, timelines: _t, ...meta }) => meta);
             set({ library: [...metas, ...get().library] });
           }
-          if (imported.length === 1 && files.length === 1) {
+          if (imported.length === 1 && droppedCount === 1) {
             await get().openStory(imported[0].id);
           }
           return { imported: imported.length, errors, notes };
@@ -521,7 +567,7 @@ export const useAppStore = create<AppState>()(
             streamedText: '',
             isStreaming: false,
             // "Read this timeline" means READ — leave list views for the text.
-            viewMode: ['storybook', 'chat', 'book', 'stage', 'vn', 'sandbox'].includes(vm) ? vm : 'chat',
+            viewMode: isReadingView(vm) ? vm : 'chat',
           });
           schedulePersist();
         },
@@ -578,8 +624,7 @@ export const useAppStore = create<AppState>()(
           // Read through the story's active timeline (attached branch), if any.
           const chains = buildChains(timelineMessages(story), story.format, story.stars);
           const proseFormat = story.format === 'kobold' || story.format === 'document';
-          const READING_VIEWS = ['storybook', 'chat', 'book', 'stage', 'vn', 'sandbox'] as const;
-          const readingView = (READING_VIEWS as readonly string[]).includes(viewMode)
+          const readingView = isReadingView(viewMode)
             ? viewMode
             : (proseFormat ? 'storybook' : 'chat');
 
@@ -984,6 +1029,7 @@ export const useAppStore = create<AppState>()(
         setShowImages: (showImages) => set({ showImages }),
         setAutofocusAutoZoom: (autofocusAutoZoom) => set({ autofocusAutoZoom }),
         setFocusMagnifier: (focusMagnifier) => set({ focusMagnifier }),
+        setMagnifierStyle: (magnifierStyle) => set({ magnifierStyle }),
         setAskCharacter: (askCharacter) => set({ askCharacter }),
         setOnboarded: (onboarded) => set({ onboarded }),
         setFontFamily: (fontFamily) => set({ fontFamily }),
@@ -1070,6 +1116,14 @@ export const useAppStore = create<AppState>()(
           set({ ambientByTheme: next });
         },
         setAwaitingAdvance: (awaitingAdvance) => set({ awaitingAdvance }),
+        setAwaitingInput: (awaitingInput) => set({ awaitingInput }),
+        setViewHold: (viewHold) => set({ viewHold }),
+        setPressToAdvance: (pressToAdvance) => set({ pressToAdvance }),
+        advanceOnInput: () => {
+          if (!get().awaitingInput) return;
+          set({ awaitingInput: false });
+          get().advanceMessage();
+        },
         setSearchQuery: (searchQuery) => set({ searchQuery }),
         setIsAutofocusMode: (isAutofocusMode) =>
           set({
@@ -1081,13 +1135,39 @@ export const useAppStore = create<AppState>()(
         setAutofocusZoom: (autofocusZoom) => set({ autofocusZoom }),
         setAutofocusPanX: (autofocusPanX) => set({ autofocusPanX }),
         setIsHighlightMode: (isHighlightMode) => set({ isHighlightMode }),
+        setIsBoxMode: (isBoxMode) => set({ isBoxMode }),
         setReverseStream: (reverseStream) => set({ reverseStream }),
         setControlsMinimized: (controlsMinimized) => set({ controlsMinimized }),
         setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
 
         setDialogueColor: (dialogueColor) => set({ dialogueColor }),
         setDialogueStyle: (dialogueStyle) => set({ dialogueStyle }),
+        /* One channel at a time, rebuilt through the sanitiser so a blob from a
+         * build that knew different channels can never leak through. */
+        setMarkupPreset: (channel, patch) => set({
+          markupPresets: sanitizeMarkupPresets({
+            ...get().markupPresets,
+            [channel]: { ...get().markupPresets[channel], ...patch },
+          }),
+        }),
+        resetMarkupPresets: () => set({ markupPresets: MARKUP_DEFAULTS }),
         setDialogueAnimation: (dialogueAnimation) => set({ dialogueAnimation }),
+        setCharacterColorsEnabled: (characterColorsEnabled) => set({ characterColorsEnabled }),
+        setCharacterColor: (name, color) => {
+          const next = { ...get().characterColors };
+          if (color) next[name] = color;
+          else delete next[name];
+          set({ characterColors: next });
+        },
+        setCharacterChannelColor: (name, channel, color) => {
+          const next = { ...get().characterChannelColors };
+          const forChar = { ...next[name] };
+          if (color) forChar[channel] = color;
+          else delete forChar[channel];
+          if (Object.keys(forChar).length) next[name] = forChar;
+          else delete next[name];
+          set({ characterChannelColors: next });
+        },
         setContentWidth: (contentWidth) => set({ contentWidth }),
         setOocHandling: (oocHandling) => set({ oocHandling }),
         setPhoneDialogueOnly: (phoneDialogueOnly) => set({ phoneDialogueOnly }),
@@ -1130,8 +1210,15 @@ export const useAppStore = create<AppState>()(
         setAiBaseUrl: (aiBaseUrl) => set({ aiBaseUrl }),
         setAiApiKey: (aiApiKey) => set({ aiApiKey }),
         setAiModel: (aiModel) => set({ aiModel }),
+        setAiAgentMode: (aiAgentMode) => set({ aiAgentMode }),
         setAiOpen: (aiOpen) => set({ aiOpen }),
         setLensEditTarget: (lensEditTarget) => set({ lensEditTarget, ...(lensEditTarget ? { aiOpen: true } : {}) }),
+        setLensEditFocus: (lensEditFocus) => set({ lensEditFocus }),
+        /* One action rather than two calls, so the focus can never be left
+         * behind on the next Lens edit — a stale quote would silently redirect
+         * a revision at a span the reader is no longer looking at. */
+        sendToRewrite: (messageId, focus) =>
+          set({ lensEditTarget: messageId, lensEditFocus: focus.trim() || null, aiOpen: true }),
         setAiAdvanced: (patch) => set({ aiAdvanced: { ...get().aiAdvanced, ...patch } }),
 
         selectSwipe: (messageId, index) => {
@@ -1262,9 +1349,7 @@ export const useAppStore = create<AppState>()(
       partialize: (state) => ({
         ...pickConfig(state),
         savedConfigs: state.savedConfigs,
-        viewMode: ['storybook', 'chat', 'book', 'stage', 'vn', 'sandbox'].includes(state.viewMode)
-          ? state.viewMode
-          : 'chat',
+        viewMode: isReadingView(state.viewMode) ? state.viewMode : 'chat',
         layoutMode: state.layoutMode,
         controlsMinimized: state.controlsMinimized,
       }),

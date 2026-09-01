@@ -160,7 +160,10 @@ export interface Story extends StoryMeta {
 
 export type Screen = 'library' | 'reader';
 export type ViewMode =
-  | 'storybook' | 'chat' | 'book' | 'stage' | 'vn' | 'sandbox'
+  | 'storybook' | 'chat' | 'book' | 'stage' | 'vn' | 'rpg' | 'sandbox'
+  // v3: three views that present the story's SHAPE rather than its words —
+  // a screenplay, a comic page, and a map of the whole thing.
+  | 'script' | 'panels' | 'atlas'
   | 'overview' | 'highlights' | 'branches';
 /**
  * Top-level workspace preset — gates which tools/views are visible so the app
@@ -175,12 +178,17 @@ export type Theme =
   | 'win98' | 'vista' | 'parchment' | 'synthwave' | 'amoled'
   | 'ocean' | 'forest' | 'sakura' | 'comic' | 'newspaper'
   | 'grimoire' | 'cyberpunk' | 'eink' | 'gameboy' | 'starlight' | 'manga'
-  | 'noir' | 'cozy' | 'aurora' | 'rpg' | 'pixelchat' | 'pixelrpg' | 'snek';
+  | 'noir' | 'cozy' | 'aurora' | 'rpg' | 'pixelchat' | 'pixelrpg' | 'snek'
+  | 'calligraphy'
+  // Three that are a MATERIAL rather than a palette: ink on paper with the
+  // press slightly out of register, iridescent foil that moves with the page,
+  // and a phosphor vector tube with no scanlines at all.
+  | 'riso' | 'foil' | 'vector';
 export type FontFamily =
   /** Follow the theme's signature font (terminal→mono, book→serif, ...). */
   | 'theme'
   | 'sans' | 'serif' | 'mono' | 'handwriting' | 'typewriter' | 'dyslexic'
-  | 'rounded' | 'slab' | 'medieval' | 'comic'
+  | 'rounded' | 'slab' | 'medieval' | 'comic' | 'calligraphy'
   /** A user-uploaded font, keyed by its id (see useFontStore). */
   | `custom:${string}`;
 /** Accent override; '' means use the theme's own accent. */
@@ -197,6 +205,34 @@ export type TtsEngine = 'browser' | 'kokoro';
 export type AmbientSound = 'rain' | 'wind' | 'fire' | 'waves' | 'drone';
 export type DialogueStyle = 'normal' | 'italic' | 'bold' | 'bold-italic';
 export type DialogueAnimation = 'none' | 'zoom' | 'pulse' | 'wave' | 'glow' | 'rise';
+
+/**
+ * A mark in the prose the reader can dress. `speech` is the legacy
+ * `dialogueColor` / `dialogueStyle` / `dialogueAnimation` trio and is stored
+ * separately — see utils/markupStyles for why those keys must not move.
+ */
+export type MarkupChannel = 'speech' | 'aside' | 'bold' | 'shout' | 'heading';
+export type StoredChannel = Exclude<MarkupChannel, 'speech'>;
+export interface MarkupPreset {
+  /** A Tailwind text-colour class pair, or '' to inherit the theme. */
+  color: string;
+  style: DialogueStyle;
+  animation: DialogueAnimation;
+}
+export type MarkupPresets = Record<StoredChannel, MarkupPreset>;
+
+/** Channels a per-character color can vary by — heading excluded, since a
+ *  `##` break is AI-authored structure, not a character's utterance. */
+export type ColorableChannel = Exclude<MarkupChannel, 'heading'>;
+/** One character's per-channel color overrides — see utils/markupStyles. */
+export type CharacterChannelColors = Record<string, Partial<Record<ColorableChannel, string>>>;
+
+/**
+ * How the reading magnifier LOOKS. The mechanism is the same in every case —
+ * one fixed layer positioned from custom properties (see utils/readingFocus) —
+ * so these are purely a change of dress, not a change of behaviour.
+ */
+export type MagnifierStyle = 'light' | 'glass' | 'box' | 'ruler' | 'iris';
 export type OocHandling = 'show' | 'dim' | 'hide';
 
 export type RuleTarget = 'all' | 'ai' | 'user';
@@ -287,6 +323,28 @@ export interface ChatTurn {
   /** When set, this turn was produced by a cowriting preset; the resolved recipe
    *  is kept so it can be regenerated (swiped) with the same placement. */
   cowriteSpec?: CowriteRunSpec;
+  /** Tool calls this turn made, in order. Absent on an ordinary reply. */
+  toolSteps?: ChatToolStep[];
+  /** When set, a VISITOR wrote this turn — a character on loan from another
+   *  chat, speaking here. Kept so regenerate rebuilds the same request, and so
+   *  the turn can say whose voice it is rather than passing as the assistant's. */
+  visitorSpec?: VisitorTurnSpec;
+}
+
+/**
+ * One turn written AS a visiting character.
+ *
+ * A visitor's turn is a DRAFT in the reader's chat, exactly like a Lens rewrite
+ * or a cowrite: it is theirs to keep, edit or throw away. Nothing here writes
+ * into the story — the source JSON is sacred, and a character borrowed from
+ * another chat is the last thing that should get to edit it.
+ */
+export interface VisitorTurnSpec {
+  visitorId: string;
+  /** Their name at send time, so the turn still reads right if they are removed. */
+  name: string;
+  /** A steer for this one turn ("have her refuse"). */
+  instruction?: string;
 }
 
 /**
@@ -382,7 +440,38 @@ export interface AiAdvancedConfig {
 }
 
 /** Per-word streaming text effect, independent of the block reveal animation. */
-export type StreamEffect = 'none' | 'fade' | 'blur' | 'ink' | 'glitch' | 'rise';
+/**
+ * How each WORD arrives while a passage streams.
+ *
+ * `quill` is the odd one out: the others dress a word that is already there,
+ * while this one wipes it in left to right, as a nib laying the stroke down.
+ *
+ * `ember` is the odd one in the other direction: it is the only reveal that
+ * dresses a word's AGE rather than its arrival. Nothing fades and nothing
+ * moves — the word is legible from its first frame, and what changes is its
+ * colour, cooling out of the accent into whatever colour it was always going
+ * to be. See `.word-reveal-ember`.
+ */
+export type StreamEffect =
+  | 'none' | 'fade' | 'blur' | 'ink' | 'glitch' | 'rise' | 'quill'
+  // A typewriter: no fade, a hard cut and a settle. The Script view's own.
+  | 'type'
+  // Colour rather than motion: the word lands hot and cools into the prose.
+  | 'ember';
+
+/**
+ * Every effect, in the order the settings panel offers them.
+ *
+ * Written beside the union because the list also existed as a hand-typed array
+ * in the settings panel, with nothing connecting the two: adding a member to
+ * the type left the panel offering the old eight and the reader with no way to
+ * reach the new one. This is the catalogue the type cannot drift from — and
+ * something for `themes.test.ts` to walk when it checks that every effect has
+ * CSS standing behind it.
+ */
+export const STREAM_EFFECTS: readonly StreamEffect[] = [
+  'none', 'fade', 'blur', 'ink', 'glitch', 'rise', 'quill', 'type', 'ember',
+];
 
 /** How strongly expressive typography + cinematic pacing are applied. */
 export type ExpressiveIntensity = 'subtle' | 'expressive' | 'cinematic';
@@ -668,6 +757,20 @@ export interface Annotation {
   updatedAt: number;
 }
 
+/**
+ * One tool call the assistant made, kept with the turn it happened in.
+ *
+ * Flattened, and typed as plain records rather than importing `AgentStep` from
+ * `utils/agentTools`: this file is the app's type vocabulary and imports
+ * nothing, and what is persisted here is a display record of what happened —
+ * not the live object the loop passes around.
+ */
+export interface ChatToolStep {
+  tool: string;
+  args: Record<string, unknown>;
+  result: Record<string, unknown>;
+}
+
 export type RevealMode = 'character' | 'word';
 
 export interface AppConfig {
@@ -726,6 +829,8 @@ export interface AppConfig {
   autofocusAutoZoom: boolean;
   /** In autofocus, light a focus band around the words as they stream in. */
   focusMagnifier: boolean;
+  /** How that band is drawn — a light, a glass lens, a card, a ruler, an iris. */
+  magnifierStyle: MagnifierStyle;
   /** True once the reader has seen (or skipped) the first-run tour. */
   onboarded: boolean;
   /** Offer "Ask <character>" — an interview with the character, anchored to the
@@ -841,6 +946,32 @@ export interface AppConfig {
   dialogueStyle: DialogueStyle;
   dialogueAnimation: DialogueAnimation;
 
+  /**
+   * The other four markup channels — aside, beat, shout, heading. The speech
+   * channel is the three keys above; it is NOT folded in here, because those
+   * keys already hold readers' choices and moving them would reset every
+   * library on upgrade.
+   */
+  markupPresets: MarkupPresets;
+
+  /** Color every markup channel (speech/aside/beat/shout) by speaker instead
+   *  of one fixed color for everyone. Off by default — a no-op until a reader
+   *  turns it on. */
+  characterColorsEnabled: boolean;
+  /**
+   * Per-character color override, keyed by the speaker's display name — same
+   * shape as `ttsVoiceByCharacter`. Missing = auto-assigned; `'none'`
+   * (see `CHARACTER_COLOR_NONE`) = explicitly no color for that character.
+   */
+  characterColors: Record<string, string>;
+  /**
+   * Advanced: a specific channel's color for a specific character, overriding
+   * both that character's general color and the channel's global color for
+   * just that one combination. `'none'` forces the channel's global color for
+   * that one channel even though the character has a color set otherwise.
+   */
+  characterChannelColors: CharacterChannelColors;
+
   /** Max content column width in px (0 = use the theme's default width). */
   contentWidth: number;
   /** What to do with out-of-character [OOC: ...] / (OOC: ...) asides. */
@@ -849,6 +980,15 @@ export interface AppConfig {
   phoneDialogueOnly: boolean;
   /** Ambient theme effects (scanlines, particles, glows, animations). */
   themeEffects: boolean;
+  /**
+   * Hold at the end of every passage until the reader asks for the next one.
+   *
+   * The reading contract of every RPG and visual novel ever made: the text
+   * arrives, and it waits for you. Auto-advance is the app's default because
+   * most of its views are a page you scroll; this is for the views that are a
+   * screen you are sitting in front of.
+   */
+  pressToAdvance: boolean;
   /** Animate a living particle background suited to the theme (opt-in). */
   livingBackground: boolean;
 
@@ -858,6 +998,17 @@ export interface AppConfig {
   aiModel: string;
   /** Advanced generation controls (behind a collapsed section in the AI panel). */
   aiAdvanced: AiAdvancedConfig;
+  /**
+   * Let the assistant use tools — look things up, and update pins — rather than
+   * only answering.
+   *
+   * Off by default, and the default is the decision. The one-shot assistant is
+   * the one that works on every endpoint this app supports; a tool protocol is
+   * text the model has to follow, and a small local model that follows it badly
+   * is worse company than one that simply answers well. A reader who wants
+   * hands turns them on.
+   */
+  aiAgentMode: boolean;
 }
 
 export interface AppState extends AppConfig {
@@ -887,6 +1038,8 @@ export interface AppState extends AppConfig {
   autofocusZoom: number;
   autofocusPanX: number;
   isHighlightMode: boolean;
+  /** The frame tool: drag a box over words rather than selecting them. */
+  isBoxMode: boolean;
   reverseStream: boolean;
   controlsMinimized: boolean;
   settingsOpen: boolean;
@@ -894,6 +1047,23 @@ export interface AppState extends AppConfig {
   /** TTS coordination (transient, not persisted). */
   ttsPending: boolean;
   awaitingAdvance: boolean;
+  /**
+   * The reveal has finished a passage and is waiting for the reader to ask for
+   * the next one. Transient — a reload starts reading again rather than
+   * resuming a wait nobody remembers.
+   */
+  awaitingInput: boolean;
+  /**
+   * A VIEW is asking for the same hold, for as long as it is open (RPG mode).
+   *
+   * Deliberately separate from the persisted `pressToAdvance`, and deliberately
+   * transient. The first version had the view write the real setting on mount
+   * and put it back on unmount, which works right up until the reader RELOADS
+   * inside that view: the "previous value" it captures is the one it set
+   * itself, and leaving restores the hold onto all nine other views, where
+   * nothing will ever advance again.
+   */
+  viewHold: boolean;
   /** How far the voice has spoken the current message, 0..1 (1 = not gating).
    *  Drives the reveal so the text can't outrun the narration. */
   ttsProgress: number;
@@ -904,6 +1074,12 @@ export interface AppState extends AppConfig {
   aiOpen: boolean;
   /** Message id the reader asked to Lens-edit; opens the AI panel in edit mode (transient). */
   lensEditTarget: string | null;
+  /**
+   * A span the reader framed and sent to the Lens, quoted into the revision
+   * instruction so the model knows WHICH part of the passage to work on.
+   * Transient, and cleared with the target.
+   */
+  lensEditFocus: string | null;
 
   savedConfigs: Record<string, AppConfig>;
 
@@ -967,6 +1143,7 @@ export interface AppState extends AppConfig {
   setShowImages: (show: boolean) => void;
   setAutofocusAutoZoom: (on: boolean) => void;
   setFocusMagnifier: (on: boolean) => void;
+  setMagnifierStyle: (style: MagnifierStyle) => void;
   setAskCharacter: (on: boolean) => void;
   setOnboarded: (on: boolean) => void;
   setFontFamily: (font: FontFamily) => void;
@@ -1054,18 +1231,32 @@ export interface AppState extends AppConfig {
   /** Set (or clear, with '') the ambient bed for a theme id. */
   setThemeAmbient: (theme: string, value: string) => void;
   setAwaitingAdvance: (awaitingAdvance: boolean) => void;
+  setAwaitingInput: (awaitingInput: boolean) => void;
+  setViewHold: (viewHold: boolean) => void;
+  /** The reader asked for the next passage. No-op unless one is being held. */
+  advanceOnInput: () => void;
+  setPressToAdvance: (pressToAdvance: boolean) => void;
   setSearchQuery: (query: string) => void;
   setIsAutofocusMode: (isAutofocusMode: boolean) => void;
   setAutofocusZoom: (zoom: number) => void;
   setAutofocusPanX: (panX: number) => void;
   setIsHighlightMode: (isHighlightMode: boolean) => void;
+  setIsBoxMode: (on: boolean) => void;
   setReverseStream: (reverse: boolean) => void;
   setControlsMinimized: (minimized: boolean) => void;
   setSettingsOpen: (open: boolean) => void;
 
   setDialogueColor: (color: string) => void;
   setDialogueStyle: (style: DialogueStyle) => void;
+  setMarkupPreset: (channel: StoredChannel, patch: Partial<MarkupPreset>) => void;
+  resetMarkupPresets: () => void;
   setDialogueAnimation: (animation: DialogueAnimation) => void;
+  setCharacterColorsEnabled: (on: boolean) => void;
+  /** Empty/undefined color removes the override (back to auto-assigned). */
+  setCharacterColor: (name: string, color: string | undefined) => void;
+  /** Empty/undefined color removes just this channel's override (back to the
+   *  character's general color). */
+  setCharacterChannelColor: (name: string, channel: ColorableChannel, color: string | undefined) => void;
   setContentWidth: (px: number) => void;
   setOocHandling: (mode: OocHandling) => void;
   setPhoneDialogueOnly: (on: boolean) => void;
@@ -1079,9 +1270,13 @@ export interface AppState extends AppConfig {
   setAiBaseUrl: (url: string) => void;
   setAiApiKey: (key: string) => void;
   setAiModel: (model: string) => void;
+  setAiAgentMode: (on: boolean) => void;
   setAiOpen: (open: boolean) => void;
   /** Request a Lens edit for a message (opens the AI panel in edit mode); null clears it. */
   setLensEditTarget: (messageId: string | null) => void;
+  /** Open the Lens on a passage with one span of it quoted as the focus. */
+  sendToRewrite: (messageId: string, focus: string) => void;
+  setLensEditFocus: (focus: string | null) => void;
   /** Merge a partial patch into the advanced AI generation controls. */
   setAiAdvanced: (patch: Partial<AiAdvancedConfig>) => void;
   selectSwipe: (messageId: string, index: number) => void;

@@ -5,6 +5,8 @@ import { ReaderDisplay } from './components/ReaderDisplay';
 import { BookView } from './components/BookView';
 import { StageView } from './components/StageView';
 import { VNView } from './components/VNView';
+import { RpgView } from './components/RpgView';
+import { ReadingSpotlight } from './components/ReadingSpotlight';
 import { SandboxView } from './components/SandboxView';
 import { OverviewMode } from './components/OverviewMode';
 import { HighlightsMode } from './components/HighlightsMode';
@@ -14,7 +16,20 @@ import { RefineModal } from './components/RefineModal';
 
 // AI panel pulls in KaTeX — load it only when opened.
 const AIChat = lazy(() => import('./components/AIChat').then(m => ({ default: m.AIChat })));
+
+/**
+ * The three shape views, split out of the main bundle.
+ *
+ * Each carries a layout engine of its own — a screenplay formatter, a comic
+ * pager, a map — and none of them is on the bar by default, so a reader who
+ * never opens one should never download one. The same reasoning already applies
+ * to the AI assistant and the Multiverse.
+ */
+const ScriptView = lazy(() => import('./components/ScriptView').then(m => ({ default: m.ScriptView })));
+const PanelsView = lazy(() => import('./components/PanelsView').then(m => ({ default: m.PanelsView })));
+const AtlasView = lazy(() => import('./components/AtlasView').then(m => ({ default: m.AtlasView })));
 import { SettingsPanel } from './components/SettingsPanel';
+import { AiActivityMeter } from './components/AiActivityMeter';
 import { LivingBackground } from './components/LivingBackground';
 import { Library } from './components/Library';
 import { useStreamer } from './hooks/useStreamer';
@@ -41,7 +56,11 @@ const FONT_CLASS: Record<string, string> = {
   slab: 'font-slab',
   medieval: 'font-medieval',
   comic: 'font-comic',
+  calligraphy: 'font-calligraphy',
 };
+
+/** Holds the reading area's shape while a split-out view loads. */
+const ViewLoading = () => <div className="flex-1 min-h-0" aria-hidden="true" />;
 
 export default function App() {
   useStreamer();
@@ -138,6 +157,14 @@ export default function App() {
             <StageView />
           ) : viewMode === 'vn' ? (
             <VNView />
+          ) : viewMode === 'rpg' ? (
+            <RpgView />
+          ) : viewMode === 'script' ? (
+            <Suspense fallback={<ViewLoading />}><ScriptView /></Suspense>
+          ) : viewMode === 'panels' ? (
+            <Suspense fallback={<ViewLoading />}><PanelsView /></Suspense>
+          ) : viewMode === 'atlas' ? (
+            <Suspense fallback={<ViewLoading />}><AtlasView /></Suspense>
           ) : viewMode === 'sandbox' ? (
             <SandboxView />
           ) : (
@@ -148,6 +175,13 @@ export default function App() {
       )}
 
       <SettingsPanel onOpenAutoFormat={() => setShowAutoFormat(true)} onOpenRefine={() => setShowRefine(true)} />
+      {/* The reading magnifier. At the ROOT, not inside a view: it is a
+        * viewport-fixed scrim positioned from the words' own coordinates, so
+        * mounting it once gives every view the same magnifier — see
+        * components/ReadingSpotlight. */}
+      <ReadingSpotlight />
+      {/* How much the AI is doing, anywhere in the app — see utils/aiActivity. */}
+      <AiActivityMeter />
       {showAutoFormat && <AutoFormatModal onClose={() => setShowAutoFormat(false)} />}
       {showRefine && <RefineModal onClose={() => setShowRefine(false)} />}
       {aiOpen && screen === 'reader' && (
