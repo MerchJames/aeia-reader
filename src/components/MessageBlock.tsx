@@ -188,7 +188,44 @@ const countWords = (text: string): number => {
 const HTML_ISH = /<\s*(table|div|svg|style|section|article|html|canvas|figure|ul|chart)/i;
 
 interface WordCounter {
-  value: number;
+  /**
+   * The shared cursor, advanced by TOP-LEVEL blocks only.
+   *
+   * ── Why a word's number is not simply "next" ──────────────────────────────
+   *
+   * Words have to be numbered in the order they are READ, because the number is
+   * what decides whether a word is in the streaming tail. They used to be
+   * numbered in the order React happened to render them, which is not the same
+   * order at all: `wrapWords` numbers a block's plain text when the `p`
+   * renderer runs, but hands back its child elements untouched, and React only
+   * descends into those `em` / `strong` children afterwards — each advancing
+   * this same counter.
+   *
+   * So every plain word in a paragraph was numbered before any emphasised one,
+   * and "the last 24 numbers" stopped meaning "the last 24 words". On a passage
+   * with emphasis in it the reveal lit up the ITALICISED words, scattered right
+   * back through the paragraph, while the words actually arriving got nothing —
+   * measured at 22 of 24 animating words sitting inside `<em>` while the six
+   * newest words on screen were plain. The effect looked like it was lagging
+   * the text, and how far it lagged depended on how marked-up the passage was,
+   * so it came and went.
+   *
+   * The fix is `reserved`: a parent's walk hands each child element the range
+   * its words occupy, so a child numbers itself where it actually sits rather
+   * than wherever the render happened to reach. Blocks need no reservation —
+   * React finishes one block's whole subtree before starting the next, so they
+   * are already in order, and they are the only things that move this cursor.
+   */
+  block: { value: number };
+  /**
+   * Element (hast node) → the word number its first word gets.
+   *
+   * Written by whichever walk passed over the element, read by the renderer
+   * React later calls for it. Keyed by the hast node because that is the one
+   * object both sides can see: react-markdown passes it to every component as
+   * `node`, and the React element it built carries it in `props`.
+   */
+  reserved: Map<unknown, number>;
   /** Words first seen this render — staggers a burst without lagging steady streams. */
   fresh: number;
   /**
@@ -218,17 +255,42 @@ const WORD_REVEAL_MAX_BATCH = 10;
  * Lore tooltips, nested elements, and non-string children are left untouched
  * so the block-level reveal handles them.
  *
- * Each word's animation delay is assigned once, when the word first arrives
- * (kept in `delays`, which lives for the whole stream) — so a word animates
- * relative to its own arrival, not its position in the tail window. New words
- * appear immediately; only same-frame bursts get a small stagger.
+ * Each word's animation START TIME is stamped once, when the word first
+ * arrives (kept in `starts`, which lives for the whole stream) — so a word
+ * animates relative to its own arrival, not its position in the tail window.
+ * New words appear immediately; only same-frame bursts get a small stagger.
+ *
+ * ── Why a start time and not a delay ──────────────────────────────────────
+ *
+ * This map used to hold the assigned stagger, which was the right idea against
+ * the wrong failure. A stored delay survives a RE-RENDER; it does nothing
+ * against a REMOUNT, and this subtree remounts constantly — the `components`
+ * object below is built inline, so every render hands react-markdown new
+ * component identities and React rebuilds the tree rather than updating it.
+ * A remounted span starts its animation again from zero.
+ *
+ * The reveal ticks every ~13ms at reading speed and the animations run for
+ * 400-900ms, so no word ever got more than about 3% into its own arrival. For
+ * the seven effects that open at `opacity: 0` that meant the whole 24-word
+ * tail stayed INVISIBLE for as long as a passage streamed — the reader was
+ * reading 24 words behind the reveal, with a hole of laid-out blank space
+ * where the newest words should be. Cinema and Performance both ship `fade`,
+ * so this was the default reading experience. Every unit test passed; a
+ * screenshot showed it immediately.
+ *
+ * Stamping the START and emitting `animationDelay` relative to now makes the
+ * remount harmless: the fresh element seeks to exactly where the old one had
+ * got to. It is the same negative-delay resume already used for the Director's
+ * cues a few lines down, which had to solve this once already.
  */
 const wrapWords = (
   node: React.ReactNode,
   counter: WordCounter,
+  /** Where this walk is in the document, in words. See `WordCounter.block`. */
+  cursor: { value: number },
   settled: number,
   style: string | null,
-  delays: Map<number, number>,
+  starts: Map<number, number>,
   expressive: boolean,
   readingWord: number | null,
   emphasis: Map<string, string> | null,
@@ -257,12 +319,12 @@ const wrapWords = (
   if (typeof node === 'string') {
     if (!node.trim()) return node;
     const out: React.ReactNode[] = [];
-    let cursor = 0;
+    let at = 0;
     let m: RegExpExecArray | null;
     WORD_RE.lastIndex = 0;
     while ((m = WORD_RE.exec(node))) {
       const word = m[0];
-      const idx = counter.value++;
+      const idx = cursor.value++;
       // Director emphasis (AI-judged) wins over the caps-only shout heuristic.
       const norm = normalizeWord(word);
       const first = !counter.claimed.has(norm);
@@ -295,11 +357,15 @@ const wrapWords = (
         // Ordinary settled/out-of-window word — emit as plain text. Keyed, so a
         // growing children array reconciles by identity rather than by position
         // (see the note on remounting below).
-        out.push(node.slice(cursor, m.index + word.length));
+        out.push(node.slice(at, m.index + word.length));
       } else {
-        if (m.index > cursor) out.push(node.slice(cursor, m.index));
-        if (inTail && !delays.has(idx)) {
-          delays.set(idx, Math.min(counter.fresh++, WORD_REVEAL_MAX_BATCH) * WORD_REVEAL_STAGGER);
+        if (m.index > at) out.push(node.slice(at, m.index));
+        if (inTail && !starts.has(idx)) {
+          // When this word's animation should BEGIN: now, plus its share of the
+          // burst stagger. Stored absolute so any later render can work out how
+          // far in it should already be.
+          starts.set(idx, Date.now()
+            + Math.min(counter.fresh++, WORD_REVEAL_MAX_BATCH) * WORD_REVEAL_STAGGER);
         }
         out.push(
           <span
@@ -312,7 +378,11 @@ const wrapWords = (
             )}
             style={
               inTail
-                ? { animationDelay: `${delays.get(idx)}ms` }
+                // Positive on the word's first frame (its stagger), negative
+                // afterwards — which seeks INTO the animation rather than
+                // replaying it. Past the end, `animation-fill-mode: both` just
+                // holds the settled state, which is what a cooled word is.
+                ? { animationDelay: `${starts.get(idx)! - Date.now()}ms` }
                 // Not in the tail, but mid-treatment: resume where it was.
                 : (emphCls && fxDelay && !fxDone ? { animationDelay: `-${fxDelay}ms` } : undefined)
             }
@@ -332,15 +402,49 @@ const wrapWords = (
           </span>,
         );
       }
-      cursor = m.index + word.length;
+      at = m.index + word.length;
     }
-    if (cursor < node.length) out.push(node.slice(cursor));
+    if (at < node.length) out.push(node.slice(at));
     return out.length === 1 ? out[0] : out;
   }
   if (Array.isArray(node)) {
-    return node.map(n => wrapWords(n, counter, settled, style, delays, expressive, readingWord, emphasis, perform, played, runs));
+    return node.map(n => wrapWords(n, counter, cursor, settled, style, starts, expressive, readingWord, emphasis, perform, played, runs));
+  }
+  /*
+   * An element this walk does not go inside — an `em`, a `strong`, a heading,
+   * an entity mention from the codex, an image.
+   *
+   * Its words are still WORDS: they are on the page, they are read in this
+   * position, and the numbering has to account for them or everything after
+   * them is numbered as though they were not there. So step the cursor over
+   * the whole subtree, and leave behind the number its first word should get,
+   * for the renderer React will call for it in a moment.
+   *
+   * This is also what finally makes the codex honest. An entity mention is
+   * wrapped in an element by `markLore`, so its words were counted by
+   * `countWords` towards the settled total and then never claimed back — the
+   * same desync the headings carry a comment about, except this one GREW as
+   * you read, because the codex fills up as it goes.
+   */
+  if (React.isValidElement(node)) {
+    const hast = (node.props as { node?: unknown })?.node;
+    if (hast !== undefined) counter.reserved.set(hast, cursor.value);
+    cursor.value += countWords(textOf(node));
   }
   return node;
+};
+
+/**
+ * The cursor a renderer should number from.
+ *
+ * A reserved base means an ancestor's walk already decided where this element
+ * sits, so it numbers itself privately inside that range and leaves the shared
+ * cursor alone. No reservation means this is a top-level block, which owns the
+ * shared cursor and moves it on for the block after it.
+ */
+const cursorFor = (counter: WordCounter, node: unknown): { value: number } => {
+  const base = counter.reserved.get(node);
+  return base === undefined ? counter.block : { value: base };
 };
 
 /** Word → emphasis-kind-key map from the Director's spans (verbatim substrings).
@@ -513,15 +617,15 @@ const StrongMark = ({
 const headingRenderers = (
   preset: MarkupPreset,
   animate: boolean,
-  wrap: (children: React.ReactNode) => React.ReactNode,
+  wrap: (children: React.ReactNode, node: unknown) => React.ReactNode,
 ) => {
   const className = cn(
     'mk-heading',
     markupClass(preset, { animate: animate && preset.animation !== 'none' }),
   );
   const make = (Tag: 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6') =>
-    ({ node: _node, children, ...props }: { node?: unknown; children?: React.ReactNode }) => (
-      <Tag className={className} {...props}>{wrap(children)}</Tag>
+    ({ node, children, ...props }: { node?: unknown; children?: React.ReactNode }) => (
+      <Tag className={className} {...props}>{wrap(children, node)}</Tag>
     );
   return { h1: make('h1'), h2: make('h2'), h3: make('h3'), h4: make('h4'), h5: make('h5'), h6: make('h6') };
 };
@@ -561,9 +665,9 @@ const MessageContent = React.memo(({
   ttsReading,
   emphasis,
   perform,
-  settledCount,
+  totalRevealed,
   wordRevealStyle,
-  wordDelays,
+  wordStarts,
   playedFx,
 }: Pick<MessageBlockProps, 'msg' | 'content' | 'isStreamingMsg' | 'revealComplete' | 'msgAnim' | 'dialogueColor'
   | 'dialogueStyle' | 'dialogueAnimation' | 'markup' | 'charColors' | 'hideMetadata' | 'oocHandling' | 'autoFormat'
@@ -571,9 +675,9 @@ const MessageContent = React.memo(({
   | 'styleQuotes' | 'substituteNames' | 'characterName' | 'userName' | 'showImages'
   | 'swipeSelections' | 'onImageClick' | 'onSelectSwipe' | 'markLore' | 'onPinContent'
   | 'expressiveText' | 'ttsReading' | 'emphasis' | 'perform' | 'sceneArt' | 'onRemoveArt'> & {
-    settledCount: number;
+    totalRevealed: number;
     wordRevealStyle: string | null;
-    wordDelays: Map<number, number>;
+    wordStarts: Map<number, number>;
     playedFx: Map<number, number>;
   }) => {
   const { entries: statEntries, prose: statProse } = buildStatPanel(content, statRules);
@@ -603,7 +707,36 @@ const MessageContent = React.memo(({
   // document order, so the matcher is built here, once, and lives on the
   // counter that every markdown block shares.
   const runs = performRuns(perform);
-  const counter: WordCounter = { value: 0, fresh: 0, claimed: new Set(), runs: runMatcher(runs) };
+  const counter: WordCounter = {
+    block: { value: 0 }, reserved: new Map(), fresh: 0, claimed: new Set(), runs: runMatcher(runs),
+  };
+
+  /*
+   * Where the settled text ends, in the walker's own numbering.
+   *
+   * The threshold has to be in the SAME units as the indices it is compared
+   * against, and it was not. It was counted off the raw streamed text, where
+   * `*door*.` is one token; the walker numbers the RENDERED text, where the
+   * emphasis ends and `.` begins a new text node, so it is two. Every marked
+   * span with punctuation after it pushed the indices one further ahead of the
+   * threshold, so the newest words fell past the end of the tail window and
+   * arrived with no reveal at all — six words' worth on a passage with
+   * emphasis in every sentence.
+   *
+   * There is no way to count the rendered words up front — that number only
+   * exists once the walk has finished. So take it from the walk itself, one
+   * render behind: `totalRef` is stamped after each commit with where the
+   * cursor actually ended. Being a tick stale is harmless in the one direction
+   * it errs — a slightly LOW total means a slightly longer tail, so the newest
+   * words are always inside it, which is the whole point. `totalRevealed` only
+   * has to say whether anything has been revealed at all.
+   */
+  const totalRef = useRef({ key: '', n: 0 });
+  if (totalRef.current.key !== msg.id) totalRef.current = { key: msg.id, n: 0 };
+  useEffect(() => { totalRef.current.n = counter.block.value; });
+  const settledCount = totalRevealed > 0
+    ? Math.max(0, totalRef.current.n - WORD_REVEAL_CAP)
+    : 0;
   // The word at the reveal edge is what the voice is narrating (the reveal is
   // paced to the voice), so highlight it as a karaoke cue while TTS reads.
   const readingWord = ttsReading && isStreamingMsg
@@ -636,14 +769,14 @@ const MessageContent = React.memo(({
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
-          p: ({ node: _node, children, ...props }) => (
+          p: ({ node, children, ...props }) => (
             <p {...props}>
-              {wrapWords(markLore(children), counter, settledCount, wordRevealStyle, wordDelays, expressiveText, readingWord, emphasisMap, performMap, playedFx, !!runs)}
+              {wrapWords(markLore(children), counter, cursorFor(counter, node), settledCount, wordRevealStyle, wordStarts, expressiveText, readingWord, emphasisMap, performMap, playedFx, !!runs)}
             </p>
           ),
-          li: ({ node: _node, children, ...props }) => (
+          li: ({ node, children, ...props }) => (
             <li {...props}>
-              {wrapWords(markLore(children), counter, settledCount, wordRevealStyle, wordDelays, expressiveText, readingWord, emphasisMap, performMap, playedFx, !!runs)}
+              {wrapWords(markLore(children), counter, cursorFor(counter, node), settledCount, wordRevealStyle, wordStarts, expressiveText, readingWord, emphasisMap, performMap, playedFx, !!runs)}
             </li>
           ),
           hr: ({ node: _node }) =>
@@ -653,12 +786,12 @@ const MessageContent = React.memo(({
           /* An emphasis span is one of three things: speech, an aside, or plain
            * emphasis. `styleQuotes` delivers the first two here already wrapped
            * in `*…*`; which quote opened them is what tells them apart. */
-          em: ({ node: _node, ...props }) => {
+          em: ({ node, ...props }) => {
             const channel = quoteChannel(textOf(props.children));
             if (!channel) {
               return (
                 <em className="italic opacity-90" {...props}>
-                  {wrapWords(markLore(props.children), counter, settledCount, wordRevealStyle, wordDelays, expressiveText, readingWord, emphasisMap, performMap, playedFx, !!runs)}
+                  {wrapWords(markLore(props.children), counter, cursorFor(counter, node), settledCount, wordRevealStyle, wordStarts, expressiveText, readingWord, emphasisMap, performMap, playedFx, !!runs)}
                 </em>
               );
             }
@@ -669,6 +802,20 @@ const MessageContent = React.memo(({
             const preset = channel === 'speech'
               ? { color: charColors?.speech || dialogueColor, style: dialogueStyle, animation: dialogueAnimation }
               : { ...markup.aside, color: charColors?.aside || markup.aside.color };
+            /* Word-wrapped like every other text-bearing renderer, and for the
+             * reason spelled out on the headings below: `settledCount` is
+             * computed from `countWords` over the WHOLE passage, but only words
+             * that pass through `wrapWords` advance `counter`. A branch that
+             * renders its children raw therefore counts towards the settled
+             * total without ever claiming an index back, and `counter.value`
+             * stops being the word's real position.
+             *
+             * This branch was that bug's last hiding place, and the worst one
+             * to leave it in: `styleQuotes` is on by default, so on an RP log —
+             * which is mostly speech — the counter could fall so far behind
+             * `settled` that the tail window never opened and the stream effect
+             * silently did nothing at all. Quoted speech now animates, and the
+             * words after it land where they actually are. */
             return (
               <em
                 className={cn(
@@ -679,7 +826,9 @@ const MessageContent = React.memo(({
                   }),
                 )}
                 {...props}
-              />
+              >
+                {wrapWords(markLore(props.children), counter, cursorFor(counter, node), settledCount, wordRevealStyle, wordStarts, expressiveText, readingWord, emphasisMap, performMap, playedFx, !!runs)}
+              </em>
             );
           },
           /* `**beat**` and `****shout****` are the same mdast node at two
@@ -695,6 +844,8 @@ const MessageContent = React.memo(({
               ? (node as any).children[0] : null;
             const doubled = kid?.type === 'element' && kid.tagName === 'strong';
             if (doubled) {
+              const base = counter.reserved.get(node);
+              if (base !== undefined) counter.reserved.set(kid, base);
               return <StrongDepth.Provider value={1}>{props.children}</StrongDepth.Provider>;
             }
             return (
@@ -705,7 +856,7 @@ const MessageContent = React.memo(({
                 animate={!isStreamingMsg}
                 {...props}
               >
-                {wrapWords(props.children, counter, settledCount, wordRevealStyle, wordDelays, expressiveText, readingWord, emphasisMap, performMap, playedFx, !!runs)}
+                {wrapWords(props.children, counter, cursorFor(counter, node), settledCount, wordRevealStyle, wordStarts, expressiveText, readingWord, emphasisMap, performMap, playedFx, !!runs)}
               </StrongMark>
             );
           },
@@ -715,7 +866,7 @@ const MessageContent = React.memo(({
           ...headingRenderers(
             markup.heading,
             !isStreamingMsg,
-            (children) => wrapWords(markLore(children), counter, settledCount, wordRevealStyle, wordDelays, expressiveText, readingWord, emphasisMap, performMap, playedFx, !!runs),
+            (children, node) => wrapWords(markLore(children), counter, cursorFor(counter, node), settledCount, wordRevealStyle, wordStarts, expressiveText, readingWord, emphasisMap, performMap, playedFx, !!runs),
           ),
           // AI-written tables get a hover pin — captured verbatim from the
           // processed source so the dock re-renders exactly what's shown.
@@ -885,9 +1036,9 @@ const MessageContent = React.memo(({
     && prev.sceneArt === next.sceneArt
     && prev.onRemoveArt === next.onRemoveArt
     && prev.revealComplete === next.revealComplete
-    && prev.settledCount === next.settledCount
+    && prev.totalRevealed === next.totalRevealed
     && prev.wordRevealStyle === next.wordRevealStyle
-    && prev.wordDelays === next.wordDelays
+    && prev.wordStarts === next.wordStarts
     && prev.playedFx === next.playedFx;
 });
 
@@ -929,19 +1080,20 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
   // Streaming word-reveal: only the last WORD_REVEAL_CAP words animate.
   // The effect is its own setting — the block reveal (msgAnim) stays untouched.
   const totalWords = isStreamingMsg ? countWords(displayContent) : 0;
-  const settledCount = isStreamingMsg ? Math.max(0, totalWords - WORD_REVEAL_CAP) : 0;
+  const totalRevealed = totalWords;
   const wordRevealStyle = isStreamingMsg && streamEffect !== 'none' ? streamEffect : null;
 
-  // Per-word animation delays, assigned when a word first arrives and kept
-  // for the whole stream so re-renders never reschedule a word's reveal.
-  const wordDelaysRef = useRef<{ key: string; map: Map<number, number> }>({ key: '', map: new Map() });
+  // When each word's reveal STARTED, stamped on first arrival and kept for the
+  // whole stream — so neither a re-render nor a remount can restart a word's
+  // reveal or reschedule it. See the note on `wrapWords`.
+  const wordStartsRef = useRef<{ key: string; map: Map<number, number> }>({ key: '', map: new Map() });
   const delayKey = isStreamingMsg ? msg.id : '';
-  if (wordDelaysRef.current.key !== delayKey) {
-    wordDelaysRef.current = { key: delayKey, map: new Map() };
+  if (wordStartsRef.current.key !== delayKey) {
+    wordStartsRef.current = { key: delayKey, map: new Map() };
   }
-  const wordDelays = wordDelaysRef.current.map;
+  const wordStarts = wordStartsRef.current.map;
 
-  // Same lifetime as the delays, and for the same reason: a fact about a word's
+  // Same lifetime as the starts, and for the same reason: a fact about a word's
   // FIRST appearance, which a re-render must not be able to undo.
   const playedFxRef = useRef<{ key: string; set: Map<number, number> }>({ key: '', set: new Map() });
   if (playedFxRef.current.key !== delayKey) {
@@ -1056,7 +1208,7 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
             {noteCount}
           </button>
         )}
-        <MessageContent {...props} content={displayContent} settledCount={settledCount} wordRevealStyle={wordRevealStyle} wordDelays={wordDelays} playedFx={playedFx} />
+        <MessageContent {...props} content={displayContent} totalRevealed={totalRevealed} wordRevealStyle={wordRevealStyle} wordStarts={wordStarts} playedFx={playedFx} />
       </div>
     );
   }
@@ -1157,7 +1309,7 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
             </span>
           )}
         </div>
-        <MessageContent {...props} content={displayContent} settledCount={settledCount} wordRevealStyle={wordRevealStyle} wordDelays={wordDelays} playedFx={playedFx} />
+        <MessageContent {...props} content={displayContent} totalRevealed={totalRevealed} wordRevealStyle={wordRevealStyle} wordStarts={wordStarts} playedFx={playedFx} />
       </div>
     </div>
   );
@@ -1217,6 +1369,24 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
     && prev.userName === next.userName
     && prev.showImages === next.showImages
     && prev.ttsReading === next.ttsReading
+    /*
+     * The last word of every message depended on this line.
+     *
+     * While a passage reveals, `truncateToWord` hides the word still being
+     * typed, and `revealComplete` is what finally says "show the whole thing".
+     * But by the time it flips, `streamedText` is ALREADY the full text — that
+     * is the reveal loop's own exit condition — so `finishCurrentMessage`
+     * changes nothing except this flag. Without it here the comparator saw
+     * fifty-odd identical props and skipped the render, the inner content never
+     * heard that the reveal had finished, and the message sat through its whole
+     * pause still hiding its final word before advancing. The word was never
+     * drawn at all, on any message: "…guttered out on its" and then the next
+     * passage.
+     *
+     * `MessageContent` has always compared it. This is the memo ABOVE it, and a
+     * prop that never reaches a component cannot be compared by it.
+     */
+    && prev.revealComplete === next.revealComplete
     && prev.emphasis === next.emphasis
     && prev.perform === next.perform;
 });

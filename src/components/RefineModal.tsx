@@ -1,12 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Wand2, X, Loader2, Highlighter, ArrowLeftRight, Check, AlertTriangle, Copy } from 'lucide-react';
+import { Wand2, X, Loader2, Highlighter, ArrowLeftRight, Check, AlertTriangle, Copy, ListTree } from 'lucide-react';
 import { useAppStore } from '../store';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { resolveContent } from '../utils/lens';
 import { samplerParamsFrom } from '../utils/aiClient';
 import { extract, buildGrounding, fidelity, entitySet, Extraction, PosClass } from '../utils/narrativeExtractor';
 import { generateRefinement, RefineMode } from '../utils/narrativeDirector';
-import { narrativeBlocksFor, renderNarrativeBlocks } from '../utils/narrativeBlocks';
+import { narrativeBlocksFor } from '../utils/narrativeBlocks';
+import {
+  FUNCTION_LABEL, FUNCTION_HINT, FunctionedBlock, NarrativeFunction,
+  floorFunctions, functionsPresent, labelFunctions, renderFunctionBlocks,
+} from '../utils/narrativeFunction';
+import { hashContent } from '../utils/sceneDirector';
 import { castOf } from '../utils/askCharacter';
 import { cn } from '../utils/cn';
 
@@ -79,10 +84,74 @@ export const RefineModal = ({ onClose }: { onClose: () => void }) => {
     [store.chains, store.currentStory?.userName],
   );
   const descriptor = storyId && msg ? v2.sceneByStory[storyId]?.[msg.id] : undefined;
-  const structure = useMemo(
-    () => (msg ? renderNarrativeBlocks(narrativeBlocksFor(source, msg.name, { cast, dialogue: descriptor?.dialogue })) : ''),
+  const blocks = useMemo(
+    () => (msg ? narrativeBlocksFor(source, msg.name, { cast, dialogue: descriptor?.dialogue }) : []),
     [source, msg, cast, descriptor],
   );
+
+  /**
+   * Who the story has already met, before this passage.
+   *
+   * "First appearance" is a fact about the story so far, so the floor needs to
+   * know which names are already spent — otherwise a passage read from the
+   * middle of a chat claims to introduce a character the reader met an hour
+   * ago. Only messages BEFORE this one count, which is the same read-so-far
+   * gate the codex and Ask Character use.
+   */
+  const introducedBefore = useMemo(() => {
+    const seen = new Set<string>();
+    const flat = store.chains.flatMap(c => c.messages);
+    const here = flat.findIndex(m => m.id === msg?.id);
+    const earlier = flat.slice(0, here < 0 ? flat.length : here)
+      .map(m => m.content.toLowerCase()).join(' ');
+    for (const name of cast) {
+      if (earlier.includes(name.trim().toLowerCase())) seen.add(name.trim().toLowerCase());
+    }
+    return seen;
+  }, [store.chains, msg?.id, cast]);
+
+  // The model's read, when there is one, else the heuristic floor. Cached per
+  // message in the v2 store so re-opening the Refinery costs nothing.
+  const [aiFns, setAiFns] = useState<NarrativeFunction[] | null>(null);
+  const [reading, setReading] = useState(false);
+  const passageHash = useMemo(() => hashContent(source), [source]);
+  const cached = storyId && msg ? v2.functionsByStory[storyId]?.[msg.id] : undefined;
+  const cachedFns = cached?.hash === passageHash ? cached.fns : undefined;
+
+  const fnBlocks: FunctionedBlock[] = useMemo(() => {
+    const floor = floorFunctions(blocks, { cast, introduced: new Set(introducedBefore) });
+    const read = aiFns ?? cachedFns;
+    return read && read.length === floor.length
+      ? floor.map((b, i) => ({ ...b, fn: read[i] }))
+      : floor;
+  }, [blocks, cast, introducedBefore, aiFns, cachedFns]);
+
+  const present = useMemo(() => functionsPresent(fnBlocks), [fnBlocks]);
+  const [sections, setSections] = useState<Partial<Record<NarrativeFunction, string>>>({});
+  const [order, setOrder] = useState<NarrativeFunction[]>([]);
+
+  /* The structure handed to the model carries the FUNCTION labels rather than
+   * the channel ones, so the per-section instructions and the target order
+   * below name blocks the model can actually find in it. */
+  const structure = useMemo(() => renderFunctionBlocks(fnBlocks), [fnBlocks]);
+
+  const readStructure = async () => {
+    if (!aiReady || reading || !blocks.length) return;
+    setReading(true);
+    try {
+      const out = await labelFunctions(
+        blocks,
+        { base: store.aiBaseUrl, key: store.aiApiKey, model: store.aiModel },
+        { cast, introduced: new Set(introducedBefore), reader: samplerParamsFrom(store.aiAdvanced) },
+      );
+      const fns = out.map(b => b.fn);
+      setAiFns(fns);
+      if (storyId && msg) v2.setFunctionRead(storyId, msg.id, passageHash, fns);
+    } finally { setReading(false); }
+  };
+
+  const toggleOrder = (f: NarrativeFunction) =>
+    setOrder(o => (o.includes(f) ? o.filter(x => x !== f) : [...o, f]));
 
   const [mode, setMode] = useState<RefineMode>('restyle');
   const [target, setTarget] = useState('');
@@ -108,7 +177,7 @@ export const RefineModal = ({ onClose }: { onClose: () => void }) => {
     abort.current = new AbortController();
     try {
       const out = await generateRefinement(
-        { text: source, mode, target, grounding: buildGrounding(ex), structure },
+        { text: source, mode, target, grounding: buildGrounding(ex), structure, sections, order },
         { base: store.aiBaseUrl, key: store.aiApiKey, model: store.aiModel, params: samplerParamsFrom(store.aiAdvanced) },
         abort.current.signal,
       );
@@ -123,7 +192,9 @@ export const RefineModal = ({ onClose }: { onClose: () => void }) => {
     if (!storyId || !msg || !result) return;
     v2.setOverride(storyId, {
       messageId: msg.id, kind: 'rewrite', content: result, source: 'ai',
-      note: `Refinery · ${mode === 'restyle' && target.trim() ? target.trim() : mode}`,
+      note: `Refinery · ${mode === 'restyle' && target.trim() ? target.trim() : mode}`
+        + (order.length ? ` · reshaped` : '')
+        + (Object.values(sections).some(v => v?.trim()) ? ` · per-section` : ''),
       createdAt: Date.now(),
     });
     if (!lensOn) v2.setLensOn(storyId, true); // so the rewrite is actually shown
@@ -213,6 +284,85 @@ export const RefineModal = ({ onClose }: { onClose: () => void }) => {
               <input value={target} onChange={e => setTarget(e.target.value)}
                 placeholder="Describe the change (e.g. present tense, more sensory detail)"
                 className="w-full rounded-lg bg-app-bg border border-app-text/15 px-3 py-2 text-app-text text-sm focus:border-accent outline-none" />
+            )}
+
+            {/* Structure — the narrative-function read of this passage.
+              *
+              * The value of naming the sections is that a rewrite can then be
+              * AIMED. One brief for a whole passage is the wrong granularity
+              * for prose doing several things at once: "tighten this" means
+              * something different to a stretch of world movement than to a
+              * line of dialogue. Below, each section can carry its own
+              * instruction, and the order they should end up in can be stated
+              * outright instead of described. */}
+            {present.length > 0 && (
+              <div>
+                <div className="flex items-center justify-between">
+                  <label className="flex items-center gap-1.5 text-xs uppercase tracking-wide text-app-text/50">
+                    <ListTree size={13} /> Structure
+                  </label>
+                  <button
+                    onClick={readStructure}
+                    disabled={!aiReady || reading}
+                    title={aiReady
+                      ? 'Read the passage and label each section'
+                      : 'Connect an AI endpoint to read the structure'}
+                    className="flex items-center gap-1 text-xs text-app-text/50 hover:text-accent disabled:opacity-40 disabled:hover:text-app-text/50"
+                  >
+                    {reading ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} />}
+                    {aiFns || cachedFns ? 'Re-read' : 'Read with AI'}
+                  </button>
+                </div>
+                <p className="mt-0.5 text-[11px] text-app-text/40">
+                  {aiFns || cachedFns
+                    ? 'Labelled by the model, cached for this passage.'
+                    : 'Labelled by the built-in reader — no endpoint needed. Read with AI for a closer look.'}
+                </p>
+
+                <div className="mt-2 flex flex-col gap-1.5">
+                  {present.map(f => {
+                    const count = fnBlocks.filter(b => b.fn === f).length;
+                    const pos = order.indexOf(f);
+                    return (
+                      <div key={f} className="flex items-center gap-2">
+                        <button
+                          onClick={() => toggleOrder(f)}
+                          title={`${FUNCTION_HINT[f]}\nClick to place it in the target order.`}
+                          className={cn(
+                            'shrink-0 text-xs px-2 py-1 rounded-md border text-left min-w-[9.5rem]',
+                            pos >= 0
+                              ? 'border-accent/40 bg-accent/10 text-accent'
+                              : 'border-app-text/15 text-app-text/70 hover:border-accent/30')}
+                        >
+                          <span className="tabular-nums opacity-60">
+                            {pos >= 0 ? `${pos + 1}. ` : ''}
+                          </span>
+                          {FUNCTION_LABEL[f]}
+                          <span className="opacity-40"> ×{count}</span>
+                        </button>
+                        <input
+                          value={sections[f] ?? ''}
+                          onChange={e => setSections(prev => ({ ...prev, [f]: e.target.value }))}
+                          placeholder="leave alone"
+                          aria-label={`What to do with ${FUNCTION_LABEL[f]}`}
+                          className="flex-1 min-w-0 rounded-md bg-app-bg border border-app-text/15 px-2 py-1 text-xs text-app-text focus:border-accent outline-none"
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {order.length > 0 && (
+                  <div className="mt-2 flex items-start gap-2 text-[11px] text-app-text/60">
+                    <span className="uppercase tracking-wide text-app-text/40 shrink-0">Order</span>
+                    <span className="flex-1">
+                      {order.map(f => FUNCTION_LABEL[f]).join(' → ')}
+                      {order.length < present.length && ' → (the rest, as written)'}
+                    </span>
+                    <button onClick={() => setOrder([])} className="shrink-0 hover:text-accent">Clear</button>
+                  </div>
+                )}
+              </div>
             )}
 
             {/* Result */}

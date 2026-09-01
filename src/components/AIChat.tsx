@@ -5,8 +5,8 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import {
-  Bot, Check, ChevronLeft, ChevronRight, Combine, Loader2, Pencil, Plus, RefreshCw,
-  ScrollText, Send, SlidersHorizontal, Sparkles, Square, Trash2, Wand2, X,
+  Bot, Check, ChevronDown, ChevronLeft, ChevronRight, Combine, Copy, Loader2, Pencil, Plus, RefreshCw,
+  ListOrdered, ScrollText, Send, SlidersHorizontal, Sparkles, Square, Trash2, Wand2, Wrench, X,
 } from 'lucide-react';
 import { useAppStore } from '../store';
 import { useShallow } from 'zustand/react/shallow';
@@ -32,7 +32,11 @@ import { ContextZoneBuilder } from './ContextZoneBuilder';
 import { VisitorPanel } from './VisitorPanel';
 import { CowritePanel } from './CowritePanel';
 import { SummarizePanel } from './SummarizePanel';
-import { AiAdvancedConfig, CardInfo as Card, ChatTurn, CowriteRunSpec, Message, VisitorTurnSpec } from '../types';
+import { TaskPanel } from './TaskPanel';
+import { runAgentTurn, workingBudget } from '../utils/agentLoop';
+import { renderToolCatalog } from '../utils/agentTools';
+import { buildToolContext } from '../hooks/useAgentTools';
+import { AiAdvancedConfig, CardInfo as Card, ChatToolStep, ChatTurn, CowriteRunSpec, Message, VisitorTurnSpec } from '../types';
 
 type Scope = 'page' | 'here' | 'all' | 'swipes' | 'zones';
 
@@ -316,17 +320,96 @@ const Markdown = ({ children }: { children: string }) => (
   </div>
 );
 
-/** A committed conversation turn, with swipe navigation + regenerate on the last reply. */
+/**
+ * The tool calls a turn made, folded away.
+ *
+ * Collapsed by default and stated as one line: the reader asked a question and
+ * wants the answer, not a transcript of the lookups. Expanded it shows the
+ * arguments and the result verbatim, because the one thing an agent must never
+ * be is unauditable — a pin gained a version, and the reader is entitled to see
+ * exactly what was asked for and what came back.
+ */
+const ToolSteps = ({ steps }: { steps: ChatToolStep[] }) => {
+  const [open, setOpen] = useState(false);
+  const failed = steps.filter(s => s.result.ok === false).length;
+  return (
+    <div className="max-w-[85%] mb-1 text-[11px]" data-testid="tool-steps">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="flex items-center gap-1.5 text-muted hover:text-app-text"
+      >
+        <Wrench size={11} />
+        <span>
+          {steps.length} step{steps.length === 1 ? '' : 's'}
+          {failed ? ` · ${failed} failed` : ''}
+        </span>
+        {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+      </button>
+      {open && (
+        <div className="mt-1 space-y-1">
+          {steps.map((s, i) => (
+            <div key={i} className="rounded border border-app-border bg-app-text/5 px-2 py-1">
+              <div className="flex items-center gap-1.5 font-mono">
+                <span className={s.result.ok === false ? 'text-red-500' : 'text-accent'}>
+                  {s.tool}
+                </span>
+                {s.result.ok === false && <span className="text-red-500">failed</span>}
+              </div>
+              {!!Object.keys(s.args).length && (
+                <pre className="mt-0.5 whitespace-pre-wrap break-words opacity-70">
+                  {JSON.stringify(s.args)}
+                </pre>
+              )}
+              <pre className="mt-0.5 whitespace-pre-wrap break-words opacity-60">
+                {JSON.stringify(s.result).slice(0, 600)}
+              </pre>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+/**
+ * A committed conversation turn.
+ *
+ * Every turn is editable, deletable and re-runnable, both roles. Editing your
+ * own question and asking again is the cheapest steering there is, and editing
+ * a reply is how a reader keeps a mostly-right answer they are about to build
+ * on — the same reasoning that makes a Lens override an edit rather than a
+ * regeneration. An edit rewrites the SHOWN variant only, so the swipes still
+ * reach what the model actually said.
+ */
 const TurnView = React.memo(({
-  turn, isLast, busy, onSwipe, onRegenerate,
+  turn, isLast, busy, onSwipe, onRegenerate, onEdit, onDelete, onRetry,
 }: {
   turn: ChatTurn;
   isLast: boolean;
   busy: boolean;
   onSwipe: (dir: -1 | 1) => void;
   onRegenerate: () => void;
+  onEdit: (text: string) => void;
+  onDelete: () => void;
+  /** Drop everything after this turn and generate again from it. */
+  onRetry: () => void;
 }) => {
   const content = turn.variants[turn.activeVariant] ?? turn.variants[0] ?? '';
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(content);
+  const [copied, setCopied] = useState(false);
+
+  const startEdit = () => { setDraft(content); setEditing(true); };
+  const commit = () => {
+    if (draft.trim() && draft !== content) onEdit(draft);
+    setEditing(false);
+  };
+  const copy = () => {
+    void navigator.clipboard?.writeText(content).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    }).catch(() => { /* a denied clipboard is not worth an error banner */ });
+  };
   const many = turn.variants.length > 1;
   const isAssistant = turn.role === 'assistant';
   // Provenance, but only where it changes what the text IS: a visitor's voice,
@@ -338,7 +421,7 @@ const TurnView = React.memo(({
     && (turn.visitorSpec || turn.lensTargetId || turn.cowriteSpec)
     ? turn.scopeLabel : null;
   return (
-    <div className={cn('flex flex-col', turn.role === 'user' ? 'items-end' : 'items-start')}>
+    <div className={cn('group/turn flex flex-col', turn.role === 'user' ? 'items-end' : 'items-start')}>
       {provenance && (
         <span
           className={cn(
@@ -350,19 +433,62 @@ const TurnView = React.memo(({
           {provenance}
         </span>
       )}
-      <div
-        className={cn(
-          'max-w-[85%] px-3.5 py-2.5 rounded-2xl text-sm',
-          turn.role === 'user'
-            ? 'bg-accent text-white rounded-br-sm'
-            : 'bg-app-text/5 border border-app-border rounded-bl-sm',
-        )}
-      >
-        {isAssistant ? <Markdown>{content}</Markdown> : <span className="whitespace-pre-wrap">{content}</span>}
-      </div>
-      {isAssistant && (many || isLast) && (
-        <div className="flex items-center gap-0.5 mt-1 text-muted">
-          {many && (
+      {isAssistant && !!turn.toolSteps?.length && <ToolSteps steps={turn.toolSteps} />}
+      {editing ? (
+        // Full width while editing, whichever side the bubble sits on: an 85%
+        // box aligned right is a miserable thing to type a paragraph into.
+        <div className="w-full">
+          <textarea
+            value={draft}
+            onChange={e => setDraft(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Escape') { e.stopPropagation(); setEditing(false); }
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) commit();
+            }}
+            autoFocus
+            rows={Math.min(16, Math.max(3, draft.split('\n').length + 1))}
+            className="w-full text-sm rounded-xl border border-app-border bg-app-surface px-3 py-2 resize-y"
+            data-testid="turn-editor"
+          />
+          <div className="flex items-center gap-2 mt-1">
+            <button
+              onClick={commit}
+              className="text-xs px-2.5 py-1 rounded-full bg-accent text-white"
+            >
+              Save
+            </button>
+            <button
+              onClick={() => setEditing(false)}
+              className="text-xs px-2.5 py-1 rounded-full border border-app-border hover:bg-app-text/5"
+            >
+              Cancel
+            </button>
+            <span className="text-[10px] text-muted">⌘/Ctrl + Enter saves · Esc cancels</span>
+          </div>
+        </div>
+      ) : (
+        <div
+          className={cn(
+            'max-w-[85%] px-3.5 py-2.5 rounded-2xl text-sm',
+            turn.role === 'user'
+              ? 'bg-accent text-white rounded-br-sm'
+              : 'bg-app-text/5 border border-app-border rounded-bl-sm',
+          )}
+        >
+          {isAssistant ? <Markdown>{content}</Markdown> : <span className="whitespace-pre-wrap">{content}</span>}
+        </div>
+      )}
+      {!editing && (
+        // The row is always in the DOM and fades in on hover, rather than being
+        // mounted on hover: a control that appears on hover cannot be reached
+        // on a touch screen at all, and this panel is used on tablets.
+        <div
+          className={cn(
+            'flex items-center gap-0.5 mt-1 text-muted transition-opacity',
+            'opacity-0 focus-within:opacity-100 group-hover/turn:opacity-100 touch:opacity-100',
+          )}
+        >
+          {isAssistant && many && (
             <>
               <button
                 onClick={() => onSwipe(-1)}
@@ -383,7 +509,7 @@ const TurnView = React.memo(({
               </button>
             </>
           )}
-          {isLast && (
+          {isAssistant && isLast && (
             <button
               onClick={onRegenerate}
               disabled={busy}
@@ -393,6 +519,39 @@ const TurnView = React.memo(({
               <RefreshCw size={12} />
             </button>
           )}
+          {!isLast && (
+            <button
+              onClick={onRetry}
+              disabled={busy}
+              className="p-0.5 rounded hover:bg-app-text/10 disabled:opacity-30"
+              title={isAssistant
+                ? 'Answer again from here — drops the turns below'
+                : 'Ask again from here — drops the turns below'}
+              data-testid="turn-retry"
+            >
+              <RefreshCw size={12} />
+            </button>
+          )}
+          <button
+            onClick={startEdit}
+            className="p-0.5 rounded hover:bg-app-text/10"
+            title="Edit this message"
+            data-testid="turn-edit"
+          >
+            <Pencil size={12} />
+          </button>
+          <button onClick={copy} className="p-0.5 rounded hover:bg-app-text/10" title="Copy">
+            {copied ? <Check size={12} /> : <Copy size={12} />}
+          </button>
+          <button
+            onClick={onDelete}
+            disabled={busy}
+            className="p-0.5 rounded hover:bg-app-text/10 hover:text-red-500 disabled:opacity-30"
+            title="Delete this message"
+            data-testid="turn-delete"
+          >
+            <Trash2 size={12} />
+          </button>
         </div>
       )}
     </div>
@@ -530,6 +689,7 @@ export const AIChat = () => {
     aiApiKey: s.aiApiKey,
     aiModel: s.aiModel,
     aiAdvanced: s.aiAdvanced,
+    aiAgentMode: s.aiAgentMode,
     lensEditTarget: s.lensEditTarget,
     lensEditFocus: s.lensEditFocus,
     // Actions are stable references, so including them never triggers a re-render.
@@ -537,6 +697,7 @@ export const AIChat = () => {
     setAiBaseUrl: s.setAiBaseUrl,
     setAiApiKey: s.setAiApiKey,
     setAiAdvanced: s.setAiAdvanced,
+    setAiAgentMode: s.setAiAgentMode,
     setAiOpen: s.setAiOpen,
     restreamFromId: s.restreamFromId,
     setLensEditTarget: s.setLensEditTarget,
@@ -555,6 +716,7 @@ export const AIChat = () => {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [cowriteOpen, setCowriteOpen] = useState(false);
   const [summarizeOpen, setSummarizeOpen] = useState(false);
+  const [tasksOpen, setTasksOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState('');
   // Live streaming state for the in-flight assistant reply.
@@ -602,6 +764,9 @@ export const AIChat = () => {
   const addTurn = useAuraV2Store(s => s.addTurn);
   const appendVariant = useAuraV2Store(s => s.appendVariant);
   const setActiveVariant = useAuraV2Store(s => s.setActiveVariant);
+  const editTurn = useAuraV2Store(s => s.editTurn);
+  const removeTurn = useAuraV2Store(s => s.removeTurn);
+  const removeTurnsFrom = useAuraV2Store(s => s.removeTurnsFrom);
   const setOverride = useAuraV2Store(s => s.setOverride);
 
   const activeThread = threads.find(t => t.id === activeThreadId) ?? threads[threads.length - 1];
@@ -737,6 +902,62 @@ export const AIChat = () => {
       ];
 
       const params = samplerParamsFrom(adv);
+
+      /**
+       * Agent mode: the model may look things up and update pins before it
+       * answers.
+       *
+       * Same endpoint, same samplers, same system prompt — plus the catalogue,
+       * and a loop that reads each reply for a directive instead of showing it
+       * straight to the reader. Not streamed: the reply has to be COMPLETE
+       * before it can be parsed for a fence, and streaming a half-written JSON
+       * block into the panel shows the reader the machinery rather than the
+       * work. The step lines are the progress indicator instead.
+       */
+      if (store.aiAgentMode) {
+        const agentSystem = `${system}\n\n${renderToolCatalog()}`;
+        const steps: ChatToolStep[] = [];
+        let prose = '';
+        const paint = () => setStreamText([
+          prose,
+          steps.map(s => `\`${s.tool}\`${s.result.ok === false ? ' — failed' : ''}`).join('\n'),
+        ].filter(Boolean).join('\n\n'));
+
+        const run = await runAgentTurn({
+          system: agentSystem,
+          history: apiMsgs.slice(1),
+          ctx: buildToolContext(storyId),
+          // The story is in the system prompt and is never compacted; this is
+          // what is left for the conversation and the tool results in it.
+          budgetChars: workingBudget(agentSystem.length, adv.contextSize, adv.maxTokens),
+          signal: controller.signal,
+          send: (messages, signal) =>
+            chatCompletion(base, store.aiApiKey, store.aiModel, messages, params, signal, 'Working'),
+          onText: (t) => { prose = t; paint(); },
+          onStep: (s) => {
+            steps.push({ tool: s.call.tool, args: s.call.args, result: s.result });
+            paint();
+          },
+        });
+
+        // A turn that wrote something and then went quiet must still be
+        // reported — the pin already gained a version, and silence here would
+        // leave the reader believing nothing happened.
+        const text = run.text.trim()
+          || (steps.some(s => s.result.ok !== false)
+            ? 'I ran those steps but did not write a reply. The results are above.'
+            : '');
+        if (!text) throw new Error('The model returned an empty reply.');
+        if (regenTurnId) appendVariant(storyId, threadId, regenTurnId, text);
+        else {
+          addTurn(storyId, threadId, {
+            role: 'assistant', variants: [text], activeVariant: 0, scopeLabel,
+            ...(steps.length ? { toolSteps: steps } : {}),
+          });
+        }
+        return;
+      }
+
       let full: string;
       if (adv.streaming) {
         full = await chatCompletionStream(
@@ -1023,6 +1244,48 @@ export const AIChat = () => {
   };
 
   const stop = () => abortRef.current?.abort();
+
+  const editTurnText = (turnId: string, text: string) => {
+    if (!storyId || !activeThread) return;
+    editTurn(storyId, activeThread.id, turnId, text);
+    // A Lens draft edited by hand must reach the page, or the reader has
+    // corrected a rewrite and the story still shows the model's version.
+    const turn = turns.find(t => t.id === turnId);
+    if (turn?.lensTargetId) applyLens(turn.lensTargetId, text, turn.lensInstruction);
+  };
+
+  const deleteTurn = (turnId: string) => {
+    if (streaming || !storyId || !activeThread) return;
+    removeTurn(storyId, activeThread.id, turnId);
+  };
+
+  /**
+   * Generate again from a turn part-way up the thread.
+   *
+   * Everything below it goes first — a reply cannot be re-answered while the
+   * exchange that followed it is still there, and silently keeping those turns
+   * would leave the thread contradicting itself. An assistant turn regenerates
+   * in place as a new swipe, so the version being replaced is still reachable;
+   * a user turn gets a fresh reply after it.
+   */
+  const retryFrom = (turn: ChatTurn) => {
+    if (streaming || !storyId || !activeThread) return;
+    const list = useAuraV2Store.getState().chatThreadsByStory[storyId]
+      ?.find(t => t.id === activeThread.id)?.turns ?? [];
+    const idx = list.findIndex(t => t.id === turn.id);
+    if (idx === -1) return;
+    const next = list[idx + 1];
+    if (turn.role === 'assistant') {
+      if (next) removeTurnsFrom(storyId, activeThread.id, next.id);
+      if (turn.visitorSpec) void runVisitorTurn(activeThread.id, turn.id, turn.visitorSpec);
+      else if (turn.cowriteSpec) void runCowrite(activeThread.id, turn.id, turn.cowriteSpec);
+      else if (turn.lensTargetId) void runLens(activeThread.id, turn.id, turn.lensTargetId, turn.lensInstruction ?? '');
+      else void runAssistant(activeThread.id, turn.id);
+    } else {
+      if (next) removeTurnsFrom(storyId, activeThread.id, next.id);
+      void runAssistant(activeThread.id, null);
+    }
+  };
 
   const swipeTurn = (turn: ChatTurn, dir: -1 | 1) => {
     if (!storyId || !activeThread) return;
@@ -1368,6 +1631,9 @@ export const AIChat = () => {
                 busy={streaming}
                 onSwipe={(dir) => swipeTurn(t, dir)}
                 onRegenerate={regenerate}
+                onEdit={(text) => editTurnText(t.id, text)}
+                onDelete={() => deleteTurn(t.id)}
+                onRetry={() => retryFrom(t)}
               />
             ))}
             {streaming && (
@@ -1406,6 +1672,15 @@ export const AIChat = () => {
                 apiKey={store.aiApiKey}
                 model={store.aiModel}
                 onClose={() => setSummarizeOpen(false)}
+              />
+            )}
+
+            {tasksOpen && (
+              <TaskPanel
+                base={resolvedBase || store.aiBaseUrl}
+                apiKey={store.aiApiKey}
+                model={store.aiModel}
+                onClose={() => setTasksOpen(false)}
               />
             )}
           </div>
@@ -1495,6 +1770,31 @@ export const AIChat = () => {
                   )}
                 >
                   <ScrollText size={15} />
+                </button>
+                <button
+                  onClick={() => setTasksOpen(v => !v)}
+                  title="Tasks — read zones in order into one document"
+                  className={cn(
+                    'p-1.5 rounded-md hover:bg-app-text/10',
+                    tasksOpen ? 'text-accent bg-accent/10' : 'opacity-60 hover:opacity-100',
+                  )}
+                  data-testid="tasks-toggle"
+                >
+                  <ListOrdered size={15} />
+                </button>
+                <button
+                  onClick={() => store.setAiAgentMode(!store.aiAgentMode)}
+                  title={store.aiAgentMode
+                    ? 'Tools on — the assistant can look things up and update pins'
+                    : 'Tools off — the assistant can only answer'}
+                  aria-pressed={store.aiAgentMode}
+                  data-testid="agent-toggle"
+                  className={cn(
+                    'p-1.5 rounded-md hover:bg-app-text/10',
+                    store.aiAgentMode ? 'text-accent bg-accent/10' : 'opacity-60 hover:opacity-100',
+                  )}
+                >
+                  <Wrench size={15} />
                 </button>
                 <button
                   onClick={() => setAdvancedOpen(v => !v)}

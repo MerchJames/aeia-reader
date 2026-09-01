@@ -1,11 +1,14 @@
 import { useState, useRef } from 'react';
 import { Loader2, ScrollText, Square, Table2, X } from 'lucide-react';
 import { useAppStore } from '../store';
-import { useAuraV2Store } from '../stores/useAuraV2Store';
+import { flushV2, useAuraV2Store } from '../stores/useAuraV2Store';
 import { useSummaryStore } from '../stores/useSummaryStore';
 import { resolveContent } from '../utils/lens';
 import { askText } from '../utils/aiCall';
-import { estimateBudgetChars, runSheetFill, SummaryPassage } from '../utils/summarizer';
+import {
+  DETAIL_CHARS, DETAIL_OUTPUT, READ_DETAILS, ReadDetail, estimateBudgetChars, runSheetFill,
+  sectionBudget, SummaryPassage,
+} from '../utils/summarizer';
 import { LONG_READ_JOBS, runLongRead } from '../utils/longRead';
 import { cn } from '../utils/cn';
 
@@ -45,11 +48,20 @@ export const SummarizePanel = ({
   const [sheetTitle, setSheetTitle] = useState('Story sheet');
   const [sheetColumns, setSheetColumns] = useState('Character, Role, Status');
   const [ratio, setRatio] = useState(0.8);
+  const [detail, setDetail] = useState<ReadDetail>('normal');
   const [result, setResult] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   const contextTokens = useAppStore(s => s.aiAdvanced.contextSize);
-  const budgetChars = estimateBudgetChars(contextTokens, ratio);
+  // Story size, for the "~N sections" readout — the number that tells a reader
+  // at a glance whether this run will actually walk their story or gulp it.
+  const storyChars = useAppStore(s =>
+    s.chains.reduce((n, c) => n + c.messages.reduce((m, x) => m + x.content.length, 0), 0));
+  // Detail decides how much story a section covers; the window is only a
+  // ceiling on it. Sizing sections by the window alone turned a 128k-token
+  // setting into a one-pass "summary" of the whole chat — see sectionBudget.
+  const budgetChars = sectionBudget(detail, contextTokens, ratio);
+  const sheetBudgetChars = estimateBudgetChars(contextTokens, ratio);
 
   const run = async () => {
     const app = useAppStore.getState();
@@ -73,9 +85,21 @@ export const SummarizePanel = ({
     // model's deliberation never lands in the summary the reader reads — and a
     // reply that ran out of room mid-thought is retried with more, instead of
     // being reported as an empty summary.
+    const adv = app.aiAdvanced;
     const send = (messages: any, signal?: AbortSignal) =>
-      askText({ base, key: apiKey, model }, messages,
-        { label: 'Summarising', params: { temperature: 0.3 }, signal });
+      askText({ base, key: apiKey, model }, messages, {
+        label: 'Summarising',
+        params: { temperature: 0.3 },
+        // Room for the section, stated. Left out — as it was — no `max_tokens`
+        // is sent at all and the endpoint's own default applies; several of the
+        // backends this app targets cap that low enough to cut a section off
+        // mid-sentence, which reads as a model that writes badly rather than
+        // one that was never given room. `ask` adds reasoning headroom on top.
+        // The reader's own "max output tokens" wins where they have set one —
+        // before this, that setting did nothing at all here.
+        budget: adv.maxTokens > 0 ? adv.maxTokens : DETAIL_OUTPUT[detail],
+        signal,
+      });
 
     // --- Sheet mode: fill a structured table with deduped rows. ---
     if (mode === 'sheet') {
@@ -84,7 +108,7 @@ export const SummarizePanel = ({
       store.begin();
       try {
         const rows = await runSheetFill({
-          passages, budgetChars, columns,
+          passages, budgetChars: sheetBudgetChars, columns,
           instruction: instruction.trim() || `Extract every distinct ${columns[0].toLowerCase()} and its details.`,
           card: story.card, send, signal: controller.signal,
           onPhase: (p, d, t) => useSummaryStore.getState().step(p, d, t),
@@ -94,6 +118,7 @@ export const SummarizePanel = ({
         useAuraV2Store.getState().addSheet(story.id, {
           title: sheetTitle.trim() || 'Story sheet', columns, rows,
         });
+        void flushV2();
         store.end();
         setResult(`Created sheet “${sheetTitle.trim() || 'Story sheet'}” with ${rows.length} rows.`);
       } catch (e: any) {
@@ -133,14 +158,36 @@ export const SummarizePanel = ({
           content: doc, source: 'ai', instruction: job.label,
         });
       } else {
-        v2now.addPin(story.id, {
+        // `addPin` returns '' when the story is at its pin cap. This used to be
+        // void, and the code here then took `pins.slice(-1)[0]` as "the pin I
+        // just made" — at the cap, an unrelated pin, which was then marked as
+        // the summary pin so the NEXT run overwrote it. Now it says so instead.
+        const createdId = v2now.addPin(story.id, {
           title: 'Story summary', format: 'markdown', content: doc, inContext: false, docked: true,
         });
-        const created = (useAuraV2Store.getState().pinsByStory[story.id] ?? []).slice(-1)[0];
-        if (created) v2now.setSummaryPin(story.id, created.id);
+        if (createdId) v2now.setSummaryPin(story.id, createdId);
+        else {
+          store.fail(
+            'The document is ready but this story is at its pin limit, so nothing was saved. '
+            + 'Delete a pin and run again — or copy it out of the preview below.',
+          );
+          setResult(doc);
+          return;
+        }
       }
+      // A document the reader waited minutes for is the definition of a
+      // deliberate edit: it writes through rather than waiting on the 400ms
+      // debounce, which an unload can cut off.
+      void flushV2();
       store.end();
-      setResult(doc);
+      // A model that ignores the format is the difference between this engine
+      // and the map-reduce it replaced, and the only symptom in the document
+      // itself is prose that repeats itself. Say it plainly instead.
+      setResult(read.malformed
+        ? `⚠ ${read.malformed} of ${read.sections} passes did not follow the format`
+          + `${read.blind ? `, and ${read.blind} handed nothing forward` : ''}`
+          + `. The document is below; a different model may do better.\n\n${doc}`
+        : doc);
     } catch (e: any) {
       if (!controller.signal.aborted) store.fail(e?.message ?? 'Summary failed.');
       else store.end();
@@ -264,6 +311,53 @@ export const SummarizePanel = ({
         className="w-full resize-none rounded-md bg-app-bg border border-app-border px-2 py-1.5 text-xs focus:outline-none focus:border-accent"
       />
 
+      {/*
+        * How much story one section covers.
+        *
+        * This is the control that decides whether a long read is a summary or a
+        * compression. It used to be implied by the context window alone, which
+        * meant a reader who set 128k got the whole chat in ONE pass — and one
+        * reply about a quarter of a million characters is a paragraph about the
+        * ending. The window is now only a ceiling; this is the dial.
+        */}
+      <div>
+        <div className="flex items-center justify-between text-[11px] opacity-80 mb-1">
+          <span>Detail</span>
+          <span className="font-mono">
+            {storyChars > 0 ? `~${Math.max(1, Math.ceil(storyChars / budgetChars))} sections` : ''}
+          </span>
+        </div>
+        <div className="grid grid-cols-4 gap-1">
+          {READ_DETAILS.map(d => (
+            <button
+              key={d.id}
+              onClick={() => setDetail(d.id)}
+              disabled={running}
+              title={d.hint}
+              className={cn(
+                'text-[11px] px-1.5 py-1 rounded-md border disabled:opacity-40',
+                detail === d.id
+                  ? 'border-accent bg-accent/10 text-accent'
+                  : 'border-app-border hover:bg-app-text/5',
+              )}
+            >
+              {d.label}
+            </button>
+          ))}
+        </div>
+        <p className="text-[10px] text-muted mt-0.5">
+          {READ_DETAILS.find(d => d.id === detail)?.hint}
+          {' · '}~{budgetChars.toLocaleString()} chars per section
+          {', '}{(useAppStore.getState().aiAdvanced.maxTokens || DETAIL_OUTPUT[detail]).toLocaleString()} tokens to write it
+        </p>
+        {contextTokens > 0 && budgetChars < DETAIL_CHARS[detail] && (
+          <p className="text-[10px] text-amber-500 mt-0.5">
+            Sections are smaller than this setting asks for — your context
+            ({contextTokens.toLocaleString()} tok) is the limit.
+          </p>
+        )}
+      </div>
+
       <div>
         <div className="flex items-center justify-between text-[11px] opacity-80 mb-1">
           <span>Context fill per chunk</span>
@@ -276,8 +370,8 @@ export const SummarizePanel = ({
           className="w-full accent-accent"
         />
         <p className="text-[10px] text-muted mt-0.5">
-          ~{budgetChars.toLocaleString()} chars/chunk
-          {contextTokens > 0 ? ` (context ${contextTokens.toLocaleString()} tok)` : ' (default context — set it in Advanced)'}
+          A ceiling only — how much of the window one pass may fill.
+          {contextTokens > 0 ? ` Context ${contextTokens.toLocaleString()} tok.` : ' Context unset — set it in Advanced.'}
         </p>
       </div>
 
