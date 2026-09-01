@@ -279,6 +279,16 @@ export interface PassInput {
   card?: CardInfo;
   /** The reader's own steer, applied to every pass. */
   instruction?: string;
+  /**
+   * What this stretch IS, when the sections were chosen rather than cut.
+   *
+   * A long read slices by budget, so "stretch 2 of 5" is the truest thing that
+   * can be said about a section. A zone task walks a list the reader named —
+   * "Act I", then "The siege" — and the name is the only thing distinguishing
+   * one section from the next. Losing it means every pass reads as an arbitrary
+   * slice of a continuous story, which is exactly what these are not.
+   */
+  sectionLabel?: string;
 }
 
 const passageText = (chunk: SummaryPassage[]): string =>
@@ -312,6 +322,11 @@ export const buildPassMessages = (input: PassInput): ChatMsg[] => {
     job.keyBrief,
     '',
     'Answer with the section, then the marker, then the notes. Nothing else.',
+    // Spelled out because both mistakes are common and both used to be
+    // expensive: notes written first cost the whole section, and a reply
+    // wrapped in a fence put ``` in the middle of the reader's document.
+    'The SECTION COMES FIRST, always. Never write the notes before it.',
+    'Do not wrap your reply in a code fence.',
     'Never invent events. If a stretch is unclear, say less.',
   ].join('\n');
 
@@ -322,7 +337,9 @@ export const buildPassMessages = (input: PassInput): ChatMsg[] => {
     first
       ? 'This is the beginning of the story.'
       : `Stretches 1–${input.index - 1} are already written. Do not summarise them again.`,
-    `--- STRETCH ${input.index} OF ${input.total} ---\n${passageText(input.section)}`,
+    `--- ${input.sectionLabel
+      ? `${input.sectionLabel.toUpperCase()} — SECTION ${input.index} OF ${input.total}`
+      : `STRETCH ${input.index} OF ${input.total}`} ---\n${passageText(input.section)}`,
     input.instruction && `THE READER ASKS: ${input.instruction}`,
     `Write section ${input.index}, then ${CARRY_MARK}, then your notes.`,
   ].filter(Boolean).join('\n\n');
@@ -330,32 +347,184 @@ export const buildPassMessages = (input: PassInput): ChatMsg[] => {
   return [{ role: 'system', content: system }, { role: 'user', content: user }];
 };
 
+/**
+ * How well one reply followed the format.
+ *
+ * Reported rather than swallowed. Every one of these used to be handled
+ * silently, which meant a run could pay for twelve passes, keep three, and tell
+ * the reader nothing — they found out from a document that covered the last
+ * quarter of their story and had no way to know why.
+ */
+export type PassIssue =
+  /** Section, marker, notes, in that order. */
+  | 'ok'
+  /** No marker at all: the notes could not be separated and the key stood still. */
+  | 'no-marker'
+  /** The layout was wrong and the section had to be dug out of it. */
+  | 'recovered';
+
 export interface PassResult {
   section: string;
   key: string;
+  issue: PassIssue;
 }
+
+/** The marker, however the model decorated it. */
+const CARRY_CORE = /<<<\s*CARRY\s*>>>/i;
+/** Emphasis and fence characters a model wraps a marker in. */
+const DECORATION = /[\s*_~`]+/;
+
+/**
+ * Strip a fence the model opened and never closed on this side of the marker.
+ *
+ * Only when the count is ODD — a section that legitimately contains a balanced
+ * code block keeps it. An orphan is the tell that the reply was wrapped whole
+ * and the split cut the wrapper in half.
+ */
+const dropOrphanFence = (s: string): string => {
+  if (((s.match(/```/g) ?? []).length) % 2 !== 1) return s;
+  return s.replace(/^\s*```[a-z]*[ \t]*\n?/i, '').replace(/\n?[ \t]*```\s*$/, '').trim();
+};
+
+/** Where the document proper resumes — every job's format opens with a heading. */
+const headingAt = (s: string): number => {
+  const m = s.match(/(?:^|\n)#{1,6} /);
+  return m?.index === undefined ? -1 : (m.index === 0 ? 0 : m.index + 1);
+};
+
+/**
+ * The labels a job's notes use ("WHO:", "LAST:"), read off its own brief.
+ *
+ * Lets a reply that forgot the marker still have its notes lifted off the end
+ * rather than left in the reader's document, without this function having to
+ * know anything about which job it is.
+ */
+export const keyLabels = (keyBrief: string): string[] =>
+  (keyBrief.match(/^[A-Z][A-Z ]{1,14}:/gm) ?? []).map(s => s.trim());
 
 /**
  * Split a reply into the section and the notes.
  *
- * Fails soft in the direction that keeps reading: a model that forgets the
- * marker has still written a usable section, and losing the carry costs
- * continuity on the next pass rather than the whole run. The opposite choice —
- * discarding the reply — throws away material that cost real money to produce.
+ * Fails soft, but in ONE direction only: **the section is never lost.** Losing
+ * the notes costs continuity on the next pass; losing the section costs the
+ * pass, and a run that drops half its passes produces a document about the
+ * wrong half of the story while reporting success. That asymmetry is the whole
+ * design of this function — when the layout cannot be read, everything becomes
+ * the section.
+ *
+ * @param labels the job's note labels, from `keyLabels`. Optional; without them
+ *   a reply that omits the marker keeps its notes in the section rather than
+ *   having them guessed at.
  */
-export const parsePass = (reply: string, previousKey = ''): PassResult => {
+export const parsePass = (reply: string, previousKey = '', labels: string[] = []): PassResult => {
   const text = (reply ?? '').replace(SECTION_MARK, '').trim();
-  const at = text.indexOf(CARRY_MARK);
-  if (at === -1) return { section: text, key: previousKey };
-  return {
-    section: text.slice(0, at).trim(),
-    key: clip(text.slice(at + CARRY_MARK.length).trim(), KEY_CHARS) || previousKey,
-  };
+  const m = text.match(CARRY_CORE);
+
+  if (!m || m.index === undefined) {
+    // No marker. Try to lift the notes off the end by their own labels, so the
+    // model's private working does not end up in the reader's document.
+    const at = labels.length
+      ? labels
+        .map(l => {
+          const hit = text.match(new RegExp(`(?:^|\\n)[ \\t*_>-]*${l}`, 'i'));
+          return hit?.index === undefined ? -1 : hit.index;
+        })
+        .filter(i => i > 0)
+        .sort((a, b) => a - b)[0] ?? -1
+      : -1;
+    if (at > 0) {
+      return {
+        // A model that announces its notes ("Notes for next time:") leaves the
+        // announcement on the section side of the cut. It is not prose and it
+        // is not a heading, so it would sit in the reader's document as litter.
+        section: dropOrphanFence(text.slice(0, at).trim())
+          .replace(/\n[ \t*_>-]*(?:notes?|carry(?:ing)?|carried)\b[^\n]{0,40}:?[ \t*_]*$/i, '')
+          .trim(),
+        key: clip(text.slice(at).trim(), KEY_CHARS) || previousKey,
+        issue: 'no-marker',
+      };
+    }
+    return { section: dropOrphanFence(text), key: previousKey, issue: 'no-marker' };
+  }
+
+  const before = dropOrphanFence(text.slice(0, m.index).replace(new RegExp(`${DECORATION.source}$`), ''));
+  const after = dropOrphanFence(
+    text.slice(m.index + m[0].length).replace(new RegExp(`^${DECORATION.source}`), ''),
+  );
+
+  if (before) {
+    return {
+      section: before,
+      key: clip(after, KEY_CHARS) || previousKey,
+      issue: 'ok',
+    };
+  }
+
+  // Nothing before the marker: the model wrote its notes first. The section is
+  // still in there — this is the case that used to return an empty section and
+  // throw the whole pass away.
+  const h = headingAt(after);
+  if (h > 0) {
+    return {
+      section: after.slice(h).trim(),
+      key: clip(after.slice(0, h).trim(), KEY_CHARS) || previousKey,
+      issue: 'recovered',
+    };
+  }
+  // Cannot tell the two apart. Keep it all as the section rather than none of
+  // it, and leave the previous notes travelling.
+  return { section: after, key: previousKey, issue: 'recovered' };
 };
 
 /** The final pass: front matter over a finished body. */
+/** How much of the run's accumulated notes reach the assembly pass. */
+export const HISTORY_CHARS = 6000;
+
+/**
+ * Every stage of the read, condensed for the pass that writes the front matter.
+ *
+ * The assembly pass used to receive the outline and the FINAL key, and that is
+ * not enough to write what it is asked for. The key is deliberately end-state —
+ * the timeline job's own brief says "WHEN: where the clock stands NOW", "LAST:
+ * the final beat" — and it is rewritten at every pass with an instruction to
+ * "drop what no longer matters". So the model asked to write the premise, the
+ * cast and what is still open had seen a table of contents and a note about the
+ * last night of the story. It could not describe the beginning because nothing
+ * had told it what the beginning was.
+ *
+ * The trap in fixing this is recency, the same one `tasteBlock` guards against:
+ * a cap that keeps the most recent notes and drops the rest reproduces the
+ * original bug with more steps. So when the history will not fit, EVERY stage
+ * is clipped to an equal share rather than the early ones being dropped — a
+ * thinner view of the whole read beats a complete view of its end.
+ */
+export const keyHistory = (keys: readonly string[], cap = HISTORY_CHARS): string => {
+  // A pass whose notes did not change said nothing new; two identical entries
+  // in a row are noise in a document meant to show how things developed.
+  const kept: string[] = [];
+  for (const k of keys) {
+    const t = (k ?? '').trim();
+    if (t && t !== kept[kept.length - 1]) kept.push(t);
+  }
+  if (!kept.length) return '';
+
+  const label = (i: number) => `--- after stretch ${i + 1} ---`;
+  const whole = kept.map((k, i) => `${label(i)}\n${k}`).join('\n\n');
+  if (whole.length <= cap) return whole;
+
+  // Equal shares, floored so a very long run still says something per stage.
+  const overhead = kept.reduce((n, _, i) => n + label(i).length + 2, 0);
+  const share = Math.max(120, Math.floor((cap - overhead) / kept.length));
+  return kept.map((k, i) => `${label(i)}\n${clip(k, share)}`).join('\n\n');
+};
+
 export const buildAssembleMessages = (
   job: LongReadJob, outline: string, key: string, card?: CardInfo, title?: string,
+  /**
+   * The notes from every stage, oldest first (`keyHistory`). When present it
+   * replaces the single end-state key — it contains it, and more.
+   */
+  history?: string,
 ): ChatMsg[] => [
   {
     role: 'system',
@@ -365,14 +534,20 @@ export const buildAssembleMessages = (
       job.assemble,
       '',
       'Use ONLY what the outline and notes below contain. Invent nothing.',
-    ].join('\n'),
+      history
+        ? 'The notes are a record of what was known at each stage, oldest first. '
+          + 'Read them as one arc: the front matter describes the WHOLE story, not its ending.'
+        : '',
+    ].filter(Boolean).join('\n'),
   },
   {
     role: 'user',
     content: [
       title && `The story is called "${title}".`,
       cardToPromptBlock(card),
-      key && `NOTES FROM THE READ:\n${key}`,
+      history
+        ? `WHAT WAS KNOWN AT EACH STAGE OF THE READ:\n${history}`
+        : (key && `NOTES FROM THE READ:\n${key}`),
       `SECTION HEADINGS, IN ORDER:\n${outline}`,
       'Write the front matter only.',
     ].filter(Boolean).join('\n\n'),
@@ -415,17 +590,40 @@ export interface LongReadResult {
   sections: number;
   /** True when the run was stopped early; the document is what it got to. */
   aborted: boolean;
+  /**
+   * Passes whose reply did not follow the format.
+   *
+   * Surfaced so a poor document has a stated cause. A model that ignores the
+   * carry marker turns this engine back into the map-reduce it replaced — every
+   * pass reading blind — and the only symptom is prose that repeats itself.
+   */
+  malformed: number;
+  /** Passes that never handed notes forward, so the next one read blind. */
+  blind: number;
 }
 
 /** Read a whole story into one document. */
 export const runLongRead = async (opts: LongReadOptions): Promise<LongReadResult> => {
   const sections = chunkByBudget(opts.passages, opts.budgetChars);
   const total = sections.length;
-  if (!total) return { document: '', key: '', sections: 0, aborted: false };
+  if (!total) {
+    return { document: '', key: '', sections: 0, aborted: false, malformed: 0, blind: 0 };
+  }
 
   const lanes = Math.max(1, Math.min(Math.floor(opts.concurrency ?? 1), 8));
   const parts: string[] = [];
+  const labels = keyLabels(opts.job.keyBrief);
+  /** What was known after each pass — the assembly pass reads the whole arc. */
+  const keys: string[] = [];
   let key = '';
+  let malformed = 0;
+  let blind = 0;
+  const tally = (out: PassResult, carried: string) => {
+    if (out.issue !== 'ok') malformed++;
+    // "Blind" is about the NEXT pass: the notes did not move on, so it will
+    // read this stretch of the story with nothing from the one before it.
+    if (out.key === carried) blind++;
+  };
 
   const passFor = (i: number, carriedKey: string, tail: string) =>
     buildPassMessages({
@@ -445,12 +643,14 @@ export const runLongRead = async (opts: LongReadOptions): Promise<LongReadResult
     for (let i = 0; i < total; i++) {
       if (opts.signal?.aborted) break;
       opts.onPhase?.('reading', i, total);
-      const out = parsePass(await opts.send(passFor(i, key, tailOf(doc)), opts.signal), key);
+      const out = parsePass(await opts.send(passFor(i, key, tailOf(doc)), opts.signal), key, labels);
+      tally(out, key);
       if (out.section) {
         parts.push(out.section);
         doc = doc ? `${doc}\n\n${out.section}` : out.section;
       }
       key = out.key;
+      keys.push(key);
     }
   } else {
     // The fast path. No notes travel, because there is nobody to travel from —
@@ -462,19 +662,33 @@ export const runLongRead = async (opts: LongReadOptions): Promise<LongReadResult
       for (;;) {
         const i = next++;
         if (i >= total || opts.signal?.aborted) return;
-        done[i] = parsePass(await opts.send(passFor(i, '', ''), opts.signal));
+        done[i] = parsePass(await opts.send(passFor(i, '', ''), opts.signal), '', labels);
         opts.onPhase?.('reading', done.filter(Boolean).length, total);
       }
     };
     await Promise.all(Array.from({ length: Math.min(lanes, total) }, worker));
-    for (const d of done) if (d?.section) parts.push(d.section);
+    for (const d of done) {
+      if (!d) continue;
+      if (d.issue !== 'ok') malformed++;
+      if (d.section) parts.push(d.section);
+    }
+    // Every lane read blind by construction, which is what this mode trades.
+    blind = total;
+    // Each lane's notes are still a record of ITS stretch, so the assembly pass
+    // gets the whole arc here too — it is the one step that benefits from the
+    // fast path having read every part of the story, even if blindly.
+    for (const d of done) if (d?.key) keys.push(d.key);
     key = done.filter(Boolean).map(d => d!.key).filter(Boolean).join('\n');
     key = clip(key, KEY_CHARS);
   }
 
   opts.onPhase?.('reading', total, total);
   const body = parts.join('\n\n');
-  if (!body) return { document: '', key, sections: 0, aborted: !!opts.signal?.aborted };
+  if (!body) {
+    return {
+      document: '', key, sections: 0, aborted: !!opts.signal?.aborted, malformed, blind,
+    };
+  }
 
   // Front matter, unless we were stopped — a half-read story should not be
   // handed a confident premise for an ending nobody reached.
@@ -483,7 +697,9 @@ export const runLongRead = async (opts: LongReadOptions): Promise<LongReadResult
     opts.onPhase?.('assembling', 0, 1);
     try {
       front = (await opts.send(
-        buildAssembleMessages(opts.job, outlineOf(body), key, opts.card, opts.title),
+        buildAssembleMessages(
+          opts.job, outlineOf(body), key, opts.card, opts.title, keyHistory(keys),
+        ),
         opts.signal,
       )).trim();
     } catch { front = ''; }
@@ -495,5 +711,7 @@ export const runLongRead = async (opts: LongReadOptions): Promise<LongReadResult
     key,
     sections: parts.length,
     aborted: !!opts.signal?.aborted,
+    malformed,
+    blind,
   };
 };

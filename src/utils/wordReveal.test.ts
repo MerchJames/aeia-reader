@@ -17,6 +17,7 @@
  * reveal — and a settled word must carry NO class at all, because a span that
  * keeps its animation class replays the animation on every re-render.
  */
+import { STREAM_EFFECTS } from '../types';
 import { REVEAL_CAP, REVEAL_STAGGER, revealClass, revealWords } from './wordReveal';
 
 let pass = 0, fail = 0;
@@ -94,6 +95,20 @@ const rebuild = (text: string) => revealWords(text).map(w => `${w.text}${w.after
     'a settled word carries NOTHING — a class that stays replays on every render');
   eq(revealClass(fresh, null), '', 'no effect chosen, no class');
   eq(revealClass(fresh, 'none'), '', '"none" is not an effect either');
+
+  /* Every effect the settings panel offers reaches these views too.
+   *
+   * Script, Panels and Atlas render their own text through this module rather
+   * than through MessageBlock's tree-walker, and the two are only kept in step
+   * by intent. An effect that works in Storybook and does nothing in Script is
+   * exactly the kind of gap nobody reports — you would have to switch view
+   * mid-stream to see it. */
+  for (const fx of STREAM_EFFECTS) {
+    if (fx === 'none') continue;
+    eq(revealClass(fresh, fx), `word-reveal word-reveal-${fx}`,
+      `"${fx}" reaches the views that render their own text`);
+    eq(revealClass(settled, fx), '', `"${fx}" leaves a settled word alone`);
+  }
 }
 
 console.log(`${pass} passed, ${fail} failed`);

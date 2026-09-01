@@ -1,4 +1,5 @@
 import { MessageOverride, Story } from '../types';
+import { applyPlan, type SwipePlan } from './swipePlan';
 import { AEIA_MARK } from '../assets/aeiaMark';
 import { resolveContent } from './lens';
 
@@ -13,7 +14,15 @@ import { resolveContent } from './lens';
  */
 const MARK_REF = 'aeia-reader-mark';
 
-export const storyToMarkdown = (story: Story, exportedAt = Date.now()): string => {
+/**
+ * @param plan which alternate each message carries. Omit it and the export is
+ *   exactly what it always was — see `applyPlan`, which returns the same array
+ *   when a plan changes nothing.
+ */
+export const storyToMarkdown = (
+  story: Story, exportedAt = Date.now(), plan: SwipePlan = {},
+): string => {
+  const messages = applyPlan(story.messages, plan);
   const lines: string[] = [`![Aeia Reader][${MARK_REF}]`, '', `# ${story.title}`, ''];
   if (story.characterName || story.userName) {
     lines.push(
@@ -25,21 +34,21 @@ export const storyToMarkdown = (story: Story, exportedAt = Date.now()): string =
     );
   }
 
-  const words = story.messages.reduce((n, m) => n + (m.content.match(/\S+/g)?.length ?? 0), 0);
+  const words = messages.reduce((n, m) => n + (m.content.match(/\S+/g)?.length ?? 0), 0);
   let date: string;
   try {
     date = new Date(exportedAt).toLocaleDateString(undefined,
       { year: 'numeric', month: 'long', day: 'numeric' });
   } catch { date = new Date(exportedAt).toISOString().slice(0, 10); }
   lines.push(
-    `*${story.messages.length.toLocaleString()} passages · ${words.toLocaleString()} words`
+    `*${messages.length.toLocaleString()} passages · ${words.toLocaleString()} words`
       + ` · exported from Aeia Reader on ${date}*`,
     '',
     '---',
     '',
   );
 
-  story.messages.forEach(msg => {
+  messages.forEach(msg => {
     if (story.format !== 'kobold') lines.push(`### ${msg.name}`, '');
     lines.push(msg.content.trim(), '');
   });

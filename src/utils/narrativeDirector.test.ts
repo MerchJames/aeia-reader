@@ -31,5 +31,32 @@ ok(parseRefinement('   ') === null, 'blank reply → null (keep original)');
 // A quoted line of dialogue is NOT mistaken for a wrapping quote when it stands alone.
 ok(parseRefinement('"Don\'t," she said.') === '"Don\'t," she said.', 'dialogue-only line is left intact');
 
+/* ── Per-section instructions and a target shape ──────────────────────────
+ *
+ * The mode brief is one instruction for the whole passage, which is the wrong
+ * granularity for prose doing several things at once. These two blocks are what
+ * let a rewrite be aimed: address one narrative section at a time, and state
+ * the order the sections should end up in.
+ */
+{
+  const m = buildRefineMessages({
+    text, mode: 'tighten', grounding,
+    sections: { world: 'expand this', action: '', detail: 'cut by half' },
+    order: ['world', 'action'],
+  })[1].content;
+  ok(m.includes('[World movement]: expand this'), 'a section instruction names its label');
+  ok(m.includes('[Character detail]: cut by half'), 'and every section that has one');
+  ok(!/\[Char action\]:/.test(m),
+    'a section left blank is not mentioned — silence means "leave it alone"');
+  ok(/Target order/.test(m) && /1\. \[World movement\]/.test(m),
+    'the target shape is given as a numbered order');
+  ok(/Reorder the TELLING only/.test(m),
+    'and is explicitly not a licence to change what happened');
+
+  const bare = buildRefineMessages({ text, mode: 'tighten', grounding })[1].content;
+  ok(!/Per-section/.test(bare) && !/Target order/.test(bare),
+    'neither block appears when the reader asked for neither');
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);

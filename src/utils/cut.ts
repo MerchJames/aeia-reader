@@ -50,6 +50,12 @@ export const CUT_EXTENSION = '.cut.json';
 export const CUT_SLICES: readonly string[] = [
   'sceneByStory',          // the Director's read — the expensive part
   'storyReadByStory',      // the whole-story read that grounds it
+  // The narrative-function read: which blocks are world movement, which are a
+  // character arriving, which are action. Shareable for the same reason the
+  // Director's read is — it is a reading of the STORY's own text, holds nothing
+  // the reader wrote or asked, and is the expensive half of a feature the
+  // recipient would otherwise need an endpoint to use.
+  'functionsByStory',
   'overridesByStory',      // Lens edits
   'lensOnByStory',         // …and whether they were switched on
   'performMarksByStory',   // hand-directed spans
@@ -102,6 +108,13 @@ export const NEVER_IN_A_CUT: readonly string[] = [
   'chatThreadsByStory',    // the reader's conversations about the story
   'activeThreadByStory',
   'zonesByStory',          // hand-curated context selections
+  // A task is a RECIPE over those zones: an order of zone ids, a document
+  // shape, and the id of the pin it writes into. Every one of those ids names
+  // something that exists only on this machine, so in somebody else's copy the
+  // task would be a broken pointer wearing a name. It is also working method
+  // rather than performance — the same reason its zones are private — and the
+  // document it produces is a pin, which is not shared either.
+  'tasksByStory',
   'visitorsByStory',       // characters borrowed from OTHER private chats
   // The reader's own persona and the shape of their whole library — the titles
   // of every other story they keep and a written account of what happened to

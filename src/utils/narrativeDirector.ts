@@ -11,6 +11,7 @@
  */
 
 import { ChatMsg, SamplerParams } from './aiClient';
+import { FUNCTION_LABEL, NarrativeFunction } from './narrativeFunction';
 // The shared stripper, not a third private copy — this one also handles the
 // reply that was cut off mid-thought, which the copy here did not.
 import { askText, stripReasoning } from './aiCall';
@@ -31,6 +32,30 @@ export interface RefineInput {
    * substitute for it, so a wrong label can't corrupt the rewrite.
    */
   structure?: string;
+  /**
+   * What to do with each narrative section, keyed by function.
+   *
+   * The mode brief is one instruction for a whole passage, which is the wrong
+   * granularity for prose that is doing several things at once: "tighten this"
+   * means something different to a stretch of world movement than it does to a
+   * line of dialogue. With `structure` above naming the sections, they can be
+   * addressed individually — keep the action verbatim, halve the detail, expand
+   * the world movement. Empty entries are dropped, so an untouched section is
+   * simply not mentioned rather than being told to stay the same.
+   */
+  sections?: Partial<Record<NarrativeFunction, string>>;
+  /**
+   * The order the sections should end up in.
+   *
+   * This is the "force formatting" half — a shape the passage ought to have,
+   * stated once, rather than a rewrite described in prose. It is given to the
+   * model as an instruction rather than applied mechanically, because moving a
+   * paragraph without rewriting its joins leaves the seams showing; the
+   * deterministic `reorderByFunction` exists for callers that want the blunt
+   * version. HARD RULE 2 still forbids adding or dropping events, so this can
+   * reorder the telling without changing what happened.
+   */
+  order?: readonly NarrativeFunction[];
 }
 
 export interface RefineConfig {
@@ -68,12 +93,34 @@ const SYSTEM = [
   '   around it, no markdown fences, no notes.',
 ].join('\n');
 
+/** Per-section instructions, as lines the model can act on one at a time. */
+const sectionBlock = (sections: RefineInput['sections']): string => {
+  const lines = Object.entries(sections ?? {})
+    .filter(([, v]) => v && v.trim())
+    .map(([k, v]) => `- [${FUNCTION_LABEL[k as NarrativeFunction]}]: ${v!.trim()}`);
+  return lines.length
+    ? `\nPer-section instructions (apply to blocks with that label):\n${lines.join('\n')}`
+    : '';
+};
+
+/** The shape to rewrite toward, named in the labels the structure block uses. */
+const orderBlock = (order: RefineInput['order']): string =>
+  order && order.length
+    ? `\nTarget order — arrange the passage so its sections run in this order,\n`
+      + `rewriting the joins so it reads as one piece. Sections not listed keep\n`
+      + `their relative place at the end. Reorder the TELLING only; the events,\n`
+      + `the facts and the words spoken stay as they are:\n`
+      + order.map((f, i) => `${i + 1}. [${FUNCTION_LABEL[f]}]`).join('\n')
+    : '';
+
 /** Build the chat messages for one refinement request. */
 export const buildRefineMessages = (input: RefineInput): ChatMsg[] => {
   const user = [
     `Brief: ${modeBrief(input.mode, input.target)}`,
     input.grounding ? `\nConstraints (must hold):\n${input.grounding}` : '',
     input.structure ? `\nPassage structure:\n${input.structure}` : '',
+    sectionBlock(input.sections),
+    orderBlock(input.order),
     '\nPassage to rewrite:',
     '"""',
     input.text,

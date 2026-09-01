@@ -40,6 +40,67 @@ export const estimateBudgetChars = (
 };
 
 /**
+ * How much story one section of a long read covers.
+ *
+ * This exists because sizing a section by the CONTEXT WINDOW is the wrong
+ * question, and it stayed wrong quietly for as long as windows were small. A
+ * reader who correctly tells this app their model holds 128k tokens was handed
+ * a section budget of 417,930 characters — so a 400-message chat became ONE
+ * chunk, read in ONE pass, and summarised in one reply. The result is not a
+ * summary, it is a lossy compression of a quarter of a million characters, and
+ * a model writing one reply about that much text writes about the end of it.
+ * "It missed the beginning" is the only possible outcome.
+ *
+ * A section should cover a readable STRETCH of story, and how much that is has
+ * nothing to do with how much the model could physically hold. The window's
+ * only remaining job is a ceiling: it can make a section smaller, never bigger.
+ */
+export type ReadDetail = 'brief' | 'normal' | 'detailed' | 'exhaustive';
+
+export const READ_DETAILS: readonly { id: ReadDetail; label: string; hint: string }[] = [
+  { id: 'brief', label: 'Brief', hint: 'broad strokes, fewest passes' },
+  { id: 'normal', label: 'Normal', hint: 'a section per long scene' },
+  { id: 'detailed', label: 'Detailed', hint: 'a section per scene' },
+  { id: 'exhaustive', label: 'Exhaustive', hint: 'a section per beat — slow and dear' },
+];
+
+/** Characters of story one section covers. */
+export const DETAIL_CHARS: Record<ReadDetail, number> = {
+  brief: 48_000,
+  normal: 24_000,
+  detailed: 12_000,
+  exhaustive: 6_000,
+};
+
+/**
+ * Room for the section a pass writes, in tokens.
+ *
+ * Sent explicitly because leaving it out means the endpoint's own default
+ * applies, and several of the backends this app targets default it low enough
+ * to cut a section off mid-sentence — which then reads as a model that writes
+ * badly rather than one that was never given room.
+ */
+export const DETAIL_OUTPUT: Record<ReadDetail, number> = {
+  brief: 800,
+  normal: 1400,
+  detailed: 2400,
+  exhaustive: 3600,
+};
+
+/**
+ * Characters of story for one section: what the detail asks for, clamped by
+ * what the window can actually hold.
+ *
+ * The `Math.min` is the entire fix. The window may only ever shrink a section.
+ */
+export const sectionBudget = (
+  detail: ReadDetail, contextTokens: number, ratio = 0.8, reserveChars = 1500,
+): number => Math.max(
+  600,
+  Math.min(DETAIL_CHARS[detail], estimateBudgetChars(contextTokens, ratio, reserveChars)),
+);
+
+/**
  * Split passages into contiguous chunks that each fit `budgetChars`. A single
  * passage larger than the budget becomes its own (over-budget) chunk rather
  * than being dropped — the model still summarizes it, just with less headroom.

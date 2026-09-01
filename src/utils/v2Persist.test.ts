@@ -30,7 +30,19 @@ const ok = (cond: boolean, msg: string) => { if (cond) { pass++; } else { fail++
 // the person the reader plays across several chats, so it belongs to the reader
 // and not to any one story. Sharding it per story would give each chat its own
 // private copy of a thing whose entire purpose is being shared between them.
-ok(PERSISTED_SLICES.length === 43, 'every persisted slice is declared');
+// 44: +functionsByStory (Record<storyId, Record<messageId, { hash, fns }>>) —
+// story-keyed, so perStory, and sharded exactly like sceneByStory for the same
+// reason: it is a cached model READ of one passage, and one chat's labels have
+// no business being rewritten when another chat is read. The `hash` inside is
+// the passage fingerprint, so the cache invalidates itself on an edited or
+// re-swiped message rather than describing prose it was not taken from.
+// 45: +tasksByStory (Record<storyId, ZoneTask[]>) — story-keyed, so perStory,
+// and sharded beside zonesByStory because a task is an ORDER over that story's
+// zones and means nothing without them. What is NOT here is the document a task
+// produces: that lands as a version of a pin, in pinsByStory, where the reader
+// can step back through it. A task holding its own output would be a second
+// copy of every document, rewritten on every run.
+ok(PERSISTED_SLICES.length === 45, 'every persisted slice is declared');
 ok(PERSISTED_SLICES.some(s => s.slice === 'throughlines' && !s.perStory),
   'throughlines are global — a per-story copy of a cross-story record is a contradiction');
 ok(new Set(PERSISTED_SLICES.map(s => s.slice)).size === PERSISTED_SLICES.length, 'no slice is declared twice');

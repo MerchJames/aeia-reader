@@ -18,7 +18,8 @@
  * the replies, not that fetch works.
  */
 import {
-  KEY_CHARS, LONG_READ_JOBS, SUMMARY_JOB, buildAssembleMessages, buildPassMessages, clip,
+  KEY_CHARS, LONG_READ_JOBS, SUMMARY_JOB, TIMELINE_JOB, buildAssembleMessages, buildPassMessages, clip,
+  keyHistory, keyLabels,
   outlineOf, parsePass, runLongRead, tailOf,
 } from './longRead';
 import type { SummaryPassage } from './summarizer';
@@ -60,6 +61,110 @@ const stub = (label = 'ok') => {
 
   const empty = parsePass('### A\nbody\n<<<CARRY>>>\n   ', 'OLD');
   eq(empty.key, 'OLD', 'blank notes do not wipe what we already knew');
+}
+
+/*
+ * How a real model actually lays out a reply — and the one rule that matters.
+ *
+ * Found by running the engine against five plausible layouts (2026-09-01). Four
+ * of the five were broken, and the worst was silent: a model that writes its
+ * notes BEFORE the section made `text.slice(0, at)` empty, so the section was
+ * dropped and the pass thrown away at full cost. A model that varies its layout
+ * from pass to pass therefore kept only the passes it happened to format
+ * correctly — producing a document about a fragment of the story, with a
+ * successful-looking run behind it. That is the bug this block exists for.
+ *
+ * The asymmetry is the design: losing the notes costs continuity on ONE pass,
+ * losing the section costs the pass. So when the layout cannot be read, the
+ * section wins and everything becomes the section.
+ */
+{
+  const labels = keyLabels(TIMELINE_JOB.keyBrief);
+  ok(labels.includes('WHEN:') && labels.includes('LAST:'),
+    'a job\'s note labels are read off its own brief, not hardcoded');
+
+  const notesFirst = parsePass(
+    '<<<CARRY>>>\nWHEN: night\nLAST: she left\n\n### Stretch 4\n- **dawn** — she left', 'OLD', labels);
+  eq(notesFirst.section, '### Stretch 4\n- **dawn** — she left',
+    'notes written first no longer cost the section — the run-losing bug');
+  eq(notesFirst.key, 'WHEN: night\nLAST: she left', 'and the notes are still picked up');
+  eq(notesFirst.issue, 'recovered', 'reported rather than passed off as a clean pass');
+
+  const bold = parsePass('### S\n- a beat\n**<<<CARRY>>>**\nWHEN: night', 'OLD', labels);
+  eq(bold.section, '### S\n- a beat', 'a decorated marker leaves no ** in the document');
+  eq(bold.key, 'WHEN: night', 'nor at the head of the notes');
+  eq(bold.issue, 'ok', 'and it counts as following the format, because it did');
+
+  const spaced = parsePass('### S\nbody\n<<< carry >>>\nWHEN: night', 'OLD', labels);
+  eq(spaced.section, '### S\nbody', 'spacing and case inside the marker are tolerated');
+
+  const fenced = parsePass(
+    '```markdown\n### S\n- a beat\n<<<CARRY>>>\nWHEN: night\n```', 'OLD', labels);
+  eq(fenced.section, '### S\n- a beat', 'a reply wrapped whole in a fence puts no ``` in the document');
+  eq(fenced.key, 'WHEN: night', 'and none in the notes');
+
+  // A section that legitimately contains a code block keeps it — the orphan
+  // rule is what distinguishes a wrapper cut in half from real content.
+  const withCode = parsePass(
+    '### S\n```js\nconst a = 1;\n```\ndone\n<<<CARRY>>>\nWHEN: night', 'OLD', labels);
+  ok(withCode.section.includes('```js'), 'a balanced code block inside a section survives');
+  ok(withCode.section.endsWith('done'), 'whole');
+
+  // No marker at all: the notes must not land in the reader's document, and
+  // the key must still move — otherwise every later pass reads blind and this
+  // engine has silently become the map-reduce it was written to replace.
+  const none = parsePass(
+    '### S\n- a beat\n\nNotes for next time:\nWHEN: night\nLAST: she left', 'OLD', labels);
+  eq(none.section, '### S\n- a beat', 'the notes are lifted off by their own labels');
+  ok(!none.section.includes('Notes for next time'), 'announcement and all');
+  eq(none.key, 'WHEN: night\nLAST: she left', 'and they travel on');
+  eq(none.issue, 'no-marker', 'while still being reported as a malformed reply');
+
+  // Without labels there is nothing to cut on, so the section keeps everything
+  // rather than having its ending guessed at.
+  const blind = parsePass('### S\n- a beat\n\nWHEN: night', 'OLD');
+  ok(blind.section.includes('WHEN: night'), 'with no labels, nothing is guessed');
+  eq(blind.key, 'OLD', 'and the previous notes travel on');
+}
+
+// A whole run against a model that never once gets the layout right must still
+// produce every section, and must SAY that it went wrong.
+{
+  const story: SummaryPassage[] = Array.from({ length: 6 }, (_, i) => ({
+    name: 'Mara', content: `beat ${i} ` + 'x'.repeat(900),
+  }));
+  let n = 0;
+  const out = await runLongRead({
+    job: TIMELINE_JOB,
+    passages: story,
+    budgetChars: 2000,
+    send: async (messages) => {
+      if (/front matter/i.test(messages[0].content)) return '# Front';
+      n++;
+      return `<<<CARRY>>>\nWHEN: night ${n}\n\n### Stretch ${n}\n- **then** — beat ${n}`;
+    },
+  });
+  eq(out.sections, n, 'every pass that was paid for is in the document');
+  ok(out.document.includes('### Stretch 1'), 'including the first');
+  ok(out.document.includes(`### Stretch ${n}`), 'and the last');
+  eq(out.malformed, n, 'and the run reports that none of them followed the format');
+  eq(out.blind, 0, 'the notes still travelled, so no pass read blind');
+}
+
+// The failure that made a document read as map-reduce: notes never move.
+{
+  const story: SummaryPassage[] = Array.from({ length: 4 }, () => ({
+    name: 'Mara', content: 'x'.repeat(900),
+  }));
+  const out = await runLongRead({
+    job: TIMELINE_JOB,
+    passages: story,
+    budgetChars: 1000,
+    send: async (messages) =>
+      (/front matter/i.test(messages[0].content) ? '# Front' : '### S\njust prose, no notes'),
+  });
+  ok(out.blind > 0, 'a run whose notes never move says so');
+  eq(out.malformed, out.sections, 'and marks every pass as malformed');
 }
 
 // The key cannot grow, however enthusiastically it is rewritten.
@@ -178,6 +283,81 @@ const stub = (label = 'ok') => {
     ok(msgs[0].content.includes(job.format), `${job.id}: the format travels on every pass`);
     ok(buildAssembleMessages(job, '### A', 'notes').length === 2, `${job.id}: assembles`);
   }
+}
+
+/*
+ * The front matter is written by the blindest step in the run.
+ *
+ * It receives the section HEADINGS and the notes — and the notes used to be the
+ * final key alone, which is end-state by design ("WHEN: where the clock stands
+ * now", "LAST: the final beat") and rewritten at every pass with an instruction
+ * to drop what no longer matters. So the model asked for the premise, the cast
+ * and what is still open had seen a table of contents and a note about the last
+ * night of the story, and wrote front matter about the ending. On a long read
+ * that is the first thing the reader looks at.
+ *
+ * The fix is the whole arc — and its own trap is recency: a cap that keeps the
+ * recent notes and drops the early ones rebuilds the same bug with more steps.
+ */
+{
+  const stages = ['WHEN: night one\nWHERE: the inn', 'WHEN: night four\nWHERE: the gate'];
+  const h = keyHistory(stages);
+  ok(h.includes('the inn'), 'the history carries the beginning');
+  ok(h.includes('the gate'), 'and the end');
+  ok(h.indexOf('the inn') < h.indexOf('the gate'), 'oldest first, so it reads as an arc');
+  ok(/after stretch 1/.test(h), 'each stage says where in the read it was taken');
+
+  eq(keyHistory([]), '', 'no notes, no block');
+  eq(keyHistory(['', '   ']), '', 'and blank ones are not stages');
+  const dup = keyHistory(['WHO: Mara', 'WHO: Mara', 'WHO: Mara and Sable']);
+  eq((dup.match(/after stretch/g) ?? []).length, 2,
+    'a pass whose notes did not change is not a stage of its own');
+
+  // The trap. Twenty fat stages over a small cap: every one must survive,
+  // thinner — never the last few at full width.
+  const many = Array.from({ length: 20 }, (_, i) => `WHERE: place ${i} ` + 'x'.repeat(900));
+  const capped = keyHistory(many, 3000);
+  ok(capped.length <= 3200, 'the block has a ceiling');
+  eq((capped.match(/after stretch/g) ?? []).length, 20,
+    'and EVERY stage is still represented — dropping the early ones is the bug');
+  ok(capped.includes('place 0'), 'including the first');
+  ok(capped.includes('place 19'), 'and the last');
+}
+
+// The assembly pass actually receives it.
+{
+  const plain = buildAssembleMessages(SUMMARY_JOB, '### A', 'END STATE');
+  ok(plain[1].content.includes('END STATE'),
+    'with no history, the single key is still sent — old callers are unchanged');
+
+  const withArc = buildAssembleMessages(
+    SUMMARY_JOB, '### A', 'END STATE', undefined, 'A Story',
+    keyHistory(['WHERE: the inn', 'WHERE: the gate']),
+  );
+  ok(withArc[1].content.includes('the inn'), 'with one, the whole arc goes instead');
+  ok(withArc[1].content.includes('EACH STAGE'), 'under a header saying what it is');
+  ok(/WHOLE story, not its ending/i.test(withArc[0].content),
+    'and the model is told to describe the story rather than its end');
+}
+
+// End to end: the front matter can see the first stretch of a long read.
+{
+  const seen: string[] = [];
+  let n = 0;
+  await runLongRead({
+    job: TIMELINE_JOB,
+    passages: Array.from({ length: 8 }, () => ({ name: 'Mara', content: 'x'.repeat(900) })),
+    budgetChars: 1000,
+    send: async (messages) => {
+      if (/front matter/i.test(messages[0].content)) { seen.push(messages[1].content); return '# Front'; }
+      n++;
+      return `### S${n}\n- a beat\n<<<CARRY>>>\nWHERE: place ${n}`;
+    },
+  });
+  ok(n > 2, 'the run took several passes');
+  ok(seen[0].includes('place 1'),
+    'and the front matter was written knowing where the story STARTED');
+  ok(seen[0].includes(`place ${n}`), 'as well as where it ended');
 }
 
 console.log(`${pass} passed, ${fail} failed`);

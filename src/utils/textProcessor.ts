@@ -107,8 +107,94 @@ export const applyOoc = (text: string, mode: OocHandling = 'show'): string => {
 export const normalizeImages = (text: string): string =>
   text.replace(/<img\b[^>]*?\bsrc\s*=\s*["']([^"']+)["'][^>]*>/gi, (_m, src) => `\n\n![](${src})\n\n`);
 
+/**
+ * HTML the AI wrote, turned into markdown — or dropped, keeping its words.
+ *
+ * ── Why this is not optional ───────────────────────────────────────────────
+ *
+ * Raw HTML does not disappear on the way to the page; it arrives as LITERAL
+ * TAGS. `remark-rehype` passes the tags on as `raw` nodes and, with no
+ * `rehype-raw` in the pipeline (there is not one, deliberately — it would let a
+ * transcript run script), the JSX runtime renders a raw node as its own text.
+ * So a passage the model coloured came out reading
+ * `<font color=#FFCC66>It's almost there.</font>` on the page, and `<b>`, `<i>`
+ * and `<br>` did the same, in every view. SillyTavern logs are full of all four.
+ *
+ * The escape hatch that existed — the "Strip HTML/XML tags" auto-format preset
+ * — is opt-in, so the default experience was the broken one; and stripping is
+ * lossy where markdown has a perfectly good equivalent. So: convert what
+ * markdown can express, and drop the rest of the KNOWN tags, keeping their words.
+ *
+ * ── Two rules that keep it from eating prose ───────────────────────────────
+ *
+ * **Only known HTML tag names.** Roleplay is written full of angle-bracket
+ * gestures — `<sighs>`, `<Name>`, `x < y`, `<3` — and a generic `<[^>]+>` strip
+ * would silently delete them. A whitelist cannot: anything that is not actually
+ * an HTML tag is left exactly as written.
+ *
+ * **Code is untouchable.** A fenced block is the one place a tag is meant to be
+ * read as a tag, and `MessageBlock`'s `HTML_ISH` reads fenced HTML to offer it
+ * as a live pinned visual — rewriting it here would take that feature apart.
+ * Guarded the way `bookLayout`'s `renderInline` guards its own generated HTML:
+ * parked behind sentinels, restored at the end.
+ */
+const HTML_WRAP: Record<string, string> = {
+  b: '**', strong: '**', i: '*', em: '*', s: '~~', del: '~~', strike: '~~',
+};
+
+/** Tags we recognise, and may therefore rewrite. Everything else is prose. */
+const HTML_TAGS = [
+  ...Object.keys(HTML_WRAP),
+  'font', 'span', 'div', 'p', 'br', 'hr', 'u', 'mark', 'small', 'big', 'tt',
+  'center', 'sub', 'sup', 'a', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  'section', 'article', 'header', 'footer', 'nav', 'aside', 'figure',
+  'figcaption', 'blockquote', 'ins', 'abbr', 'cite', 'q',
+];
+const KNOWN_TAG_RE = new RegExp(`</?(?:${HTML_TAGS.join('|')})\\b[^>]*>`, 'gi');
+
+const FENCE_RE = /```[\s\S]*?```/g;
+const CODE_SPAN_RE = /`[^`\n]*`/g;
+
+export const normalizeInlineHtml = (text: string): string => {
+  if (!text.includes('<')) return text; // the overwhelmingly common case
+  const parked: string[] = [];
+  // A distinctive sentinel, never a bare index: prose is full of literal
+  // numbers ("Sixty-five percent", "100%"), and a bare-digit placeholder is
+  // matched by the restore below — which would swap somebody’s percentage for
+  // a code block. Same trick as the placeholders in `bookLayout` and
+  // `narrativeBlocks`, on a different pair from the \uE000 one further down
+  // this file, so the two passes can never collide.
+  const park = (m: string): string => `\uE100${parked.push(m) - 1}\uE101`;
+  // Fences first, then inline code — the same claiming order the channel passes
+  // use, so a fence containing a backtick is not half-eaten by the span rule.
+  let s = text.replace(FENCE_RE, park).replace(CODE_SPAN_RE, park);
+
+  // Structure that markdown spells differently.
+  s = s.replace(/<br\b[^>]*>/gi, '\n');
+  s = s.replace(/<\/?p\b[^>]*>/gi, '\n\n');
+  s = s.replace(/<hr\b[^>]*>/gi, '\n\n---\n\n');
+  s = s.replace(/<h([1-6])\b[^>]*>([\s\S]*?)<\/h\1\s*>/gi,
+    (_m, n: string, body: string) => `\n\n${'#'.repeat(Number(n))} ${body.trim()}\n\n`);
+  s = s.replace(/<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a\s*>/gi,
+    (_m, href: string, body: string) => `[${body.trim()}](${href})`);
+
+  // Emphasis the AI wrote as HTML. Both halves become the same marker, so an
+  // unclosed `<b>` leaves a dangling `**` — which `repairFormatting` closes at
+  // the end of its paragraph, exactly as it does for prose mis-marked by hand.
+  for (const [tag, mark] of Object.entries(HTML_WRAP)) {
+    s = s.replace(new RegExp(`</?${tag}\\b[^>]*>`, 'gi'), mark);
+  }
+
+  // Everything else we recognise: the tag goes, the words stay.
+  s = s.replace(KNOWN_TAG_RE, '');
+
+  return s.replace(/\uE100(\d+)\uE101/g, (_m, i: string) => parked[Number(i)]);
+};
+
 export const processText = (text: string, opts: ProcessOptions = {}) => {
-  let processed = applyOoc(normalizeImages(text), opts.oocHandling);
+  // Images first: an <img> carries its meaning in an attribute, so it has to
+  // become markdown before the tag-stripping above can reach it.
+  let processed = applyOoc(normalizeInlineHtml(normalizeImages(text)), opts.oocHandling);
 
   if (opts.substituteNames) {
     if (opts.characterName) processed = processed.replace(/\{\{char\}\}/gi, opts.characterName);
