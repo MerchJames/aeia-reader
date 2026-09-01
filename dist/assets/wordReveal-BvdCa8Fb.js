@@ -1,0 +1,1 @@
+const E=(s,e={})=>{const n=e.cap??24,c=e.stagger??30,t=[],l=/(\S+)(\s*)/g;let a;for(;a=l.exec(s);)t.push({text:a[1],after:a[2],fresh:!1,delay:0});const o=Math.max(0,t.length-n);for(let r=o;r<t.length;r++)t[r].fresh=!0,t[r].delay=(r-o)*c;return t},h=(s,e)=>s.fresh&&e&&e!=="none"?`word-reveal word-reveal-${e}`:"";export{h as a,E as r};
