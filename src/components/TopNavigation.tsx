@@ -2,8 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft, BookMarked, BookOpen, Bot, ChevronLeft, ChevronRight, Clapperboard, Film, Focus,
   GitBranch, Highlighter, Info, LayoutGrid, List, Map, MessageSquare, MoreHorizontal, MoreVertical,
-  Network, Pencil, ScrollText, SquareDashedMousePointer,
-  Pin, PinOff, Search, Settings, Table2, Wand2, X, Gamepad2,
+  Link2, Network, Pencil, ScrollText, SquareDashedMousePointer,
+  PenLine, Pin, PinOff, Search, Settings, Table2, Wand2, X, Gamepad2,
 } from 'lucide-react';
 import { useIsMobile, useIsTouch, useMediaQuery } from '../hooks/useMediaQuery';
 import { useAppStore } from '../store';
@@ -13,7 +13,10 @@ import { UiMode, ViewMode } from '../types';
 import { cn } from '../utils/cn';
 import { resolveContent } from '../utils/lens';
 import { buildSearchIndex, searchStory, SearchHit } from '../utils/storySearch';
-import { VIEW_HINT, VIEW_LABEL, overflowViews, resolveVisibleViews } from '../utils/viewBar';
+import {
+  VIEW_HINT, VIEW_LABEL, overflowViews, resolveVisibleViews, toolAllowed,
+  viewAfterModeChange, type ToolId,
+} from '../utils/viewBar';
 
 /** The one thing the bar owns that a pure module can't: the icons. */
 const VIEW_ICON: Record<ViewMode, React.ReactNode> = {
@@ -27,6 +30,7 @@ const VIEW_ICON: Record<ViewMode, React.ReactNode> = {
   rpg: <Gamepad2 size={18} />,
   sandbox: <Wand2 size={18} />,
   chat: <MessageSquare size={18} />,
+  workspace: <PenLine size={18} />,
   branches: <GitBranch size={18} />,
   overview: <List size={18} />,
   highlights: <Highlighter size={18} />,
@@ -34,10 +38,10 @@ const VIEW_ICON: Record<ViewMode, React.ReactNode> = {
 
 /** The workspace presets, in order, with a one-line "what this reveals" hint. */
 const UI_MODES: { mode: UiMode; label: string; hint: string }[] = [
-  { mode: 'read', label: 'Read', hint: 'Just the reading views — no AI tools in the way.' },
-  { mode: 'cowrite', label: 'Cowrite', hint: 'Adds the AI writing assistant and the Chat view.' },
-  { mode: 'scenes', label: 'Scenes', hint: 'Adds the Sandbox view and the Scene Director.' },
-  { mode: 'all', label: 'All', hint: 'Everything, unfiltered.' },
+  { mode: 'read', label: 'Read', hint: 'Every way of reading, and nothing else — the Codex and Autofocus are the only tools.' },
+  { mode: 'cowrite', label: 'Cowrite', hint: 'The assistant, the lists and the text. Presentation views step aside.' },
+  { mode: 'scenes', label: 'Scenes', hint: 'Every way of showing the story. No lists, no text tools.' },
+  { mode: 'all', label: 'All', hint: 'Everything, unfiltered. Nothing is hidden here.' },
 ];
 
 export const TopNavigation = () => {
@@ -62,6 +66,17 @@ export const TopNavigation = () => {
   const resetVisibleViews = useAppStore(s => s.resetVisibleViews);
   const [viewMenuOpen, setViewMenuOpen] = useState(false);
   const viewsRef = useRef<HTMLDivElement>(null);
+  /**
+   * The preset strip starts collapsed.
+   *
+   * `modesOpen` is a deliberate click and lasts the session; `modesHovered` is
+   * the peek. Kept apart so that hovering past the chip on the way to Search
+   * does not leave the strip expanded behind the pointer.
+   */
+  const [modesOpen, setModesOpen] = useState(false);
+  const [modesHovered, setModesHovered] = useState(false);
+  const modesShown = modesOpen || modesHovered;
+  const modesRef = useRef<HTMLDivElement>(null);
   const isMobile = useIsMobile();
   // Width decides the LAYOUT; the input device decides the SIZE. A landscape
   // phone and a tablet are wide enough for the desktop header and still have
@@ -99,6 +114,7 @@ export const TopNavigation = () => {
   const sheetsOpen = useAuraV2Store(s => s.sheetsOpen);
   const setSheetsOpen = useAuraV2Store(s => s.setSheetsOpen);
   const setMultiverseOpen = useAuraV2Store(s => s.setMultiverseOpen);
+  const setCrossingBoardOpen = useAuraV2Store(s => s.setCrossingBoardOpen);
   const overridesByStory = useAuraV2Store(s => s.overridesByStory);
   const lensOnByStory = useAuraV2Store(s => s.lensOnByStory);
   const setLensOn = useAuraV2Store(s => s.setLensOn);
@@ -240,16 +256,24 @@ export const TopNavigation = () => {
   // The bar the reader actually sees: their pins if they've made any, the
   // preset's seed otherwise. The view they're ON is always shown, pinned or not.
   const shownViews = resolveVisibleViews(visibleViews, uiMode, viewMode);
-  const hiddenViews = overflowViews(shownViews);
-  const aiToolVisible = uiMode === 'all' || uiMode === 'cowrite';
+  const hiddenViews = overflowViews(shownViews, uiMode);
+  const aiToolVisible = toolAllowed('ai', uiMode);
   const activeMode = UI_MODES.find(m => m.mode === uiMode) ?? UI_MODES[3];
 
-  // Switching preset re-seeds the bar only while it's still ours to seed —
-  // once the reader has pinned anything, the preset stops touching it. The
-  // AI assistant still closes when the new preset no longer offers it.
+  /**
+   * Switching preset re-seeds the bar only while it's still ours to seed —
+   * once the reader has pinned anything, the preset stops touching it.
+   *
+   * Two things have to be settled at the same time, and both are about not
+   * leaving the reader somewhere the new preset does not go: a view it hides
+   * (they would be looking at a view the bar no longer contains), and an open
+   * assistant it does not offer.
+   */
   const changeMode = (m: UiMode) => {
     setUiMode(m);
-    if (aiOpen && m !== 'all' && m !== 'cowrite') setAiOpen(false);
+    const next = viewAfterModeChange(viewMode, m);
+    if (next !== viewMode) setViewMode(next);
+    if (aiOpen && !toolAllowed('ai', m)) setAiOpen(false);
   };
 
   /**
@@ -262,8 +286,8 @@ export const TopNavigation = () => {
    * `warm` marks the tools that use the amber "this is altering your reading"
    * treatment rather than the accent, matching what shipped.
    */
-  const tools: {
-    id: string; label: string; hint: string; icon: React.ReactNode;
+  const allTools: {
+    id: ToolId; label: string; hint: string; icon: React.ReactNode;
     active?: boolean; warm?: boolean; onClick: () => void;
   }[] = [
     {
@@ -271,17 +295,24 @@ export const TopNavigation = () => {
       icon: <Network size={18} />, onClick: () => setMultiverseOpen(true),
     },
     {
+      id: 'branching', label: 'Branching', hint: 'Branching — link this story to your others',
+      icon: <Link2 size={18} />, onClick: () => setCrossingBoardOpen(true),
+    },
+    {
       id: 'codex', label: 'Codex', hint: "Codex — everything you've met so far (C)",
       icon: <BookMarked size={18} />, active: codexOpen, onClick: () => setCodexOpen(!codexOpen),
     },
     {
-      id: 'sheets', label: 'Sheets', hint: 'Sheets — pinnable tables (S)',
-      icon: <Table2 size={18} />, active: sheetsOpen, onClick: () => setSheetsOpen(!sheetsOpen),
+      // The store flag is still `sheetsOpen`: it is transient UI state, not
+      // persisted, and renaming it would touch six files to say the same thing.
+      // What it opens is the Pins panel — the sheets moved into the Codex.
+      id: 'sheets', label: 'Pins', hint: 'Pins — documents you keep beside the story (S)',
+      icon: <Pin size={18} />, active: sheetsOpen, onClick: () => setSheetsOpen(!sheetsOpen),
     },
-    ...(aiToolVisible ? [{
+    {
       id: 'ai', label: 'Assistant', hint: 'Reading assistant (AI)',
       icon: <Bot size={18} />, active: aiOpen, onClick: () => setAiOpen(!aiOpen),
-    }] : []),
+    },
     {
       id: 'frame', label: 'Frame', hint: 'Frame — drag a box over words (B)',
       icon: <SquareDashedMousePointer size={18} />, active: isBoxMode,
@@ -297,6 +328,15 @@ export const TopNavigation = () => {
       icon: <Settings size={18} />, onClick: () => setSettingsOpen(true),
     },
   ];
+
+  /**
+   * What this workspace actually puts in the header.
+   *
+   * Filtered here, once, rather than at each of the two render sites — the
+   * desktop icon row and the phone menu read the same list, which is what stops
+   * a tool appearing in one and not the other.
+   */
+  const tools = allTools.filter(t => toolAllowed(t.id, uiMode));
 
   /** The phone's tool menu: labels, and targets a thumb can actually hit. */
   const toolsMenu = (
@@ -480,24 +520,73 @@ export const TopNavigation = () => {
       {/* On a phone the view bar drops to its own row below — see `viewBar`. */}
       {!isMobile && (
         <div className="flex items-center gap-2 min-w-0 flex-1 justify-end">
-          {/* Workspace preset — gates how much of the app is on screen. */}
-          <div className="hidden lg:flex shrink-0 bg-app-text/5 p-1 rounded-lg" role="tablist" aria-label="Workspace mode">
-            {UI_MODES.map(({ mode, label, hint }) => (
+          {/* Workspace preset — gates how much of the app is on screen.
+            *
+            * Collapsed to a single chip until it is asked for. Four unexplained
+            * words across the top of a first-run app is four decisions before
+            * a single one of them can mean anything; the chip shows the mode
+            * you are IN, which is the only part that is useful before you know
+            * what the others do. Hover or focus expands it, and once expanded
+            * it stays until the reader is done with it.
+            *
+            * Not a state machine: `modesOpen` is remembered for the session, so
+            * somebody who uses the presets constantly is not re-opening it all
+            * day, and somebody who never touches them never sees it. */}
+          <div
+            className="hidden lg:flex shrink-0 items-center"
+            ref={modesRef}
+            onMouseEnter={() => setModesHovered(true)}
+            onMouseLeave={() => setModesHovered(false)}
+          >
+            {modesShown ? (
+              <div className="flex bg-app-text/5 p-1 rounded-lg" role="tablist" aria-label="Workspace mode">
+                {UI_MODES.map(({ mode, label, hint }) => (
+                  <button
+                    key={mode}
+                    role="tab"
+                    aria-selected={uiMode === mode}
+                    onClick={() => { changeMode(mode); setModesOpen(true); }}
+                    title={hint}
+                    data-testid={`ui-mode-${mode}`}
+                    className={cn(
+                      'px-2.5 rounded-md text-xs font-medium transition-colors',
+                      touchSized ? 'min-h-10' : 'py-1',
+                      uiMode === mode ? 'bg-surface shadow-sm text-accent' : 'opacity-50 hover:opacity-100',
+                    )}
+                  >
+                    {label}
+                  </button>
+                ))}
+                <button
+                  onClick={() => { setModesOpen(false); setModesHovered(false); }}
+                  title="Collapse"
+                  aria-label="Collapse workspace presets"
+                  className={cn(
+                    'px-1.5 rounded-md opacity-40 hover:opacity-100 transition-colors',
+                    touchSized ? 'min-h-10' : 'py-1',
+                  )}
+                >
+                  <ChevronLeft size={13} />
+                </button>
+              </div>
+            ) : (
               <button
-                key={mode}
-                role="tab"
-                aria-selected={uiMode === mode}
-                onClick={() => changeMode(mode)}
-                title={hint}
+                onClick={() => setModesOpen(true)}
+                onFocus={() => setModesHovered(true)}
+                onBlur={() => setModesHovered(false)}
+                title={`Workspace: ${activeMode.label} — ${activeMode.hint} Click to switch.`}
+                aria-label={`Workspace preset: ${activeMode.label}. Click to switch.`}
+                aria-expanded={false}
+                data-testid="ui-mode-chip"
                 className={cn(
-                  'px-2.5 rounded-md text-xs font-medium transition-colors',
-                  touchSized ? 'min-h-10' : 'py-1',
-                  uiMode === mode ? 'bg-surface shadow-sm text-accent' : 'opacity-50 hover:opacity-100',
+                  'flex items-center gap-1.5 px-2.5 rounded-lg text-xs font-medium bg-app-text/5 hover:bg-app-text/10 transition-colors',
+                  touchSized ? 'min-h-10' : 'py-1.5',
                 )}
               >
-                {label}
+                <LayoutGrid size={13} className="opacity-60" />
+                <span className={cn(uiMode !== 'all' && 'text-accent')}>{activeMode.label}</span>
               </button>
-            ))}
+            )}
           </div>
           {viewBar}
         </div>

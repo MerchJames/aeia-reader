@@ -9,6 +9,7 @@ import { useSceneVfx, useSceneWeather } from '../hooks/useSceneWeather';
 import { SceneSpine } from './SceneSpine';
 import { processText, balanceEmphasis, truncateToWord } from '../utils/textProcessor';
 import { MarkupRenderContext, renderInline } from '../utils/bookLayout';
+import { useFontColor, type FontColorContext } from '../hooks/useFontColor';
 import { resolveCharColors } from '../utils/markupStyles';
 import { MOOD_COLOR, sceneAtmosphere } from '../utils/sceneMood';
 import { bucketFor } from '../lib/spriteStorage';
@@ -54,6 +55,8 @@ export const renderWithEmphasis = (
   match?: RunMatcher,
   /** Channel colors/styles (+ resolved per-character color) — see MarkupRenderContext. */
   markupCtx?: MarkupRenderContext,
+  /** How to paint the colours the author wrote — see `utils/fontColor`. */
+  fontColor?: FontColorContext,
 ): string => {
   // Emphasis still fences whole spans — a whisper is a phrase, and shrinking
   // it word by word would read as a stutter. Performance does NOT: it marks
@@ -74,7 +77,7 @@ export const renderWithEmphasis = (
 
   let html: string;
   if (!marks.length) {
-    html = renderInline(para, { images, markupCtx });
+    html = renderInline(para, { images, markupCtx, fontColor });
   } else {
     let marked = para;
     const used: number[] = [];
@@ -83,7 +86,7 @@ export const renderWithEmphasis = (
       marked = marked.replace(mk.text, `\uE010${i}\uE011${mk.text}\uE014${i}\uE015`);
       used.push(i);
     });
-    html = renderInline(marked, { images, markupCtx });
+    html = renderInline(marked, { images, markupCtx, fontColor });
     for (const i of used) {
       html = html
         .replace(`\uE010${i}\uE011`, `<span class="${marks[i].cls}">`)
@@ -160,6 +163,7 @@ const Portrait = ({
 
 export const StageView = () => {
   const store = useAppStore();
+  const fontColor = useFontColor();
   const v2 = useAuraV2Store();
   const storyId = store.currentStory?.id;
   const overrides = storyId ? v2.overridesByStory[storyId] : undefined;
@@ -179,6 +183,7 @@ export const StageView = () => {
     : current
       ? processText(resolveContent(current, overrides, lensOn), {
           hideMetadata: store.hideMetadata && !current.hidden,
+          fontColorMode: store.fontColorMode,
           oocHandling: store.oocHandling,
           autoFormat: store.autoFormat,
           autoFormatRules: store.autoFormatRules,
@@ -246,7 +251,7 @@ export const StageView = () => {
         .split(/\n{2,}/)
         .map(p => p.trim())
         .filter(Boolean)
-        .map(p => `<p>${renderWithEmphasis(p, emphasis, false, perform, claimed, playedRef.current.set, match, markupCtx)}</p>`)
+        .map(p => `<p>${renderWithEmphasis(p, emphasis, false, perform, claimed, playedRef.current.set, match, markupCtx, fontColor)}</p>`)
         .join('');
     },
     [rawText, emphasis, perform, markupCtx],

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, ArrowRight, Check, Play, Sparkles, Square, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Check, Compass, Play, Sparkles, Square, X } from 'lucide-react';
 import { ONBOARDING_STEPS, OnboardingDemo, isAiStep } from '../utils/onboarding';
 import { VIEW_HINT, VIEW_LABEL } from '../utils/viewBar';
 import { useAppStore } from '../store';
@@ -726,6 +726,9 @@ interface Props {
 }
 
 export const Onboarding = ({ onClose }: Props) => {
+  const setAiTourGuide = useAppStore(s => s.setAiTourGuide);
+  const setAiOpen = useAppStore(s => s.setAiOpen);
+  const aiReady = useAppStore(s => !!s.aiBaseUrl && !!s.aiModel);
   const [step, setStep] = useState(0);
   const [hovered, setHovered] = useState<ViewMode | null>(null);
   // Hover INTENT, not raw hover. Entering shows at once, but leaving — or
@@ -906,6 +909,31 @@ export const Onboarding = ({ onClose }: Props) => {
               className="flex items-center justify-center gap-1 px-3 min-h-10 min-w-10 rounded-lg text-sm text-app-text/60 hover:text-app-text shrink-0"
             >
               <ArrowLeft size={15} /> <span className="hidden sm:inline">Back</span>
+            </button>
+          )}
+          {/* The way out of a tour and into an answer.
+            *
+            * A tour tells everyone the same thing in the same order; a reader
+            * with a specific question has to sit through it or skip it and
+            * still not know. This closes the tour, switches the guide on, and
+            * opens the assistant — so "actually, I just want to know where my
+            * highlights are" is one button rather than three settings.
+            *
+            * Only offered when an endpoint is connected. Turning on an AI
+            * feature for someone with no AI is a promise that fails on the
+            * next click. */}
+          {aiReady && (
+            <button
+              onClick={() => {
+                setAiTourGuide(true);
+                onClose();
+                setAiOpen(true);
+              }}
+              data-testid="onboarding-guide"
+              title="Switch on the AI Tour Guide and ask it directly"
+              className="flex items-center justify-center gap-1.5 px-3 min-h-10 rounded-lg text-sm text-accent border border-accent/40 hover:bg-accent/10 shrink-0"
+            >
+              <Compass size={15} /> <span className="hidden sm:inline">Ask instead</span>
             </button>
           )}
           {!last && (

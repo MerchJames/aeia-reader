@@ -1,10 +1,12 @@
 import React, { useMemo, useState, useTransition } from 'react';
 import {
-  Bot, Check, ChevronLeft, Copy, FileSpreadsheet, Layers, Loader2, PanelRight, Pin, Plus, Sparkles, Table2, Trash2, X,
+  BookOpen, Bot, Check, ChevronLeft, Copy, FileSpreadsheet, Layers, Loader2, PanelRight, Pin,
+  Plus, Sparkles, Table2, Trash2, X,
 } from 'lucide-react';
 import { useAppStore } from '../store';
 import { committedCount, flatMessages, useAuraV2Store } from '../stores/useAuraV2Store';
 import { Sheet } from '../types';
+import { pagesOf } from '../utils/pinBook';
 import { askText, salvageArray, salvageObject } from '../utils/aiCall';
 import { cn } from '../utils/cn';
 import { downloadText, safeFilename } from '../utils/exporter';
@@ -202,9 +204,19 @@ const PinSetBar = ({ storyId }: { storyId: string }) => {
   );
 };
 
-export const SheetsSidebar = () => {
-  const open = useAuraV2Store(s => s.sheetsOpen);
-  const setOpen = useAuraV2Store(s => s.setSheetsOpen);
+/**
+ * Sheets, as a column of the Codex.
+ *
+ * They used to be their own right-hand drawer, sharing it with the pins — two
+ * unrelated things in one panel because both happened to be "stuff beside the
+ * story". But a sheet is a tracker of who and what and where, which is exactly
+ * what the Codex already is; and the pins are documents, which is a different
+ * job entirely. So the sheets moved in with their relatives and the drawer
+ * became what it was mostly being used for.
+ *
+ * No drawer chrome here: this renders inside whatever is hosting it.
+ */
+export const SheetsPanel = () => {
   const currentSheetId = useAuraV2Store(s => s.currentSheetId);
   const setCurrentSheetId = useAuraV2Store(s => s.setCurrentSheetId);
   const addSheet = useAuraV2Store(s => s.addSheet);
@@ -232,7 +244,7 @@ export const SheetsSidebar = () => {
     [sheets, currentSheetId],
   );
 
-  if (!open || !story) return null;
+  if (!story) return null;
 
   const createSheet = () => {
     addSheet(story.id, { title: 'New sheet', columns: DEFAULT_COLUMNS, rows: [] });
@@ -294,24 +306,7 @@ export const SheetsSidebar = () => {
   };
 
   return (
-    <div className="fixed inset-y-0 right-0 z-50 w-full max-w-md bg-surface text-app-text border-l border-app-border shadow-2xl flex flex-col">
-      <div className="flex items-center gap-2 px-4 py-3 border-b border-app-border">
-        <Table2 size={17} className="text-accent" />
-        <div className="min-w-0">
-          <h2 className="font-bold leading-tight text-sm">Sheets</h2>
-          <p className="text-[10px] text-muted leading-tight truncate">
-            Pinnable tables for tracking story facts
-          </p>
-        </div>
-        <button
-          onClick={() => setOpen(false)}
-          className="ml-auto p-2 rounded-full hover:bg-app-text/10 transition-colors"
-          title="Close sheets"
-        >
-          <X size={16} />
-        </button>
-      </div>
-
+    <div className="flex-1 min-h-0 flex flex-col">
       {!currentSheet ? (
         <div className="flex-1 flex flex-col items-center justify-center p-6 text-center space-y-4">
           <FileSpreadsheet size={40} className="opacity-30" />
@@ -465,55 +460,6 @@ export const SheetsSidebar = () => {
         </>
       )}
 
-      <div className="border-t border-app-border p-3 space-y-1.5 max-h-72 overflow-y-auto">
-        <PinSetBar storyId={story.id} />
-        <div className="h-px bg-app-border/60 my-1" />
-        <p className="text-[10px] font-bold uppercase tracking-wider text-muted flex items-center gap-1.5">
-          <Pin size={11} /> Pinned visuals
-        </p>
-        {(pins ?? []).length === 0 ? (
-          <p className="text-[11px] text-muted leading-snug">
-            Hover any table or code block in the story (or select text) and hit the pin —
-            AI-written charts &amp; stat tables dock in the right margin on wide windows,
-            and can be fed back to the AI as reference.
-          </p>
-        ) : (
-          (pins ?? []).map(p => (
-            <div key={p.id} className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg bg-app-text/5 text-xs">
-              <Pin size={11} className="text-accent shrink-0" />
-              <span className="truncate flex-1" title={p.title}>{p.title}</span>
-              <button
-                onClick={() => updatePin(story.id, p.id, { inContext: !p.inContext })}
-                title={p.inContext ? 'In AI context — click to exclude' : 'Include in AI context'}
-                className={cn(
-                  'p-1 rounded-md transition-colors',
-                  p.inContext ? 'text-accent bg-accent/15' : 'opacity-50 hover:opacity-100 hover:bg-app-text/10',
-                )}
-              >
-                <Bot size={12} />
-              </button>
-              <button
-                onClick={() => updatePin(story.id, p.id, { docked: !p.docked })}
-                title={p.docked ? 'Docked in the margin — click to undock' : 'Dock in the right margin'}
-                className={cn(
-                  'p-1 rounded-md transition-colors',
-                  p.docked ? 'text-accent bg-accent/15' : 'opacity-50 hover:opacity-100 hover:bg-app-text/10',
-                )}
-              >
-                <PanelRight size={12} />
-              </button>
-              <button
-                onClick={() => removePin(story.id, p.id)}
-                title="Delete pin"
-                className="p-1 rounded-md opacity-50 hover:opacity-100 hover:bg-red-500/10 hover:text-red-500 transition-colors"
-              >
-                <Trash2 size={12} />
-              </button>
-            </div>
-          ))
-        )}
-      </div>
-
       {currentSheet && (
         <div className="border-t border-app-border p-3">
           <button
@@ -622,6 +568,154 @@ const SheetEditor = ({
       >
         <Plus size={13} /> Add row
       </button>
+    </div>
+  );
+};
+
+/**
+ * The Pins drawer — everything the reader has kept beside the story.
+ *
+ * This is the panel the toolbar's third button opens. It used to be "Sheets",
+ * with the pins bolted to the bottom of it in a 288px-tall scroller; in
+ * practice the pins were what people came for and the sheets were the thing in
+ * the way, so they swapped places. Sheets are a Codex column now.
+ *
+ * Three things live here, in the order a reader reaches for them: the SETS
+ * (which arrangement of pins is on), the pins themselves, and — on each one —
+ * the two switches that decide where a pin is (docked in the margin) and
+ * whether the assistant can see it.
+ */
+export const PinsSidebar = () => {
+  const open = useAuraV2Store(s => s.sheetsOpen);
+  const setOpen = useAuraV2Store(s => s.setSheetsOpen);
+  const updatePin = useAuraV2Store(s => s.updatePin);
+  const removePin = useAuraV2Store(s => s.removePin);
+  const mergePinPages = useAuraV2Store(s => s.mergePinPages);
+  const story = useAppStore(s => s.currentStory);
+  const pins = useAuraV2Store(s => (story ? s.pinsByStory[story.id] : undefined));
+  /** Which pin is being folded into another, if any. */
+  const [merging, setMerging] = useState<string | null>(null);
+
+  if (!open || !story) return null;
+
+  const list = pins ?? [];
+  const mergeSource = merging ? list.find(p => p.id === merging) ?? null : null;
+
+  return (
+    <div className="fixed inset-y-0 right-0 z-50 w-full max-w-md bg-surface text-app-text border-l border-app-border shadow-2xl flex flex-col">
+      <div className="flex items-center gap-2 px-4 py-3 border-b border-app-border">
+        <Pin size={17} className="text-accent" />
+        <div className="min-w-0">
+          <h2 className="font-bold leading-tight text-sm">Pins</h2>
+          <p className="text-[10px] text-muted leading-tight truncate">
+            Documents you keep beside the story, and the sets they arrange into
+          </p>
+        </div>
+        <button
+          onClick={() => setOpen(false)}
+          className="ml-auto p-2 rounded-full hover:bg-app-text/10 transition-colors"
+          title="Close pins"
+        >
+          <X size={16} />
+        </button>
+      </div>
+
+      <div className="p-3 border-b border-app-border">
+        <PinSetBar storyId={story.id} />
+      </div>
+
+      <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-1.5">
+        {list.length === 0 ? (
+          <p className="text-[11px] text-muted leading-snug">
+            Hover any table or code block in the story (or select text) and hit the pin —
+            AI-written charts &amp; stat tables dock in the right margin on wide windows,
+            and can be fed back to the AI as reference.
+          </p>
+        ) : list.map(p => {
+          const pageCount = pagesOf(p).length;
+          return (
+            <div key={p.id} className="rounded-lg bg-app-text/5">
+              <div className="flex items-center gap-1.5 px-2 py-1.5 text-xs">
+                {pageCount > 1
+                  ? <BookOpen size={11} className="text-accent shrink-0" />
+                  : <Pin size={11} className="text-accent shrink-0" />}
+                <span className="truncate flex-1" title={p.title}>{p.title}</span>
+                {pageCount > 1 && (
+                  <span
+                    className="shrink-0 text-[10px] tabular-nums text-muted"
+                    title={`${pageCount} pages`}
+                  >
+                    {pageCount}p
+                  </span>
+                )}
+                <button
+                  onClick={() => updatePin(story.id, p.id, { inContext: !p.inContext })}
+                  title={p.inContext ? 'In AI context — click to exclude' : 'Include in AI context'}
+                  className={cn(
+                    'p-1 rounded-md transition-colors',
+                    p.inContext ? 'text-accent bg-accent/15' : 'opacity-50 hover:opacity-100 hover:bg-app-text/10',
+                  )}
+                >
+                  <Bot size={12} />
+                </button>
+                <button
+                  onClick={() => updatePin(story.id, p.id, { docked: !p.docked })}
+                  title={p.docked ? 'Docked in the margin — click to undock' : 'Dock in the right margin'}
+                  className={cn(
+                    'p-1 rounded-md transition-colors',
+                    p.docked ? 'text-accent bg-accent/15' : 'opacity-50 hover:opacity-100 hover:bg-app-text/10',
+                  )}
+                >
+                  <PanelRight size={12} />
+                </button>
+                {/* Folding one pin into another as pages — the "these forty
+                  * journal entries are one thing" move. Only offered when
+                  * there is something to fold it into. */}
+                {list.length > 1 && (
+                  <button
+                    onClick={() => setMerging(merging === p.id ? null : p.id)}
+                    title="Fold this pin into another as pages"
+                    aria-pressed={merging === p.id}
+                    data-testid="pin-merge"
+                    className={cn(
+                      'p-1 rounded-md transition-colors',
+                      merging === p.id ? 'text-accent bg-accent/15' : 'opacity-50 hover:opacity-100 hover:bg-app-text/10',
+                    )}
+                  >
+                    <Layers size={12} />
+                  </button>
+                )}
+                <button
+                  onClick={() => removePin(story.id, p.id)}
+                  title="Delete pin"
+                  className="p-1 rounded-md opacity-50 hover:opacity-100 hover:bg-red-500/10 hover:text-red-500 transition-colors"
+                >
+                  <Trash2 size={12} />
+                </button>
+              </div>
+              {mergeSource?.id === p.id && (
+                <div className="px-2 pb-2 space-y-1">
+                  <p className="text-[10px] text-muted">
+                    Add “{p.title}” to the end of which pin? It stops being its own pin.
+                  </p>
+                  <div className="flex flex-wrap gap-1">
+                    {list.filter(t => t.id !== p.id).map(t => (
+                      <button
+                        key={t.id}
+                        onClick={() => { mergePinPages(story.id, t.id, p.id); setMerging(null); }}
+                        className="text-[10px] px-2 py-1 rounded-md border border-app-border hover:border-accent hover:bg-accent/10 max-w-40 truncate"
+                        title={t.title}
+                      >
+                        {t.title}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 };

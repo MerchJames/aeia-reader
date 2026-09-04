@@ -8,12 +8,17 @@ import {
 import { forEachStory } from '../lib/storage';
 import { MIN_QUERY } from '../utils/storySearch';
 
-const FORMATS: { id: StoryFormat | 'all'; label: string }[] = [
+export type FormatFilter = StoryFormat | 'all' | 'synced';
+
+const FORMATS: { id: FormatFilter; label: string }[] = [
   { id: 'all', label: 'All formats' },
   { id: 'sillytavern', label: 'SillyTavern' },
   { id: 'kobold', label: 'Kobold' },
   { id: 'card', label: 'Character card' },
   { id: 'document', label: 'Document' },
+  // Not a file type: the chats kept in step with SillyTavern. Listed last
+  // and only when the sync is on.
+  { id: 'synced', label: 'Synced with ST' },
 ];
 
 export interface ToolbarProps {
@@ -21,8 +26,10 @@ export interface ToolbarProps {
   onQuery: (q: string) => void;
   sort: LibrarySort;
   onSort: (s: LibrarySort) => void;
-  format: StoryFormat | 'all';
-  onFormat: (f: StoryFormat | 'all') => void;
+  format: FormatFilter;
+  onFormat: (f: FormatFilter) => void;
+  /** Show the "Synced" choice at all — the sync is off until asked for. */
+  showSynced?: boolean;
   tags: { tag: string; count: number }[];
   activeTags: string[];
   onToggleTag: (tag: string) => void;
@@ -32,7 +39,7 @@ export interface ToolbarProps {
 
 export const LibraryToolbar = ({
   query, onQuery, sort, onSort, format, onFormat,
-  tags, activeTags, onToggleTag, shown, total,
+  tags, activeTags, onToggleTag, shown, total, showSynced,
 }: ToolbarProps) => {
   const [showFilters, setShowFilters] = useState(false);
   const filtering = activeTags.length > 0 || format !== 'all';
@@ -99,7 +106,7 @@ export const LibraryToolbar = ({
         <div className="flex flex-col gap-2 rounded-xl border border-app-border bg-app-text/[0.03] p-3">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-[11px] uppercase tracking-wide text-muted">Format</span>
-            {FORMATS.map(f => (
+            {FORMATS.filter(f => f.id !== 'synced' || showSynced).map(f => (
               <button
                 key={f.id}
                 onClick={() => onFormat(f.id)}

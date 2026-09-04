@@ -7,8 +7,14 @@ import { flushV2, useAuraV2Store } from '../stores/useAuraV2Store';
 import { buildZoneBody, zoneSummary } from '../utils/contextZone';
 import { resolveContent } from '../utils/lens';
 import { askText } from '../utils/aiCall';
+import { samplerParamsFrom } from '../utils/aiClient';
+import { FormatDrop } from './FormatDrop';
 import { LONG_READ_JOBS } from '../utils/longRead';
 import { ZoneSection, ZoneTask, runZoneTask, taskFromJob } from '../utils/zoneTask';
+import {
+  planProblems, runPockets, type PocketSection, type PocketStepResult,
+} from '../utils/contextPocket';
+import { PocketsEditor, StepsEditor } from './PocketsEditor';
 import { cn } from '../utils/cn';
 
 /**
@@ -24,6 +30,18 @@ import { cn } from '../utils/cn';
  * It lands as a version of a pin the reader chooses, so the dock accumulates
  * versions of one document instead of four pins with the same name.
  */
+/**
+ * Room for the longest step in a plan, in tokens.
+ *
+ * Sized by the biggest `count` in the crew, because that is the step that will
+ * blow a budget: five messages need roughly five messages' worth of room, and a
+ * ceiling picked for one produces four and a half.
+ */
+const crewBudget = (steps: readonly { count?: number }[] = []): number => {
+  const most = steps.reduce((n, s) => Math.max(n, s.count ?? 1), 1);
+  return Math.min(12000, 1200 * most + 800);
+};
+
 export const TaskPanel = ({
   base, apiKey, model, onClose,
 }: {
@@ -36,6 +54,7 @@ export const TaskPanel = ({
   const tasks = useAuraV2Store(s => (storyId ? s.tasksByStory[storyId] : undefined)) ?? [];
   const zones = useAuraV2Store(s => (storyId ? s.zonesByStory[storyId] : undefined)) ?? [];
   const pins = useAuraV2Store(s => (storyId ? s.pinsByStory[storyId] : undefined)) ?? [];
+  const pockets = useAuraV2Store(s => (storyId ? s.pocketsByStory[storyId] : undefined)) ?? [];
   const chains = useAppStore(s => s.chains);
   const timelines = useAppStore(s => s.currentStory?.timelines) ?? [];
 
@@ -44,6 +63,8 @@ export const TaskPanel = ({
   const [phase, setPhase] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<string | null>(null);
+  /** A pocket run's drafts, for the reader to keep or discard. */
+  const [drafts, setDrafts] = useState<PocketStepResult[]>([]);
   const [showForm, setShowForm] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -86,10 +107,119 @@ export const TaskPanel = ({
     patch({ zoneIds: next });
   };
 
+  /** A pocket's zones, resolved to text the way the reader currently reads them. */
+  const sectionsForPocket = (pocketId: string): PocketSection[] => {
+    const app = useAppStore.getState();
+    const story = app.currentStory;
+    const pocket = pockets.find(p => p.id === pocketId);
+    if (!story || !pocket) return [];
+    const v2 = useAuraV2Store.getState();
+    const overrides = v2.overridesByStory[story.id];
+    const lensOn = !!v2.lensOnByStory[story.id];
+    const text = (m: { id: string; content: string }) => resolveContent(m as never, overrides, lensOn);
+    return pocket.zoneIds.map(id => {
+      const zone = zones.find(z => z.id === id);
+      if (!zone) return { zoneId: id, name: '(deleted zone)', body: '' };
+      const built = buildZoneBody(zone, app.chains, text, story.timelines ?? []);
+      return { zoneId: id, name: zone.name, body: built.empty ? '' : built.body };
+    });
+  };
+
+  /**
+   * Run the crew.
+   *
+   * Separate from `run` below rather than a branch inside it, because almost
+   * nothing is shared: a zone task produces ONE document and versions a pin
+   * with it, while a crew produces a document AND a pile of drafts, and the
+   * drafts are the part the reader is usually after.
+   */
+  const runCrew = async () => {
+    const app = useAppStore.getState();
+    const story = app.currentStory;
+    if (!story || !task?.steps?.length || !base || !model || running) return;
+
+    const problems = planProblems(task.steps, pockets, sectionsForPocket);
+    if (problems.length) { setError(problems.join(' ')); return; }
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setRunning(true);
+    setError(null);
+    setResult(null);
+    setDrafts([]);
+    try {
+      const out = await runPockets({
+        steps: task.steps,
+        pockets,
+        sectionsFor: sectionsForPocket,
+        card: story.card,
+        title: story.title,
+        signal: controller.signal,
+        send: (messages, signal) => askText({ base, key: apiKey, model }, messages, {
+          label: 'Running pockets',
+          params: { temperature: 0.8 },
+          // Without these, no `max_tokens` is sent and a local backend's own
+          // default (often 1024) truncates the step — which for a "write five
+          // messages" step means three of them and a sentence.
+          reader: samplerParamsFrom(useAppStore.getState().aiAdvanced),
+          budget: crewBudget(task.steps),
+          signal,
+        }),
+        onStep: (done, total, name) => setPhase(name ? `${name} (${done + 1}/${total})` : ''),
+      });
+
+      setDrafts(out.results.filter(r => r.output === 'drafts'));
+
+      // Only the keepable steps go to the pin, and only if there were any: a
+      // crew that produced nothing but drafts has produced nothing to version.
+      let version: number | null = null;
+      if (out.document.trim()) {
+        const now = useAuraV2Store.getState();
+        const target = task.targetPinId
+          ? (now.pinsByStory[story.id] ?? []).find(p => p.id === task.targetPinId)
+          : undefined;
+        if (target) {
+          now.addPinVersion(story.id, target.id, {
+            content: out.document, source: 'ai', instruction: task.name,
+          });
+          const after = (useAuraV2Store.getState().pinsByStory[story.id] ?? [])
+            .find(p => p.id === target.id);
+          version = after ? (after.activeVersion ?? 0) + 1 : null;
+        } else {
+          const made = now.addPin(story.id, {
+            title: task.name, format: 'markdown', content: out.document,
+            inContext: false, docked: true,
+          });
+          if (made) {
+            version = 1;
+            if (storyId) useAuraV2Store.getState().updateTask(storyId, task.id, { targetPinId: made });
+          }
+        }
+      }
+      void flushV2();
+
+      const draftCount = out.results.reduce((n, r) => n + r.drafts.length, 0);
+      setResult([
+        `${out.results.length} step${out.results.length === 1 ? '' : 's'} ran`,
+        draftCount ? `${draftCount} draft${draftCount === 1 ? '' : 's'}` : '',
+        version ? `pin version ${version}` : '',
+        out.skipped.length ? `skipped ${out.skipped.join(', ')}` : '',
+        out.aborted ? 'stopped early' : '',
+      ].filter(Boolean).join(' · '));
+    } catch (e: any) {
+      if (!controller.signal.aborted) setError(e?.message ?? 'The task failed.');
+    } finally {
+      setRunning(false);
+      setPhase('');
+      abortRef.current = null;
+    }
+  };
+
   const run = async () => {
     const app = useAppStore.getState();
     const story = app.currentStory;
     if (!story || !task || !base || !model || running) return;
+    if (task.steps?.length) { void runCrew(); return; }
     if (!task.zoneIds.length) { setError('This task has no zones yet.'); return; }
 
     const v2 = useAuraV2Store.getState();
@@ -123,8 +253,15 @@ export const TaskPanel = ({
         // Through the shared call layer, so a thinking model's chain of thought
         // never lands in the document and a reply that ran out of room mid-
         // thought is retried rather than reported as an empty section.
-        send: (messages, signal) => askText({ base, key: apiKey, model }, messages,
-          { label: 'Running task', params: { temperature: 0.3 }, signal }),
+        send: (messages, signal) => askText({ base, key: apiKey, model }, messages, {
+          label: 'Running task',
+          params: { temperature: 0.3 },
+          reader: samplerParamsFrom(useAppStore.getState().aiAdvanced),
+          // A pass writes one section of a document; the endpoint's default is
+          // sized for a chat reply.
+          budget: 3000,
+          signal,
+        }),
         onPhase: (p, d, t, name) => setPhase(
           p === 'assembling' ? 'Writing the front matter…'
             : p === 'done' ? ''
@@ -343,8 +480,8 @@ export const TaskPanel = ({
                   />
                 </label>
                 <label className="block">
-                  <span className="text-[11px] uppercase tracking-wide text-muted">
-                    The shape of each section — restated on every pass
+                  <span className="flex items-center gap-2 text-[11px] uppercase tracking-wide text-muted">
+                    <span className="min-w-0">The shape of each section — restated on every pass</span>
                   </span>
                   <textarea
                     value={task.format}
@@ -354,6 +491,15 @@ export const TaskPanel = ({
                     data-testid="task-format"
                   />
                 </label>
+                {/* The shape usually already exists somewhere — a JSON file, an
+                  * XML fragment, a template pasted out of a notes app. Naming
+                  * the task after the form as well saves the reader typing
+                  * "Anatomy chart" twice. */}
+                <FormatDrop
+                  label="Upload or paste a form"
+                  onFormat={(instruction, title) =>
+                    patch({ format: instruction, ...(title && !task.name.trim() ? { name: title } : {}) })}
+                />
                 <label className="block">
                   <span className="text-[11px] uppercase tracking-wide text-muted">
                     What it carries between sections
@@ -397,6 +543,15 @@ export const TaskPanel = ({
               </div>
             )}
 
+            <div className="border-t border-app-border/60 pt-2 space-y-2">
+              <StepsEditor
+                steps={task.steps ?? []}
+                pockets={pockets}
+                onChange={next => patch({ steps: next })}
+              />
+              {storyId && <PocketsEditor storyId={storyId} pockets={pockets} zones={zones} />}
+            </div>
+
             {task.lastRun && (
               <p className="text-[11px] text-muted">
                 Last run {new Date(task.lastRun.at).toLocaleString()} ·
@@ -408,7 +563,8 @@ export const TaskPanel = ({
             <div className="flex items-center gap-2">
               <button
                 onClick={run}
-                disabled={running || !task.zoneIds.length || !base || !model}
+                disabled={running || !base || !model
+                  || (task.steps?.length ? false : !task.zoneIds.length)}
                 className="text-xs px-3 py-1.5 rounded-full bg-accent text-white disabled:opacity-40"
                 data-testid="run-task"
               >
@@ -439,6 +595,59 @@ export const TaskPanel = ({
 
             {result && <p className="text-xs text-accent" data-testid="task-result">{result}</p>}
             {error && <p className="text-xs text-red-500">{error}</p>}
+
+            {/* What the crew wrote.
+              *
+              * Shown here and kept nowhere: a draft is a suggestion, and this
+              * app does not write suggestions into a story. Copy the one you
+              * want, or keep the lot as a pin — both are the reader doing it. */}
+            {drafts.length > 0 && (
+              <div className="space-y-2 border-t border-app-border/60 pt-2" data-testid="pocket-drafts">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs font-medium">Drafts</span>
+                  <span className="text-[10px] text-muted flex-1">
+                    Nothing here is in your story. Keep what you want.
+                  </span>
+                  <button
+                    onClick={() => {
+                      if (!storyId) return;
+                      useAuraV2Store.getState().addPin(storyId, {
+                        title: `${task.name} — drafts`,
+                        format: 'markdown',
+                        content: drafts
+                          .map(r => `## ${r.pocketName}\n\n${r.drafts.join('\n\n---\n\n')}`)
+                          .join('\n\n'),
+                        inContext: false,
+                        docked: true,
+                      });
+                      setDrafts([]);
+                    }}
+                    className="text-[10px] px-2 py-0.5 rounded-md border border-app-border hover:bg-app-text/5"
+                  >
+                    Keep as a pin
+                  </button>
+                  <button
+                    onClick={() => setDrafts([])}
+                    className="text-[10px] px-2 py-0.5 rounded-md text-muted hover:bg-app-text/5"
+                  >
+                    Discard
+                  </button>
+                </div>
+                {drafts.map(r => (
+                  <div key={r.stepId} className="space-y-1">
+                    <p className="text-[10px] uppercase tracking-wide text-muted">{r.pocketName}</p>
+                    {r.drafts.map((d, i) => (
+                      <div
+                        key={i}
+                        className="rounded-lg border border-app-border px-2 py-1.5 text-[11px] leading-relaxed whitespace-pre-wrap"
+                      >
+                        {d}
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            )}
           </>
         )}
       </div>

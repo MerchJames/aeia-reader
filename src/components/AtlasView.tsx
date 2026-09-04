@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { BookOpen, Minus, Plus, X } from 'lucide-react';
 import { useAppStore } from '../store';
+import { useFontColor } from '../hooks/useFontColor';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { useScenes } from '../hooks/useScenes';
 import { useSceneDirector } from '../hooks/useSceneDirector';
@@ -137,6 +138,7 @@ const Tile = ({
 
 export const AtlasView = () => {
   const store = useAppStore();
+  const fontColor = useFontColor();
   const v2 = useAuraV2Store();
   const storyId = store.currentStory?.id;
   useSceneDirector();
@@ -356,7 +358,7 @@ export const AtlasView = () => {
                     const text = para.replace(/^\s{0,3}#{1,6}\s+/, '').trim();
                     if (!text) return null;
                     return (
-                      <p key={i} dangerouslySetInnerHTML={{ __html: renderInline(text, { markupCtx }) }} />
+                      <p key={i} dangerouslySetInnerHTML={{ __html: renderInline(text, { markupCtx, fontColor }) }} />
                     );
                   })}
                 </article>

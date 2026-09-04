@@ -211,6 +211,7 @@ export const BookView = () => {
       const text = processText(resolveContent(msg, overrides, lensOn), {
         ...procOpts,
         hideMetadata: store.hideMetadata && !msg.hidden,
+        fontColorMode: store.fontColorMode,
         role: msg.role,
       }).processedText;
       const { kinds, match } = performFor(msg.id);

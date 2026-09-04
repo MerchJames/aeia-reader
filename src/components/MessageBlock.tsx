@@ -1,13 +1,17 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { ChevronLeft, ChevronRight, ImageIcon, MessageSquare, Pencil, Pin as PinIcon, Wand2 } from 'lucide-react';
+import { Brain, ChevronLeft, ChevronRight, ChevronRight as Caret, EyeOff, ImageIcon, MessageSquare, Pencil, Pin as PinIcon, Wand2 } from 'lucide-react';
 import { cn } from '../utils/cn';
+import { useAppStore } from '../store';
+import { resolveTheme } from '../themes';
+import { hasColorMarks, resolveColor, splitColorRuns } from '../utils/fontColor';
 import {
   AnimationStyle,
   AutoFormatRule,
   DialogueAnimation,
   DialogueStyle,
+  FontColorMode,
   Message,
   OocHandling,
   PinFormat,
@@ -283,6 +287,40 @@ const WORD_REVEAL_MAX_BATCH = 10;
  * got to. It is the same negative-delay resume already used for the Director's
  * cues a few lines down, which had to solve this once already.
  */
+/**
+ * Paint the colours the author wrote, where they wrote them.
+ *
+ * A colour cannot be said in markdown, so `normalizeInlineHtml` leaves it as a
+ * sentinel run in the text (see `utils/fontColor`) and this is where it becomes
+ * a colour again. Runs are turned into spans BEFORE `markLore` and `wrapWords`
+ * see the children, which has one consequence worth stating: `wrapWords` does
+ * not walk into elements, so words inside a coloured run keep the colour but
+ * not the per-word arrival animation. That is the right way round — the colour
+ * is a distinction the author drew and the animation is decoration — and it is
+ * why this is a span rather than a per-word style.
+ *
+ * Untouched, and cheap, on the overwhelming majority of passages: no sentinel
+ * in the string means the original children come straight back.
+ */
+const paintColors = (
+  node: React.ReactNode, mode: FontColorMode, dark: boolean,
+): React.ReactNode => {
+  if (mode === 'ignore') return node;
+  if (typeof node === 'string') {
+    if (!hasColorMarks(node)) return node;
+    const runs = splitColorRuns(node);
+    if (runs.length === 1 && runs[0].color === null) return runs[0].text;
+    return runs.map((run, i) => {
+      const css = run.color ? resolveColor(run.color, mode, dark) : null;
+      return css
+        ? <span key={i} className="expr-authored-color" style={{ color: css }}>{run.text}</span>
+        : <React.Fragment key={i}>{run.text}</React.Fragment>;
+    });
+  }
+  if (Array.isArray(node)) return node.map(n => paintColors(n, mode, dark));
+  return node;
+};
+
 const wrapWords = (
   node: React.ReactNode,
   counter: WordCounter,
@@ -680,6 +718,12 @@ const MessageContent = React.memo(({
     wordStarts: Map<number, number>;
     playedFx: Map<number, number>;
   }) => {
+  // Narrow selectors rather than props: threading these through
+  // `MessageBlockProps` would mean another line in each of the two memo
+  // comparators, and both are primitives that change roughly never.
+  const fontColorMode = useAppStore(s => s.fontColorMode);
+  const dark = useAppStore(s => resolveTheme(s.theme, s.bgColor, s.textColor).isDark);
+
   const { entries: statEntries, prose: statProse } = buildStatPanel(content, statRules);
   const processedText = isStreamingMsg
     // Hide the in-progress last word only while still revealing; show the whole
@@ -690,6 +734,7 @@ const MessageContent = React.memo(({
         // meant to be readable in the reader; stripping their metadata tags
         // can erase them entirely, so preserve their full text.
         hideMetadata: hideMetadata && !msg.hidden,
+        fontColorMode,
         oocHandling,
         autoFormat,
         autoFormatRules,
@@ -750,6 +795,21 @@ const MessageContent = React.memo(({
   // Kept per message for the life of the component, so a word's treatment is
   // frozen once it has played however many times the tree is rebuilt.
 
+  /**
+   * Everything that happens to a run of words on its way to the page.
+   *
+   * Colour first (the author's own notation), then the codex's lore tooltips,
+   * then the per-word reveal and the Director's emphasis. Five renderers used
+   * to spell this out in full, which meant five places to keep in step every
+   * time the walk gained an argument.
+   */
+  const dress = (children: React.ReactNode, node: unknown): React.ReactNode =>
+    wrapWords(
+      markLore(paintColors(children, fontColorMode, dark)),
+      counter, cursorFor(counter, node), settledCount, wordRevealStyle, wordStarts,
+      expressiveText, readingWord, emphasisMap, performMap, playedFx, !!runs,
+    );
+
   return (
     <div
       className={cn(
@@ -771,12 +831,12 @@ const MessageContent = React.memo(({
         components={{
           p: ({ node, children, ...props }) => (
             <p {...props}>
-              {wrapWords(markLore(children), counter, cursorFor(counter, node), settledCount, wordRevealStyle, wordStarts, expressiveText, readingWord, emphasisMap, performMap, playedFx, !!runs)}
+              {dress(children, node)}
             </p>
           ),
           li: ({ node, children, ...props }) => (
             <li {...props}>
-              {wrapWords(markLore(children), counter, cursorFor(counter, node), settledCount, wordRevealStyle, wordStarts, expressiveText, readingWord, emphasisMap, performMap, playedFx, !!runs)}
+              {dress(children, node)}
             </li>
           ),
           hr: ({ node: _node }) =>
@@ -791,7 +851,7 @@ const MessageContent = React.memo(({
             if (!channel) {
               return (
                 <em className="italic opacity-90" {...props}>
-                  {wrapWords(markLore(props.children), counter, cursorFor(counter, node), settledCount, wordRevealStyle, wordStarts, expressiveText, readingWord, emphasisMap, performMap, playedFx, !!runs)}
+                  {dress(props.children, node)}
                 </em>
               );
             }
@@ -827,7 +887,7 @@ const MessageContent = React.memo(({
                 )}
                 {...props}
               >
-                {wrapWords(markLore(props.children), counter, cursorFor(counter, node), settledCount, wordRevealStyle, wordStarts, expressiveText, readingWord, emphasisMap, performMap, playedFx, !!runs)}
+                {dress(props.children, node)}
               </em>
             );
           },
@@ -866,7 +926,7 @@ const MessageContent = React.memo(({
           ...headingRenderers(
             markup.heading,
             !isStreamingMsg,
-            (children, node) => wrapWords(markLore(children), counter, cursorFor(counter, node), settledCount, wordRevealStyle, wordStarts, expressiveText, readingWord, emphasisMap, performMap, playedFx, !!runs),
+            (children, node) => dress(children, node),
           ),
           // AI-written tables get a hover pin — captured verbatim from the
           // processed source so the dock re-renders exactly what's shown.
@@ -1042,6 +1102,64 @@ const MessageContent = React.memo(({
     && prev.playedFx === next.playedFx;
 });
 
+/**
+ * The model's chain of thought, in its own collapsed section.
+ *
+ * Deliberately NOT prose: no reveal, no TTS, no expressive typography, no
+ * markdown channels. It is the working, and it reads as working — which is the
+ * whole reason it is worth showing separately rather than leaving inline where
+ * it used to arrive dressed as narration.
+ *
+ * Subscribes to the setting itself rather than taking it as a prop: threading
+ * one more field through `MessageBlockProps` would mean two more lines in each
+ * memo comparator, and this component renders nothing at all for the passages
+ * (almost all of them) that carry no reasoning.
+ */
+const ReasoningBlock = ({ text }: { text?: string }) => {
+  const show = useAppStore(s => s.showReasoning);
+  const [open, setOpen] = useState(false);
+  if (!show || !text?.trim()) return null;
+  return (
+    <div
+      className="not-prose mb-3 rounded-lg border border-app-border/70 bg-app-text/[0.03] overflow-hidden"
+      data-testid="reasoning-block"
+      onClick={e => e.stopPropagation()}
+    >
+      <button
+        onClick={() => setOpen(v => !v)}
+        aria-expanded={open}
+        className="w-full flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] text-muted hover:bg-app-text/5 transition-colors"
+      >
+        <Caret size={12} className={cn('shrink-0 transition-transform', open && 'rotate-90')} />
+        <Brain size={12} className="shrink-0 opacity-70" />
+        <span className="font-medium">Thinking</span>
+        <span className="ml-auto tabular-nums opacity-60">
+          {text.trim().split(/\s+/).length} words
+        </span>
+      </button>
+      {open && (
+        <p className="px-3 pb-2.5 pt-0.5 text-[11.5px] leading-relaxed text-muted whitespace-pre-wrap break-words font-sans opacity-90">
+          {text.trim()}
+        </p>
+      )}
+    </div>
+  );
+};
+
+/** The chip on a passage SillyTavern had marked `is_system` / `/hide`. */
+const HiddenMark = ({ hidden }: { hidden?: boolean }) => {
+  if (!hidden) return null;
+  return (
+    <span
+      title="Hidden in SillyTavern (/hide or a system entry) — shown because you asked for it"
+      data-testid="hidden-mark"
+      className="not-prose inline-flex items-center gap-1 align-middle mr-2 px-1.5 py-0.5 rounded text-[10px] font-medium normal-case tracking-normal bg-app-text/10 text-muted"
+    >
+      <EyeOff size={10} /> hidden
+    </span>
+  );
+};
+
 export const MessageBlock = React.memo((props: MessageBlockProps) => {
   const {
     msg,
@@ -1208,6 +1326,8 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
             {noteCount}
           </button>
         )}
+        <ReasoningBlock text={msg.reasoning} />
+        {msg.hidden && <HiddenMark hidden />}
         <MessageContent {...props} content={displayContent} totalRevealed={totalRevealed} wordRevealStyle={wordRevealStyle} wordStarts={wordStarts} playedFx={playedFx} />
       </div>
     );
@@ -1249,11 +1369,7 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
       >
         <div className="reader-bubble-name text-xs font-bold mb-2 opacity-70 uppercase tracking-wider flex items-center gap-2">
           {msg.name}
-          {msg.hidden && (
-            <span className="normal-case tracking-normal font-medium text-[10px] px-1.5 py-0.5 rounded bg-app-text/10 opacity-80">
-              hidden
-            </span>
-          )}
+          <HiddenMark hidden={msg.hidden} />
           {(noteCount > 0 || hasOverride || onPinContent || onLensEdit || onSceneImage) && !isStreamingMsg && (
             <span className="ml-auto flex items-center gap-0.5">
               {onSceneImage && (
@@ -1309,6 +1425,7 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
             </span>
           )}
         </div>
+        <ReasoningBlock text={msg.reasoning} />
         <MessageContent {...props} content={displayContent} totalRevealed={totalRevealed} wordRevealStyle={wordRevealStyle} wordStarts={wordStarts} playedFx={playedFx} />
       </div>
     </div>

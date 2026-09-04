@@ -1,23 +1,34 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  BookMarked, Download, Eraser, MessageSquare, Search, Sparkles, Trash2, Underline, X,
+  BookMarked, Download, Eraser, Lock, LockOpen, MessageSquare, Search, Sparkles, Trash2, Upload,
+  Underline, X,
 } from 'lucide-react';
 import { useAppStore } from '../store';
 import {
-  CodexEntity, committedCount, EntityKind, useAuraV2Store, visibleEntities,
+  CodexEntity, CodexTab, committedCount, useAuraV2Store, visibleEntities,
 } from '../stores/useAuraV2Store';
-import { codexToWorldInfo } from '../utils/codexExtractor';
+import { codexToWorldInfo, worldInfoToEntities } from '../utils/codexExtractor';
 import { downloadText, safeFilename } from '../utils/exporter';
 import { KIND_ICON } from './EntityTooltip';
+import { SheetsPanel } from './SheetsSidebar';
 import { cn } from '../utils/cn';
 
-type TabKind = EntityKind | 'notes';
+type TabKind = CodexTab;
 
 const TABS: { kind: TabKind; label: string }[] = [
   { kind: 'character', label: 'Characters' },
   { kind: 'location', label: 'Places' },
   { kind: 'item', label: 'Items' },
   { kind: 'notes', label: 'Notes' },
+  /*
+   * Sheets live here rather than in their own drawer.
+   *
+   * A sheet is a table of who and what and where, kept as you read — which is
+   * the Codex's whole job, done by hand instead of automatically. They used to
+   * share a panel with the pins, which are documents and a different thing
+   * entirely; that drawer is now the Pins panel.
+   */
+  { kind: 'sheets', label: 'Sheets' },
 ];
 
 const Row = ({
@@ -29,7 +40,9 @@ const Row = ({
 }) => {
   const ref = useRef<HTMLDivElement>(null);
   const removeEntity = useAuraV2Store(s => s.removeEntity);
+  const setEntityLocked = useAuraV2Store(s => s.setEntityLocked);
   const storyId = useAppStore(s => s.currentStory?.id);
+  const locked = !!entity.locked;
   const Icon = KIND_ICON[entity.kind];
   // Entities discovered in the last minute get a soft "new" pulse.
   const isNew = Date.now() - entity.updatedAt < 60_000 && entity.mentions <= 2;
@@ -60,9 +73,36 @@ const Row = ({
         {isNew && (
           <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse shrink-0" title="Just discovered" />
         )}
+        {/* Where this entry came from, but only when it did NOT come from the
+          * scan — "the extractor found this" is the default and needs no chip,
+          * while "the author wrote this" is the thing a reader needs to see
+          * before they trust it or before they hit Rebuild. */}
+        {(entity.source === 'lorebook' || entity.source === 'card') && (
+          <span
+            className="shrink-0 text-[9px] uppercase tracking-wide px-1 py-0.5 rounded bg-accent/15 text-accent font-bold"
+            title={entity.source === 'lorebook'
+              ? 'From the character card’s embedded lorebook — kept through a Rebuild'
+              : 'From the character card itself'}
+          >
+            {entity.source === 'lorebook' ? 'lore' : 'card'}
+          </span>
+        )}
         <span className="ml-auto text-[10px] text-muted tabular-nums shrink-0">
           ×{entity.mentions}
         </span>
+        <button
+          onClick={() => storyId && setEntityLocked(storyId, entity.id, !locked)}
+          title={locked
+            ? 'Kept through a Rebuild — click to let the scan manage it again'
+            : 'Keep this entry through a Rebuild'}
+          aria-pressed={locked}
+          className={cn(
+            'shrink-0 flex items-center justify-center min-h-10 min-w-10 rounded transition-opacity',
+            locked ? 'text-accent opacity-90' : 'opacity-0 group-hover:opacity-60 hover:!opacity-100',
+          )}
+        >
+          {locked ? <Lock size={11} /> : <LockOpen size={11} />}
+        </button>
         <button
           onClick={() => storyId && removeEntity(storyId, entity.id)}
           className="opacity-0 group-hover:opacity-60 hover:!opacity-100 transition-opacity shrink-0 flex items-center justify-center min-h-10 min-w-10 rounded"
@@ -102,6 +142,7 @@ export const CodexSidebar = () => {
   const clearCodex = useAuraV2Store(s => s.clearCodex);
   const statsByStory = useAuraV2Store(s => s.statsByStory);
   const removeAnnotation = useAuraV2Store(s => s.removeAnnotation);
+  const upsertEntities = useAuraV2Store(s => s.upsertEntities);
 
   const story = useAppStore(s => s.currentStory);
   const annotations = useAuraV2Store(s => (story ? s.annotationsByStory[story.id] : undefined));
@@ -113,7 +154,10 @@ export const CodexSidebar = () => {
       : committedCount(s.chains, s.currentChainIndex, s.currentMessageIndex, !!s.streamingMessage));
   const allEntities = useAuraV2Store(s => (story ? s.codexByStory[story.id] : undefined));
 
+  const sheets = useAuraV2Store(s => (story ? s.sheetsByStory[story.id] : undefined));
+
   const [query, setQuery] = useState('');
+  const [importNote, setImportNote] = useState<string | null>(null);
 
   const known = useMemo(
     () => visibleEntities(allEntities ?? [], readCount),
@@ -122,6 +166,7 @@ export const CodexSidebar = () => {
 
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
+    if (tab === 'sheets') return [];
     if (tab === 'notes') {
       return (annotations ?? [])
         .filter(a => !q || a.note.toLowerCase().includes(q) || (a.anchorText?.toLowerCase() ?? '').includes(q))
@@ -137,11 +182,12 @@ export const CodexSidebar = () => {
   }, [known, tab, query, annotations]);
 
   const counts = useMemo(() => {
-    const c: Record<TabKind, number> = { character: 0, location: 0, item: 0, notes: 0 };
+    const c: Record<TabKind, number> = { character: 0, location: 0, item: 0, notes: 0, sheets: 0 };
     known.forEach(e => { c[e.kind]++; });
     c.notes = annotations?.length ?? 0;
+    c.sheets = sheets?.length ?? 0;
     return c;
-  }, [known, annotations]);
+  }, [known, annotations, sheets]);
 
   if (!open || !story) return null;
 
@@ -151,7 +197,14 @@ export const CodexSidebar = () => {
     : `${Math.max(1, Math.round(msRead / 60_000))} min`;
 
   return (
-    <div className="fixed inset-y-0 right-0 z-50 w-full max-w-xs bg-surface text-app-text border-l border-app-border shadow-2xl flex flex-col">
+    <div
+      className={cn(
+        'fixed inset-y-0 right-0 z-50 w-full bg-surface text-app-text border-l border-app-border shadow-2xl flex flex-col',
+        // A codex entry is a paragraph and reads well narrow; a sheet is a
+        // table and does not. The panel takes the width its column needs.
+        tab === 'sheets' ? 'max-w-md' : 'max-w-xs',
+      )}
+    >
       <div className="flex items-center gap-2 px-4 py-3 border-b border-app-border">
         <BookMarked size={17} className="text-accent" />
         <div className="min-w-0">
@@ -170,13 +223,13 @@ export const CodexSidebar = () => {
         </button>
       </div>
 
-      <div className="flex p-1 mx-3 mt-3 bg-app-text/5 rounded-lg text-xs">
+      <div className="flex p-1 mx-3 mt-3 bg-app-text/5 rounded-lg text-[11px]">
         {TABS.map(({ kind, label }) => (
           <button
             key={kind}
             onClick={() => setTab(kind)}
             className={cn(
-              'flex-1 py-1.5 min-h-10 rounded-md transition-colors font-medium',
+              'flex-1 min-w-0 px-1 py-1.5 min-h-10 rounded-md transition-colors font-medium',
               tab === kind ? 'bg-surface shadow-sm text-accent' : 'opacity-60 hover:opacity-100',
             )}
           >
@@ -186,6 +239,7 @@ export const CodexSidebar = () => {
         ))}
       </div>
 
+      {tab !== 'sheets' && (
       <div className="relative mx-3 mt-2">
         <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 opacity-50" />
         <input
@@ -196,7 +250,9 @@ export const CodexSidebar = () => {
           className="w-full pl-8 pr-3 min-h-10 text-sm bg-app-text/5 border border-transparent rounded-full focus:outline-none focus:border-accent/50"
         />
       </div>
+      )}
 
+      {tab === 'sheets' ? <SheetsPanel /> : (
       <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
         {shown.length === 0 ? (
           <div className="text-center text-xs text-muted px-4 py-10 leading-relaxed">
@@ -254,7 +310,9 @@ export const CodexSidebar = () => {
           ))
         )}
       </div>
+      )}
 
+      {tab !== 'sheets' && (
       <div className="border-t border-app-border p-3 space-y-1 text-xs">
         <label className="flex items-center gap-2 p-1.5 min-h-11 rounded-lg hover:bg-app-text/5 cursor-pointer">
           <input
@@ -295,6 +353,33 @@ export const CodexSidebar = () => {
         </label>
 
         <div className="flex items-center gap-1 pt-2">
+          {/* Reading a lorebook back in — the other half of the export beside
+            * it. Arrives locked and marked as authored, so the next Rebuild
+            * leaves it alone. */}
+          <label
+            className="flex items-center gap-1.5 px-2.5 min-h-10 rounded-lg hover:bg-app-text/5 cursor-pointer transition-colors"
+            title="Import a SillyTavern World Info / lorebook JSON"
+          >
+            <Upload size={13} /> Import
+            <input
+              type="file"
+              accept=".json,application/json"
+              className="hidden"
+              data-testid="codex-import-lorebook"
+              onChange={async (e) => {
+                const file = e.target.files?.[0];
+                e.target.value = '';
+                if (!file || !story) return;
+                const entries = worldInfoToEntities(await file.text());
+                if (!entries.length) {
+                  setImportNote('No lorebook entries found in that file.');
+                  return;
+                }
+                upsertEntities(story.id, entries);
+                setImportNote(`Imported ${entries.length} entr${entries.length === 1 ? 'y' : 'ies'}.`);
+              }}
+            />
+          </label>
           <button
             onClick={() => downloadText(
               `${safeFilename(story.title)}-lorebook.json`,
@@ -310,7 +395,7 @@ export const CodexSidebar = () => {
             onClick={() => clearCodex(story.id)}
             disabled={!allEntities?.length}
             className="flex items-center gap-1.5 px-2.5 min-h-10 rounded-lg hover:bg-app-text/5 disabled:opacity-40 transition-colors"
-            title="Clear and rebuild from the start"
+            title="Clear and rebuild from the start — authored and locked entries are kept"
           >
             <Eraser size={13} /> Rebuild
           </button>
@@ -318,7 +403,11 @@ export const CodexSidebar = () => {
             {hoursRead} read
           </span>
         </div>
+        {importNote && (
+          <p className="text-[10px] text-muted pt-1" role="status">{importNote}</p>
+        )}
       </div>
+      )}
     </div>
   );
 };

@@ -9,7 +9,8 @@ import {
   DETAIL_CHARS, DETAIL_OUTPUT, READ_DETAILS, ReadDetail, estimateBudgetChars, runSheetFill,
   sectionBudget, SummaryPassage,
 } from '../utils/summarizer';
-import { LONG_READ_JOBS, runLongRead } from '../utils/longRead';
+import { LONG_READ_JOBS, runLongRead, type LongReadJob } from '../utils/longRead';
+import { FormatDrop } from './FormatDrop';
 import { cn } from '../utils/cn';
 
 type Mode = 'summary' | 'sheet';
@@ -43,6 +44,15 @@ export const SummarizePanel = ({
 
   const [mode, setMode] = useState<Mode>('summary');
   const [jobId, setJobId] = useState(LONG_READ_JOBS[0].id);
+  /**
+   * The reader's own form, when they have supplied one.
+   *
+   * Panel state rather than a saved thing: a form used once is a one-off, and
+   * a form worth keeping belongs in a Task, which already stores exactly this
+   * and can re-run it. Offering to save it here would be a second, worse home
+   * for the same record.
+   */
+  const [customJob, setCustomJob] = useState<LongReadJob | null>(null);
   const [lanes, setLanes] = useState(1);
   const [instruction, setInstruction] = useState('');
   const [sheetTitle, setSheetTitle] = useState('Story sheet');
@@ -76,7 +86,9 @@ export const SummarizePanel = ({
       .filter(p => p.content.trim());
     if (passages.length === 0) return;
 
-    const job = LONG_READ_JOBS.find(j => j.id === jobId) ?? LONG_READ_JOBS[0];
+    const job = (jobId === 'custom' && customJob)
+      ? customJob
+      : LONG_READ_JOBS.find(j => j.id === jobId) ?? LONG_READ_JOBS[0];
     const store = useSummaryStore.getState();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -236,7 +248,7 @@ export const SummarizePanel = ({
           <div>
             <p className="text-xs font-medium mb-1.5 opacity-80">Document</p>
             <div className="grid grid-cols-2 gap-1.5">
-              {LONG_READ_JOBS.map(j => (
+              {[...LONG_READ_JOBS, ...(customJob ? [customJob] : [])].map(j => (
                 <button
                   key={j.id}
                   onClick={() => setJobId(j.id)}
@@ -253,6 +265,37 @@ export const SummarizePanel = ({
                   {j.id}
                 </button>
               ))}
+            </div>
+            {/* A fifth document, shaped by the reader rather than by us.
+              *
+              * Everything else on this panel is the same engine — the chunking,
+              * the travelling key, the format restated on every pass. The four
+              * built-in jobs differ ONLY in those strings, so a reader's own
+              * form is not a new feature so much as the fifth row of a table
+              * they were already reading from. */}
+            <div className="mt-1.5">
+              <FormatDrop
+                label={customJob ? 'Replace the form' : 'Use your own form'}
+                onFormat={(instruction, title) => {
+                  setCustomJob({
+                    id: 'custom',
+                    label: `Reading into ${title || 'your form'}`,
+                    purpose: title
+                      ? `a "${title}" filled in from the story`
+                      : 'a document in the form the reader supplied',
+                    format: instruction,
+                    keyBrief:
+                      'what is still missing from the form, and which fields have been'
+                      + ' filled so far — so a later section does not overwrite an earlier'
+                      + ' answer with a worse one',
+                    assemble:
+                      'Merge the sections into ONE document in the given form. Where two'
+                      + ' sections filled the same field, keep the fuller answer. Where no'
+                      + ' section filled a field, write "unknown" rather than leaving it out.',
+                  });
+                  setJobId('custom');
+                }}
+              />
             </div>
           </div>
           {/* The trade, stated where it is made. One lane is the whole reason

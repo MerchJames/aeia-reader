@@ -1,12 +1,12 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AlignLeft, ChevronDown, Clapperboard, Download, FileText, Focus, ImageIcon, LayoutTemplate, Loader2, MessageSquareQuote,
-  Headphones, MessageCircle, Music2, Palette, PauseCircle, Play, PlayCircle, Quote, RefreshCw, Save, Sparkles, Square, Terminal, Trash2, Type,
-  Pause, Plus, Popcorn, Share2, UserRound, Volume2, Wand2, X, Zap, ZoomIn,
+  AlignLeft, Brain, ChevronDown, Clapperboard, Download, EyeOff, FileText, Focus, ImageIcon, LayoutTemplate, Loader2, MessageSquareQuote,
+  Headphones, MessageCircle, Music2, Palette, PauseCircle, Play, PlayCircle, Quote, RefreshCw, Save, Server, Sparkles, Square, Terminal, Trash2, Type,
+  Pause, Plus, Popcorn, Share2, UserRound, Volume2, Wand2, X, Zap, ZoomIn, Database, Compass,
 } from 'lucide-react';
 import { castOf } from '../utils/askCharacter';
 import { MAGNIFIER_STYLES } from '../utils/readingFocus';
-import { ColorableChannel, MagnifierStyle, MarkupPreset, StoredChannel } from '../types';
+import { ColorableChannel, MagnifierStyle, MarkupPreset, STREAM_EFFECTS, StoredChannel } from '../types';
 import {
   CHARACTER_COLOR_NONE, MARKUP_CHANNELS, MARKUP_COLORS, isDefaultMarkup, sanitizeMarkupPresets,
 } from '../utils/markupStyles';
@@ -189,6 +189,7 @@ const ExportAsPageButton = () => {
           overrides: v2.overridesByStory[story.id],
           lensOn: !!v2.lensOnByStory[story.id],
           hideMetadata: store.hideMetadata,
+          fontColorMode: store.fontColorMode,
           substituteNames: store.substituteNames,
           oocHandling: store.oocHandling,
           smartTypography: store.smartTypography,
@@ -209,6 +210,7 @@ const ExportAsPageButton = () => {
 
       const { html, droppedImages } = exportStoryHtml(walked, {
         theme: themeDef,
+        fontColorMode: store.fontColorMode,
         accent: accentHex(store.accentColor) || undefined,
         typography: {
           stack: font.stack,
@@ -509,6 +511,40 @@ const ExpressionStrip = ({ character, spriteKey }: { character: string; spriteKe
   );
 };
 
+/** Version, build time and platform — one line, copyable. */
+const BuildStamp = () => {
+  const [copied, setCopied] = useState(false);
+  const built = useMemo(() => {
+    try {
+      return new Date(__BUILD_TIME__).toLocaleString(undefined, {
+        year: 'numeric', month: 'short', day: 'numeric',
+        hour: '2-digit', minute: '2-digit',
+      });
+    } catch {
+      return __BUILD_TIME__;
+    }
+  }, []);
+  const where = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+    ? 'desktop' : 'web';
+  const line = `Aeia ${__APP_VERSION__} · ${where} · built ${built}`;
+
+  return (
+    <button
+      onClick={() => {
+        void navigator.clipboard?.writeText(line).then(
+          () => { setCopied(true); window.setTimeout(() => setCopied(false), 1400); },
+          () => { /* the OS said no; the line is on screen to read */ },
+        );
+      }}
+      title="Copy this line — it says exactly which build you are running"
+      data-testid="build-stamp"
+      className="text-[10px] text-muted/70 hover:text-muted text-left pt-3"
+    >
+      {copied ? 'copied' : line}
+    </button>
+  );
+};
+
 const Section = ({ title, children }: { title: string; children: React.ReactNode }) => (
   <div>
     <label className="text-xs font-bold uppercase tracking-wider text-muted mb-2 block">
@@ -517,6 +553,58 @@ const Section = ({ title, children }: { title: string; children: React.ReactNode
     <div className="flex flex-col gap-2">{children}</div>
   </div>
 );
+
+/**
+ * A section that folds itself away when the reader's mode has no use for it.
+ *
+ * Scene Images and Services are two of the longest panels here — an image
+ * backend, an adapter, a model, a workflow, a mapping, plus a live status
+ * readout per service. In Plain and Lit none of it does anything: those modes
+ * generate no images and drive no scene backends, so it is a wall of
+ * configuration for machinery that is switched off.
+ *
+ * Folded, not removed. The reader who wants to set up a backend *before*
+ * turning the mode on has to be able to, and a setting you cannot find is worse
+ * than one you have to scroll past. The header says what is inside and one
+ * click opens it.
+ *
+ * Re-seeded when `startClosed` changes, so switching Plain → Cinema opens these
+ * without a reload, and going back closes them again. It does not fight the
+ * reader mid-session: toggling it by hand sticks until the mode itself changes.
+ */
+const FoldedSection = ({
+  title, hint, startClosed, children,
+}: {
+  title: string;
+  /** One line on what is inside, shown while folded. */
+  hint?: string;
+  startClosed: boolean;
+  children: React.ReactNode;
+}) => {
+  const [open, setOpen] = useState(!startClosed);
+  useEffect(() => { setOpen(!startClosed); }, [startClosed]);
+  return (
+    <div>
+      <button
+        onClick={() => setOpen(o => !o)}
+        aria-expanded={open}
+        data-testid={`section-${title.toLowerCase().replace(/\s+/g, '-')}`}
+        className="w-full flex items-center gap-1.5 mb-2 text-left group"
+      >
+        <span className="text-xs font-bold uppercase tracking-wider text-muted group-hover:text-app-text transition-colors">
+          {title}
+        </span>
+        <ChevronDown
+          size={13}
+          className={cn('text-muted transition-transform', open && 'rotate-180')}
+        />
+      </button>
+      {open
+        ? <div className="flex flex-col gap-2">{children}</div>
+        : hint && <p className="text-[11px] text-muted -mt-1 mb-1">{hint}</p>}
+    </div>
+  );
+};
 
 /**
  * A collapsed drawer for the individual keys a reading mode owns. They are all
@@ -1436,7 +1524,16 @@ const SceneDirectorSection = () => {
   );
 };
 
-export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFormat: () => void; onOpenRefine: () => void }) => {
+export const SettingsPanel = ({
+  onOpenAutoFormat, onOpenRefine, onOpenSync, onOpenProxy, onOpenSmartExport, onOpenBackup,
+}: {
+  onOpenAutoFormat: () => void;
+  onOpenRefine: () => void;
+  onOpenSync: () => void;
+  onOpenProxy: () => void;
+  onOpenSmartExport: () => void;
+  onOpenBackup: () => void;
+}) => {
   const store = useAppStore();
   // Same sanitiser the renderer runs, so the panel can never show a channel the
   // page is not actually drawing.
@@ -1454,6 +1551,14 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
   const close = () => store.setSettingsOpen(false);
   // Reveal the mode's individual keys when they no longer agree with it.
   const diverged = !modeMatches(store, store.readingMode);
+  /**
+   * The two modes that generate nothing and drive no backend.
+   *
+   * Plain is words on a page; Lit tints the page from the scene's mood and
+   * stops there. Neither makes a picture or plays a sound, so the panels that
+   * configure picture-making and sound live folded in both.
+   */
+  const quietModes = store.readingMode === 'plain' || store.readingMode === 'lit';
 
   return (
     <div className="fixed inset-0 z-50">
@@ -1669,7 +1774,7 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
               <div className="pt-2">
                 <p className="text-xs font-medium mb-1.5 opacity-80">Streaming text effect</p>
                 <div className="grid grid-cols-3 gap-2">
-                  {(['none', 'fade', 'blur', 'ink', 'glitch', 'rise', 'quill', 'type'] as const).map(effect => (
+                  {STREAM_EFFECTS.map(effect => (
                     <button
                       key={effect}
                       onClick={() => store.setStreamEffect(effect)}
@@ -1685,8 +1790,11 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
                   ))}
                 </div>
                 <span className="text-[11px] text-muted">
-                  Animates each word as it streams in — on top of (and independent
-                  from) the block reveal above.
+                  Dresses each word as it streams in — on top of (and independent
+                  from) the block reveal above. Most of them animate the word's
+                  arrival; “ember” instead lands it in the accent colour and lets
+                  it cool into the prose, so the tail reads as heat rather than
+                  motion and nothing has to be waited for.
                 </span>
               </div>
               <div className="pt-2 flex flex-col gap-1">
@@ -2046,6 +2154,70 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
             )}
           </Section>
 
+          {/*
+            * What the chat file said, as against what the story said.
+            *
+            * All three of these are about FIDELITY to the source rather than
+            * presentation, which is why they sit together rather than being
+            * scattered through Reading and Text Processing: each one is the
+            * reader answering "show me what the machine wrote, or don't".
+            */}
+          <Section title="From the chat file">
+            <Toggle
+              icon={<Brain size={16} />}
+              label="Show thinking"
+              hint="Chain-of-thought the model recorded, in its own collapsed section."
+              value={store.showReasoning}
+              onChange={store.setShowReasoning}
+              testId="toggle-reasoning"
+            />
+            <Toggle
+              icon={<EyeOff size={16} />}
+              label="Show hidden messages"
+              hint="Entries SillyTavern marked /hide or system — including some narrator lines."
+              value={store.showHiddenMessages}
+              onChange={store.setShowHiddenMessages}
+              testId="toggle-hidden"
+            />
+            <Toggle
+              icon={<Palette size={16} />}
+              label="Respect original colour formatting"
+              hint="Keep <font color> the author wrote, instead of folding it into your own styling."
+              value={store.fontColorMode !== 'ignore'}
+              onChange={on => store.setFontColorMode(on ? 'original' : 'ignore')}
+              testId="toggle-font-color"
+            />
+            {store.fontColorMode !== 'ignore' && (
+              <div className="ml-4 pl-3 border-l border-app-border">
+                <div className="grid grid-cols-2 gap-2">
+                  {([
+                    { mode: 'original' as const, label: 'As written' },
+                    { mode: 'adapt' as const, label: 'Fit the theme' },
+                  ]).map(opt => (
+                    <button
+                      key={opt.mode}
+                      onClick={() => store.setFontColorMode(opt.mode)}
+                      aria-pressed={store.fontColorMode === opt.mode}
+                      className={cn(
+                        'py-1.5 min-h-11 text-xs rounded-md border transition-colors',
+                        store.fontColorMode === opt.mode
+                          ? 'border-accent bg-accent/10 text-accent font-bold'
+                          : 'border-transparent bg-app-text/5 hover:bg-app-text/10',
+                      )}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+                <span className="block text-[11px] text-muted mt-1.5">
+                  {store.fontColorMode === 'adapt'
+                    ? 'Keeps the hue the author chose and re-lights it for this theme, so a colour picked against the opposite background is still readable.'
+                    : 'Exactly the colour in the file. A colour chosen for a dark front-end may be hard to read on a light theme.'}
+                </span>
+              </div>
+            )}
+          </Section>
+
           <Section title="Text Processing">
             <Toggle
               icon={<Sparkles size={16} />}
@@ -2141,6 +2313,96 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
             </button>
           </Section>
 
+          {/*
+            * SillyTavern sync, off until asked for.
+            *
+            * Gated rather than merely tucked away: with the switch off, the
+            * panel cannot be opened, the library shows no sync affordances, and
+            * `useStBridge` attaches no message listener — a feature that lets
+            * another window talk to this one should be inert until invited,
+            * not just out of sight.
+            */}
+          {/* Its own section rather than a line under the AI settings.
+            *
+            * This is a different permission from the rest, and burying it as a
+            * sub-toggle of "agent mode" would make a reader who wants help
+            * finding a button hand over their pins to get it. */}
+          <Section title="AI Tour Guide">
+            <Toggle
+              icon={<Compass size={16} />}
+              label="Let the assistant show you around"
+              hint="It can look up how the app works, take you to the right view, and change your display settings. It cannot touch your stories, your endpoint or your data."
+              value={store.aiTourGuide}
+              onChange={store.setAiTourGuide}
+              testId="toggle-tour-guide"
+            />
+            <p className="text-[11px] text-muted leading-snug px-1">
+              Needs an AI endpoint connected. Ask it things like “where are my highlights”,
+              “make the text bigger”, or “what is a context zone”.
+            </p>
+          </Section>
+
+          <Section title="SillyTavern">
+            <Toggle
+              icon={<RefreshCw size={16} />}
+              label="Two-way sync"
+              hint="Bring in new messages from SillyTavern and send your Lens edits back."
+              value={store.stSyncEnabled}
+              onChange={store.setStSyncEnabled}
+              testId="toggle-st-sync"
+            />
+            {store.stSyncEnabled && (
+              <>
+                <button
+                  onClick={() => { close(); onOpenSync(); }}
+                  data-testid="open-sync"
+                  className="flex items-center justify-between p-2 rounded-lg hover:bg-app-text/5 transition-colors text-sm text-accent bg-accent/10"
+                >
+                  <div className="flex items-center gap-2">
+                    <RefreshCw size={16} />
+                    <div className="text-left">
+                      <span className="block">Sync with SillyTavern</span>
+                      <span className="block text-[10px] opacity-70 font-normal">
+                        Bring in new messages · send your Lens edits back · nothing moves without your say-so
+                      </span>
+                    </div>
+                  </div>
+                  <span>&rarr;</span>
+                </button>
+                <p className="text-[11px] text-muted leading-snug px-1">
+                  Install the <b>Aeia Bridge</b> extension in SillyTavern to sync without files.
+                  Without it, the same panel still works from a saved <code>.jsonl</code>.
+                </p>
+              </>
+            )}
+
+            {/*
+              * Outside the sync gate on purpose.
+              *
+              * Standing in as the model endpoint is a different feature with a
+              * different lifetime — it runs for a whole writing session, where
+              * the sync is opened and closed. Hiding it behind the sync switch
+              * would tie the two together in the reader's head as well as in
+              * the settings.
+              */}
+            <button
+              onClick={() => { close(); onOpenProxy(); }}
+              data-testid="open-proxy"
+              className="flex items-center justify-between p-2 rounded-lg hover:bg-app-text/5 transition-colors text-sm"
+            >
+              <div className="flex items-center gap-2">
+                <Server size={16} />
+                <div className="text-left">
+                  <span className="block">Aeia as your SillyTavern endpoint</span>
+                  <span className="block text-[10px] opacity-70 font-normal">
+                    Experimental · desktop only · process every prompt and reply on the way through
+                  </span>
+                </div>
+              </div>
+              <span>&rarr;</span>
+            </button>
+          </Section>
+
           <Section title="Dialogue Styling">
             <SelectRow
               label="Style"
@@ -2210,6 +2472,41 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
           </Section>
 
           <CharacterColorSection />
+
+          {/* Not gated on an open story, and above Export. Both on purpose.
+            *
+            * Every section below that is wrapped in `store.currentStory &&`
+            * disappears when no story is open — which is exactly the state a
+            * reader is in when their library has just come up empty and they
+            * are looking for the backup. The one control that could save them
+            * must not be one of the things that vanishes.
+            *
+            * Above Export because that is what they would otherwise mistake
+            * for a backup. Those write one story, as prose, for reading
+            * elsewhere: they restore nothing, and they carry none of the
+            * notes, pins or Lens edits attached to it. */}
+          <Section title="Your library">
+            <button
+              onClick={() => { close(); onOpenBackup(); }}
+              data-testid="open-backup"
+              className="flex items-center justify-between p-2 rounded-lg hover:bg-app-text/5 transition-colors text-sm text-accent bg-accent/10"
+            >
+              <div className="flex items-center gap-2">
+                <Database size={16} />
+                <div className="text-left">
+                  <span className="block">Back up &amp; restore</span>
+                  <span className="block text-[10px] opacity-70 font-normal">
+                    Every story with its notes, pins and edits · one file · restore it anywhere
+                  </span>
+                </div>
+              </div>
+              <span>&rarr;</span>
+            </button>
+            <p className="text-[11px] text-muted leading-snug px-1">
+              Everything lives in this browser, and browsers can clear stored data when the
+              device runs low on space. This is also where you can ask this one not to.
+            </p>
+          </Section>
 
           {store.currentStory && (
             <Section title="Profile Pictures">
@@ -2284,13 +2581,22 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
             </Section>
           )}
 
-          <Section title="Scene images">
+          {/* Both folded in Plain and Lit, which drive neither. See FoldedSection. */}
+          <FoldedSection
+            title="Scene images"
+            hint="Picture generation for scenes — backend, model and prompt presets."
+            startClosed={quietModes}
+          >
             <SceneImageSettings />
-          </Section>
+          </FoldedSection>
 
-          <Section title="Services">
+          <FoldedSection
+            title="Services"
+            hint="Where the AI, image, audio and voice backends live, and whether they answer."
+            startClosed={quietModes}
+          >
             <ServicesSection />
-          </Section>
+          </FoldedSection>
 
           <Section title="Saved Configurations">
             <div className="flex gap-2">
@@ -2335,6 +2641,29 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
 
           {store.currentStory && (
             <Section title="Export">
+              {/* The way in, above the one-press exports.
+                *
+                * Those each take the WHOLE story, which is right for a backup
+                * and wrong for most reasons anyone wants a file. Smart Export
+                * is where you say what goes in it first — and it is listed
+                * first because "all of it, as markdown" is the special case,
+                * not the general one. */}
+              <button
+                onClick={() => { close(); onOpenSmartExport(); }}
+                data-testid="open-smart-export"
+                className="flex items-center justify-between p-2 rounded-lg hover:bg-app-text/5 transition-colors text-sm text-accent bg-accent/10"
+              >
+                <div className="flex items-center gap-2">
+                  <Download size={16} />
+                  <div className="text-left">
+                    <span className="block">Smart Export</span>
+                    <span className="block text-[10px] opacity-70 font-normal">
+                      Pick the speakers, the chapters, the asides · title page · tidy first
+                    </span>
+                  </div>
+                </div>
+                <span>&rarr;</span>
+              </button>
               <button
                 onClick={() => {
                   const story = store.currentStory!;
@@ -2351,6 +2680,16 @@ export const SettingsPanel = ({ onOpenAutoFormat, onOpenRefine }: { onOpenAutoFo
               <ExportWithEditsButton story={store.currentStory} />
             </Section>
           )}
+
+          {/*
+            * Which build is this?
+            *
+            * Unanswerable from inside a packaged app until now: three platforms
+            * ship from three machines, and working out whether a copy had a
+            * given fix in it meant grepping a compressed binary. Clicking it
+            * copies the line, so a bug report can carry it.
+            */}
+          <BuildStamp />
 
           <div className="text-[11px] text-muted leading-relaxed border-t border-app-border pt-4">
             <p className="font-bold mb-1">Keyboard shortcuts</p>

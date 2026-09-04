@@ -7,6 +7,7 @@ import { useSceneDirector } from '../hooks/useSceneDirector';
 import { SceneAtmosphere } from './SceneAtmosphere';
 import { useSceneVfx, useSceneWeather } from '../hooks/useSceneWeather';
 import { processText, balanceEmphasis, truncateToWord } from '../utils/textProcessor';
+import { useFontColor } from '../hooks/useFontColor';
 import { MOOD_COLOR, sceneAtmosphere } from '../utils/sceneMood';
 import { bucketFor } from '../lib/spriteStorage';
 import { spriteFor, useSpriteStore } from '../stores/useSpriteStore';
@@ -36,6 +37,7 @@ import { cn } from '../utils/cn';
  */
 export const VNView = () => {
   const store = useAppStore();
+  const fontColor = useFontColor();
   const v2 = useAuraV2Store();
   const storyId = store.currentStory?.id;
   const overrides = storyId ? v2.overridesByStory[storyId] : undefined;
@@ -55,6 +57,7 @@ export const VNView = () => {
     : current
       ? processText(resolveContent(current, overrides, lensOn), {
           hideMetadata: store.hideMetadata && !current.hidden,
+          fontColorMode: store.fontColorMode,
           oocHandling: store.oocHandling,
           autoFormat: store.autoFormat,
           autoFormatRules: store.autoFormatRules,
@@ -150,9 +153,9 @@ export const VNView = () => {
   const primaryHtml = useMemo(
     () => renderWithEmphasis(
       beat.primary, emphasis, false, perform, undefined, vnPlayedRef.current.set,
-      performMatcher(perform), markupCtx,
+      performMatcher(perform), markupCtx, fontColor,
     ),
-    [beat.primary, emphasis, perform, markupCtx],
+    [beat.primary, emphasis, perform, markupCtx, fontColor],
   );
 
   const sprites = useSpriteStore(s => s.sprites);

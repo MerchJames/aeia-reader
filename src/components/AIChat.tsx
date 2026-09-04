@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -6,7 +6,8 @@ import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import {
   Bot, Check, ChevronDown, ChevronLeft, ChevronRight, Combine, Copy, Loader2, Pencil, Plus, RefreshCw,
-  ListOrdered, ScrollText, Send, SlidersHorizontal, Sparkles, Square, Trash2, Wand2, Wrench, X,
+  GripVertical, ListOrdered, Lock, LockOpen, Maximize2, Pin, ScrollText, Send,
+  PlugZap, SlidersHorizontal, Sparkles, Square, Trash2, Wand2, Wrench, X,
 } from 'lucide-react';
 import { useAppStore } from '../store';
 import { useShallow } from 'zustand/react/shallow';
@@ -15,8 +16,9 @@ import {
   listModels, mergeSamplers, samplerParamsFrom,
 } from '../utils/aiClient';
 import { cardToPromptBlock, pinsToPromptBlock, sheetsToPromptBlock } from '../utils/cardContext';
+import { describeSuccess, diagnose } from '../utils/aiDiagnose';
 import { cn } from '../utils/cn';
-import { useAuraV2Store } from '../stores/useAuraV2Store';
+import { flushV2, useAuraV2Store } from '../stores/useAuraV2Store';
 import { buildZoneBody, flatWithIndex, zoneSummary } from '../utils/contextZone';
 import { buildVisitorTurnMessages, visitorsToPromptBlock } from '../utils/visitor';
 import { arcsBefore, throughlineBlock, throughlineFor } from '../utils/throughline';
@@ -36,6 +38,19 @@ import { TaskPanel } from './TaskPanel';
 import { runAgentTurn, workingBudget } from '../utils/agentLoop';
 import { renderToolCatalog } from '../utils/agentTools';
 import { buildToolContext } from '../hooks/useAgentTools';
+import { usePanelDock } from '../hooks/usePanelDock';
+import { useIsMobile } from '../hooks/useMediaQuery';
+import { dockStyle, PRESET_LABEL, presetDock, type DockPreset } from '../utils/panelDock';
+import { LensEditModal, type LensPick } from './LensEditModal';
+import { ProposalReview } from './ProposalReview';
+import {
+  makeProposal, pendingProposals, proposalProblem, queueProposal, settleProposal,
+  trimProposals, type LensProposal,
+} from '../utils/lensProposal';
+import {
+  armDirective, armIncomplete, armLabel, armPlaceholder, armScopeLabel,
+  clampTargets, type ArmedTool,
+} from '../utils/toolArm';
 import { AiAdvancedConfig, CardInfo as Card, ChatToolStep, ChatTurn, CowriteRunSpec, Message, VisitorTurnSpec } from '../types';
 
 type Scope = 'page' | 'here' | 'all' | 'swipes' | 'zones';
@@ -382,7 +397,7 @@ const ToolSteps = ({ steps }: { steps: ChatToolStep[] }) => {
  * reach what the model actually said.
  */
 const TurnView = React.memo(({
-  turn, isLast, busy, onSwipe, onRegenerate, onEdit, onDelete, onRetry,
+  turn, isLast, busy, onSwipe, onRegenerate, onEdit, onDelete, onRetry, onPin,
 }: {
   turn: ChatTurn;
   isLast: boolean;
@@ -393,11 +408,22 @@ const TurnView = React.memo(({
   onDelete: () => void;
   /** Drop everything after this turn and generate again from it. */
   onRetry: () => void;
+  /**
+   * Keep this reply beside the story as a pin.
+   *
+   * The toolbar's pin button ARMS the next message — it tells the model that
+   * what comes back should be a pin. This is the other half, and the one a
+   * reader reaches for far more often: an answer that turned out to be worth
+   * keeping, kept after the fact. Absent when there is no story open to keep
+   * it against.
+   */
+  onPin?: (text: string) => void;
 }) => {
   const content = turn.variants[turn.activeVariant] ?? turn.variants[0] ?? '';
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(content);
   const [copied, setCopied] = useState(false);
+  const [pinned, setPinned] = useState(false);
 
   const startEdit = () => { setDraft(content); setEditing(true); };
   const commit = () => {
@@ -543,6 +569,16 @@ const TurnView = React.memo(({
           <button onClick={copy} className="p-0.5 rounded hover:bg-app-text/10" title="Copy">
             {copied ? <Check size={12} /> : <Copy size={12} />}
           </button>
+          {onPin && isAssistant && (
+            <button
+              onClick={() => { onPin(content); setPinned(true); setTimeout(() => setPinned(false), 1400); }}
+              className={cn('p-0.5 rounded hover:bg-app-text/10', pinned && 'text-accent')}
+              title="Keep this reply as a pin"
+              data-testid="turn-pin"
+            >
+              {pinned ? <Check size={12} /> : <Pin size={12} />}
+            </button>
+          )}
           <button
             onClick={onDelete}
             disabled={busy}
@@ -556,7 +592,8 @@ const TurnView = React.memo(({
       )}
     </div>
   );
-}, (a, b) => a.turn === b.turn && a.isLast === b.isLast && a.busy === b.busy);
+}, (a, b) => a.turn === b.turn && a.isLast === b.isLast && a.busy === b.busy
+  && a.onPin === b.onPin);
 
 /** Number input that maps an empty field to `null` ("use server default"). */
 const NumField = ({
@@ -590,13 +627,52 @@ const NumField = ({
  * and rendered as an overlay so the default panel stays simple — most readers
  * never open this.
  */
+
+/**
+ * What the guide is FOR, in the model's own instructions.
+ *
+ * The tool catalogue says what it can do; this says what it should be like.
+ * Separate because the two change for different reasons, and because this is
+ * the part a reader would recognise as tone rather than capability.
+ *
+ * The two rules that matter: look it up before saying it, and take them there
+ * rather than describing the journey. A guide that recites a click path from
+ * memory is worse than no guide, because it is confidently wrong about an app
+ * the reader cannot check it against.
+ */
+const GUIDE_BRIEF = [
+  '--- YOU ARE ALSO THE TOUR GUIDE ---',
+  'The reader has switched this on because the app has more in it than is',
+  'obvious. Your job is to make it navigable.',
+  '',
+  '- Look things up with guide.docs before you explain them. The manual is the',
+  '  truth about this app; your memory is not. If it is not in there, say you',
+  '  are not sure rather than inventing a menu.',
+  '- Prefer taking them there to telling them where it is. One app.goto beats a',
+  '  paragraph of directions — but say what you are about to do first.',
+  '- Call guide.where when they say "this", "here", or "the current one".',
+  '- Answer the question they asked, then stop. This is a guide, not a tour that',
+  '  runs whether or not anyone is following.',
+  '- You can change their display settings, and you cannot change anything about',
+  '  their AI endpoint, their syncing, or their data. For those, open the panel',
+  '  and say which control to look at.',
+  '- Everything AI here is optional and has a working AI-free path. If someone',
+  '  is stuck on connecting a model, remember that they can use the whole app',
+  '  without one.',
+].join('\n');
+
 const AdvancedPanel = ({
-  adv, onChange, localBase, onClose,
+  adv, onChange, localBase, onClose, model, models, onModel, onReloadModels, reloading,
 }: {
   adv: AiAdvancedConfig;
   onChange: (patch: Partial<AiAdvancedConfig>) => void;
   localBase: boolean;
   onClose: () => void;
+  model: string;
+  models: string[];
+  onModel: (model: string) => void;
+  onReloadModels: () => void;
+  reloading: boolean;
 }) => (
   <div className="absolute inset-0 z-10 bg-surface/95 backdrop-blur-sm overflow-y-auto p-3.5 space-y-3">
     <div className="flex items-center justify-between">
@@ -616,6 +692,51 @@ const AdvancedPanel = ({
         className="accent-[var(--app-accent)] w-4 h-4"
       />
     </label>
+
+    {/* The model, beside the samplers.
+      *
+      * Changing which model answers is the same KIND of decision as changing
+      * the temperature — it is the thing you fiddle with while working, not
+      * part of setting the app up. It used to live only on the connect screen,
+      * which you never see again once you are connected, so switching models
+      * meant disconnecting first. */}
+    <div className="space-y-1.5">
+      <span className="text-[10px] uppercase tracking-wider text-muted font-bold">Model</span>
+      {models.length > 0 ? (
+        <select
+          value={model}
+          onChange={(e) => onModel(e.target.value)}
+          data-testid="advanced-model-select"
+          className="w-full bg-app-text/5 border border-app-border rounded-md px-2 py-1.5 text-xs outline-none"
+        >
+          {/* A model typed by hand may not be in the list. Kept as an option so
+            * opening this panel cannot silently switch the reader's model to
+            * whatever happens to be first. */}
+          {!models.includes(model) && model && (
+            <option value={model} className="text-black bg-white">{model}</option>
+          )}
+          {models.map(m => (
+            <option key={m} value={m} className="text-black bg-white">{m}</option>
+          ))}
+        </select>
+      ) : (
+        <input
+          type="text"
+          value={model}
+          onChange={(e) => onModel(e.target.value)}
+          placeholder="gpt-4o-mini, llama-3.1-8b…"
+          className="w-full bg-app-text/5 border border-app-border rounded-md px-2 py-1.5 text-xs outline-none focus:border-accent/50"
+        />
+      )}
+      <button
+        onClick={onReloadModels}
+        disabled={reloading}
+        className="w-full flex items-center justify-center gap-1.5 py-1 rounded-md text-[11px] text-muted hover:text-app-text disabled:opacity-50"
+      >
+        {reloading ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
+        {reloading ? 'Loading…' : 'Reload the model list'}
+      </button>
+    </div>
 
     <div className="space-y-1.5">
       <span className="text-[10px] uppercase tracking-wider text-muted font-bold">Samplers</span>
@@ -675,7 +796,17 @@ const AdvancedPanel = ({
   </div>
 );
 
-export const AIChat = () => {
+export const AIChat = ({ embedded = false }: {
+  /**
+   * Render as a plain block filling its parent, with no window of its own.
+   *
+   * The Workspace gives the assistant a column, and a column already has a
+   * position, a size and a frame — so the fixed placement, the dock gestures,
+   * the lock and the resize grips are all somebody else's job there. Same
+   * component and the same conversation either way; only the chrome differs.
+   */
+  embedded?: boolean;
+} = {}) => {
   // Subscribe ONLY to the fields/actions the panel uses. A bare useAppStore()
   // re-renders on every store write — including streamedText, which ticks dozens
   // of times a second while the reader streams behind an open panel, re-running
@@ -683,6 +814,10 @@ export const AIChat = () => {
   const store = useAppStore(useShallow(s => ({
     currentStory: s.currentStory,
     chains: s.chains,
+    aiContextOpen: s.aiContextOpen,
+    setAiContextOpen: s.setAiContextOpen,
+    aiDockLocked: s.aiDockLocked,
+    setAiDockLocked: s.setAiDockLocked,
     currentChainIndex: s.currentChainIndex,
     currentMessageIndex: s.currentMessageIndex,
     aiBaseUrl: s.aiBaseUrl,
@@ -690,6 +825,8 @@ export const AIChat = () => {
     aiModel: s.aiModel,
     aiAdvanced: s.aiAdvanced,
     aiAgentMode: s.aiAgentMode,
+    aiTourGuide: s.aiTourGuide,
+    aiDock: s.aiDock,
     lensEditTarget: s.lensEditTarget,
     lensEditFocus: s.lensEditFocus,
     // Actions are stable references, so including them never triggers a re-render.
@@ -698,6 +835,7 @@ export const AIChat = () => {
     setAiApiKey: s.setAiApiKey,
     setAiAdvanced: s.setAiAdvanced,
     setAiAgentMode: s.setAiAgentMode,
+    setAiDock: s.setAiDock,
     setAiOpen: s.setAiOpen,
     restreamFromId: s.restreamFromId,
     setLensEditTarget: s.setLensEditTarget,
@@ -707,6 +845,10 @@ export const AIChat = () => {
   const [error, setError] = useState<string | null>(null);
   const [models, setModels] = useState<string[]>([]);
   const [resolvedBase, setResolvedBase] = useState('');
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<
+    { ok: boolean; title: string; fixes: string[]; raw?: string } | null
+  >(null);
   const [probing, setProbing] = useState(false);
   const [scope, setScope] = useState<Scope>('here');
   const [includeHighlights, setIncludeHighlights] = useState(true);
@@ -774,6 +916,49 @@ export const AIChat = () => {
 
   // Lens Edit: draft an AI rewrite of a chosen message into the Lens override layer.
   const [lensMode, setLensMode] = useState(false);
+  /**
+   * Rewrites waiting on the reader.
+   *
+   * Component state, never persisted. An unapproved edit that survives a reload
+   * is an edit nobody remembers agreeing to — and the applied ones are already
+   * recorded where they belong, as Lens overrides in the manager.
+   */
+  const [proposals, setProposals] = useState<LensProposal[]>([]);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [lensModalOpen, setLensModalOpen] = useState(false);
+  /** The tool this next message is for, if the reader picked one. Spent on send. */
+  const [armed, setArmed] = useState<ArmedTool | null>(null);
+  const pendingCount = useMemo(() => pendingProposals(proposals).length, [proposals]);
+
+  /**
+   * Where `lens.propose` puts things. Held in a ref so the closure the tool
+   * context captures at send time still points at the live setter after a
+   * re-render — a stale one would drop every proposal after the first.
+   */
+  const stageProposal = useRef((p: LensProposal) => {
+    setProposals(prev => trimProposals(queueProposal(prev, p)));
+    setReviewOpen(true);
+  });
+
+  /**
+   * Moving and resizing the panel — desktop only.
+   *
+   * A phone has no room to move a window around 390px of screen, and a drag
+   * there is a scroll gesture that has gone wrong. It keeps the fixed corner.
+   */
+  const isTouchOnly = useIsMobile();
+  const dockable = !isTouchOnly && !embedded;
+  const dock = usePanelDock(store.aiDock, store.setAiDock, store.aiDockLocked);
+  const [layoutOpen, setLayoutOpen] = useState(false);
+  const layoutRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!layoutOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (layoutRef.current && !layoutRef.current.contains(e.target as Node)) setLayoutOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [layoutOpen]);
   const [spineOpen, setSpineOpen] = useState(false);
   /** How many earlier stories travel into this one — the button's count. */
   const throughlines = useAuraV2Store(s => s.throughlines);
@@ -869,12 +1054,52 @@ export const AIChat = () => {
     }
   };
 
+
+  /**
+   * Prove the endpoint actually answers, rather than merely listing itself.
+   *
+   * Separate from "Connect & load models" on purpose: those do different jobs
+   * and fail for different reasons. Listing hits `/models`, which plenty of
+   * working servers do not implement — KoboldCpp being the obvious one — so a
+   * reader whose setup is perfectly fine can be told it is broken. This sends a
+   * real one-token completion to the model that is actually selected, which is
+   * the only thing that proves the pairing works.
+   *
+   * It is also the only path that can catch a base URL that lists models from
+   * one place and completes at another, which some proxies do.
+   */
+  const testConnection = async () => {
+    setTesting(true);
+    setError(null);
+    setTestResult(null);
+    const started = Date.now();
+    try {
+      const base = resolvedBase || candidateBases(store.aiBaseUrl)[0];
+      const reply = await chatCompletion(
+        base, store.aiApiKey, store.aiModel,
+        [{ role: 'user', content: 'Reply with the single word: ready' }],
+        { max_tokens: 12, temperature: 0 },
+        undefined, 'Testing connection',
+      );
+      setTestResult({
+        ok: true,
+        title: describeSuccess(store.aiModel, reply, Date.now() - started),
+        fixes: [],
+      });
+    } catch (e) {
+      const d = diagnose(e, store.aiBaseUrl, store.aiModel);
+      setTestResult({ ok: false, title: d.title, fixes: d.fixes, raw: d.raw });
+    } finally {
+      setTesting(false);
+    }
+  };
+
   /**
    * Run one assistant generation on a thread. When `regenTurnId` is set the
    * reply is appended as a new swipe on that turn (history excludes it);
    * otherwise a fresh assistant turn is committed at the end.
    */
-  const runAssistant = async (threadId: string, regenTurnId: string | null) => {
+  const runAssistant = async (threadId: string, regenTurnId: string | null, arm?: ArmedTool | null) => {
     if (!storyId) return;
     setError(null);
     setStreaming(true);
@@ -914,8 +1139,21 @@ export const AIChat = () => {
        * block into the panel shows the reader the machinery rather than the
        * work. The step lines are the progress indicator instead.
        */
-      if (store.aiAgentMode) {
-        const agentSystem = `${system}\n\n${renderToolCatalog()}`;
+      // Arming implies tools. A reader who picked "Lens edit" from the composer
+      // has asked for the thing tools do; making them find a second switch
+      // first fails silently — the directive goes out, no catalogue with it,
+      // and the model's fenced block lands in the panel as raw JSON.
+      // The Tour Guide is a third way in: it needs the tool loop, but a reader
+      // who only wants help finding a button should not have to hand over
+      // agent mode to get it — see `aiTourGuide` in types.ts.
+      if (store.aiAgentMode || store.aiTourGuide || arm) {
+        const agentSystem = [
+          system,
+          renderToolCatalog(store.aiTourGuide),
+          store.aiTourGuide ? GUIDE_BRIEF : '',
+          arm ? armDirective(arm) : '',
+        ]
+          .filter(Boolean).join('\n\n');
         const steps: ChatToolStep[] = [];
         let prose = '';
         const paint = () => setStreamText([
@@ -926,7 +1164,7 @@ export const AIChat = () => {
         const run = await runAgentTurn({
           system: agentSystem,
           history: apiMsgs.slice(1),
-          ctx: buildToolContext(storyId),
+          ctx: buildToolContext(storyId, p => stageProposal.current(p)),
           // The story is in the system prompt and is never compacted; this is
           // what is left for the conversation and the tool results in it.
           budgetChars: workingBudget(agentSystem.length, adv.contextSize, adv.maxTokens),
@@ -951,7 +1189,8 @@ export const AIChat = () => {
         if (regenTurnId) appendVariant(storyId, threadId, regenTurnId, text);
         else {
           addTurn(storyId, threadId, {
-            role: 'assistant', variants: [text], activeVariant: 0, scopeLabel,
+            role: 'assistant', variants: [text], activeVariant: 0,
+            scopeLabel: arm ? armScopeLabel(arm) : scopeLabel,
             ...(steps.length ? { toolSteps: steps } : {}),
           });
         }
@@ -972,6 +1211,115 @@ export const AIChat = () => {
       if (!full) throw new Error('The model returned an empty reply.');
       if (regenTurnId) appendVariant(storyId, threadId, regenTurnId, full);
       else addTurn(storyId, threadId, { role: 'assistant', variants: [full], activeVariant: 0, scopeLabel });
+    } catch (e: any) {
+      if (e?.name !== 'AbortError') setError(e?.message ?? 'Request failed.');
+    } finally {
+      setStreaming(false);
+      setStreamText('');
+      abortRef.current = null;
+    }
+  };
+
+  /* ------------------------------------------------------------------ */
+  /* Proposals                                                           */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * The ONE place a suggestion becomes an edit.
+   *
+   * `lens.propose` has no route to the store; the modal has none either. Every
+   * path from "the assistant wrote a rewrite" to "the story reads differently"
+   * runs through this function, and this function only runs under a click.
+   */
+  const applyProposal = (p: LensProposal) => {
+    if (!storyId) return;
+    const problem = proposalProblem(p);
+    if (problem) { setError(problem); setProposals(prev => settleProposal(prev, p.id, 'discarded')); return; }
+    setOverride(storyId, {
+      messageId: p.messageId,
+      kind: 'rewrite',
+      content: p.after.trim(),
+      source: p.source === 'user' ? 'user' : 'ai',
+      note: p.instruction,
+      createdAt: Date.now(),
+    });
+    setProposals(prev => trimProposals(settleProposal(prev, p.id, 'applied')));
+    void flushV2();
+    store.restreamFromId(p.messageId);
+  };
+
+  const discardProposal = (p: LensProposal) =>
+    setProposals(prev => trimProposals(settleProposal(prev, p.id, 'discarded')));
+
+  /**
+   * Apply every waiting rewrite.
+   *
+   * Reading order, and each one resolved against the store as it is at that
+   * moment rather than against a snapshot — two proposals for the same message
+   * cannot both be pending (`queueProposal` sees to that), so the ordering only
+   * has to be stable, not clever.
+   */
+  const applyAllProposals = () => {
+    pendingProposals(proposals).forEach(applyProposal);
+  };
+
+  /**
+   * Rewrite the picked passages directly, with no conversation.
+   *
+   * Same request `runLens` builds, run once per pick, except that the result is
+   * staged instead of applied. The reader still approves every one; skipping the
+   * chat skips the discussion, not the review.
+   */
+  const runLensPicks = async (picks: LensPick[], instruction: string) => {
+    if (!storyId || !picks.length || !instruction.trim()) return;
+    setLensModalOpen(false);
+    setError(null);
+    setStreaming(true);
+    const controller = new AbortController();
+    abortRef.current = controller;
+    let failed = 0;
+    try {
+      const base = resolvedBase || candidateBases(store.aiBaseUrl)[0];
+      const card = cardToPromptBlock(store.currentStory?.card);
+      const params = samplerParamsFrom(adv);
+      for (const pick of picks) {
+        if (controller.signal.aborted) break;
+        setStreamText(`Rewriting #${pick.index}…`);
+        const system = [
+          `You are revising a single passage from the story "${store.currentStory?.title ?? 'Untitled'}" for the reader's private "Lens" layer.`,
+          'Rewrite the PASSAGE according to the INSTRUCTION. Keep the speaker\'s voice and the meaning intact unless the instruction says otherwise.',
+          'Output ONLY the rewritten passage — no preamble, no surrounding quotes, no commentary.',
+          card ? `\n${card}` : '',
+        ].filter(Boolean).join('\n');
+        const full = (await chatCompletion(
+          base, store.aiApiKey, store.aiModel,
+          [
+            { role: 'system', content: system },
+            { role: 'user', content: `INSTRUCTION: ${instruction}\n\nPASSAGE (speaker: ${pick.name}):\n${pick.content}` },
+          ],
+          params, controller.signal,
+        )).trim();
+        if (!full) { failed++; continue; }
+        const proposal = makeProposal({
+          messageId: pick.messageId,
+          index: pick.index,
+          name: pick.name,
+          before: pick.content,
+          after: full,
+          kind: 'revision',
+          instruction,
+          source: 'user',
+        });
+        // An echo is not a rewrite. Staging one would badge the message as
+        // edited with nothing for the reader to see.
+        if (proposalProblem(proposal)) { failed++; continue; }
+        stageProposal.current(proposal);
+      }
+      if (failed) {
+        setError(failed === picks.length
+          ? 'None of those came back as a real change. Try a more specific instruction.'
+          : `${failed} of ${picks.length} came back unchanged and were skipped.`);
+      }
     } catch (e: any) {
       if (e?.name !== 'AbortError') setError(e?.message ?? 'Request failed.');
     } finally {
@@ -1228,10 +1576,46 @@ export const AIChat = () => {
       return;
     }
 
-    addTurn(storyId, threadId, { role: 'user', variants: [content], activeVariant: 0 });
+    /**
+     * The arm is SPENT here, before the request goes out.
+     *
+     * An arm that survived its turn would silently make the next ordinary
+     * question another rewrite — the exact failure arming exists to prevent,
+     * only harder to notice because nothing on screen would have changed.
+     */
+    const arm = armed;
+    setArmed(null);
+    addTurn(storyId, threadId, {
+      role: 'user',
+      variants: [arm ? `${armLabel(arm)} — ${content}` : content],
+      activeVariant: 0,
+    });
     setInput('');
-    await runAssistant(threadId, null);
+    await runAssistant(threadId, null, arm);
   };
+
+  /**
+   * Keep a reply beside the story.
+   *
+   * A first line that reads like a title becomes the title, because a dock full
+   * of pins called "Assistant reply" is a dock you cannot read. Markdown
+   * format: the assistant answers in markdown and the pin renderer already
+   * speaks it.
+   */
+  const pinTurn = useCallback((text: string) => {
+    const sid = useAppStore.getState().currentStory?.id;
+    if (!sid || !text.trim()) return;
+    const first = text.trim().split('\n').find(l => l.trim()) ?? '';
+    const title = first.replace(/^#{1,6}\s*/, '').replace(/[*_`]/g, '').trim().slice(0, 60)
+      || 'Assistant reply';
+    useAuraV2Store.getState().addPin(sid, {
+      title,
+      format: 'markdown',
+      content: text,
+      inContext: false,
+      docked: true,
+    });
+  }, []);
 
   const regenerate = () => {
     if (streaming || !storyId || !activeThread) return;
@@ -1316,20 +1700,150 @@ export const AIChat = () => {
 
   return (
     <>
-    <div className="fixed bottom-4 right-4 z-[65] w-[min(420px,92vw)] h-[min(620px,80vh)] flex flex-col rounded-2xl border border-app-border bg-surface shadow-2xl overflow-hidden">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-app-border bg-app-text/5">
+    {/* Positioned by `usePanelDock`, not by Tailwind. A phone keeps the old
+      * fixed corner — there is no room to move a panel around a 390px screen,
+      * and a drag there is a scroll gesture that has gone wrong. */}
+    <div
+      className={cn(
+        'flex flex-col overflow-hidden bg-surface',
+        embedded
+          ? 'h-full w-full'
+          : cn(
+            'fixed z-[65] rounded-2xl border border-app-border shadow-2xl',
+            dockable ? '' : 'bottom-4 right-4 w-[min(420px,92vw)] h-[min(620px,80vh)]',
+          ),
+        dock.active && 'select-none',
+      )}
+      style={dockable ? dockStyle(dock.rect) : undefined}
+      data-testid="ai-panel"
+    >
+      {/* The header is the drag handle. `touch-none` stops the browser turning
+        * a slow drag into a page scroll on a trackpad or a pen. */}
+      <div
+        onPointerDown={dockable ? dock.onDragStart : undefined}
+        className={cn(
+          'flex items-center justify-between px-4 py-3 border-b border-app-border bg-app-text/5',
+          dockable && 'touch-none',
+          dockable && !store.aiDockLocked && 'cursor-grab active:cursor-grabbing',
+        )}
+      >
         <div className="flex items-center gap-2 font-bold text-sm">
+          {dockable && (
+            <GripVertical
+              size={14}
+              className={cn('shrink-0', store.aiDockLocked ? 'opacity-15' : 'opacity-40')}
+            />
+          )}
           <Bot size={17} className="text-accent" /> Reading Assistant
         </div>
-        <button
-          onClick={() => store.setAiOpen(false)}
-          aria-label="Close the reading assistant"
-          data-testid="ai-close"
-          className="p-1.5 rounded-full opacity-60 hover:opacity-100 hover:bg-app-text/10"
-        >
-          <X size={16} />
-        </button>
+        <div className="flex items-center gap-0.5">
+          {dockable && (
+            <button
+              onPointerDown={e => e.stopPropagation()}
+              onClick={() => store.setAiDockLocked(!store.aiDockLocked)}
+              aria-pressed={store.aiDockLocked}
+              title={store.aiDockLocked
+                ? 'Unlock — let this panel be dragged and resized again'
+                : 'Lock this panel where it is'}
+              aria-label={store.aiDockLocked ? 'Unlock the panel' : 'Lock the panel'}
+              data-testid="ai-lock"
+              className={cn(
+                'p-1.5 rounded-full hover:bg-app-text/10',
+                store.aiDockLocked ? 'text-accent opacity-100' : 'opacity-60 hover:opacity-100',
+              )}
+            >
+              {store.aiDockLocked ? <Lock size={15} /> : <LockOpen size={15} />}
+            </button>
+          )}
+          {dockable && (
+            <div className="relative" ref={layoutRef}>
+              <button
+                // The menu button must not start a drag as well as open.
+                onPointerDown={e => e.stopPropagation()}
+                onClick={() => setLayoutOpen(v => !v)}
+                disabled={store.aiDockLocked}
+                aria-label="Panel layout"
+                title={store.aiDockLocked
+                  ? 'The panel is locked — unlock it to move or resize it'
+                  : 'Move and resize this panel'}
+                data-testid="ai-layout"
+                className="p-1.5 rounded-full opacity-60 hover:opacity-100 hover:bg-app-text/10 disabled:opacity-25 disabled:hover:bg-transparent"
+              >
+                <Maximize2 size={15} />
+              </button>
+              {layoutOpen && (
+                <div className="absolute right-0 top-full mt-1.5 w-44 rounded-xl bg-surface border border-app-border shadow-2xl p-1 z-50">
+                  {(Object.keys(PRESET_LABEL) as DockPreset[]).map(p => (
+                    <button
+                      key={p}
+                      onClick={() => {
+                        dock.setRect(presetDock(p, { width: window.innerWidth, height: window.innerHeight }));
+                        setLayoutOpen(false);
+                      }}
+                      className="w-full text-left px-2.5 py-1.5 rounded-lg text-xs hover:bg-app-text/5"
+                    >
+                      {PRESET_LABEL[p]}
+                    </button>
+                  ))}
+                  <div className="border-t border-app-border/60 mt-1 pt-1">
+                    <button
+                      onClick={() => { dock.reset(); setLayoutOpen(false); }}
+                      className="w-full text-left px-2.5 py-1.5 rounded-lg text-xs text-muted hover:bg-app-text/5"
+                    >
+                      Reset position
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          <button
+            onPointerDown={e => e.stopPropagation()}
+            onClick={() => store.setAiOpen(false)}
+            aria-label="Close the reading assistant"
+            data-testid="ai-close"
+            hidden={embedded}
+            className="p-1.5 rounded-full opacity-60 hover:opacity-100 hover:bg-app-text/10"
+          >
+            <X size={16} />
+          </button>
+        </div>
       </div>
+
+      {/* Resize grips. Invisible until hovered — they are muscle memory, not
+        * decoration, and four visible handles on a chat window is clutter.
+        * Gone entirely while locked: an edge that shows a resize cursor and
+        * then refuses to resize reads as broken rather than as locked. */}
+      {dockable && !store.aiDockLocked && (
+        <>
+          {(['n', 's', 'e', 'w'] as const).map(edge => (
+            <div
+              key={edge}
+              onPointerDown={dock.onResizeStart(edge)}
+              className={cn(
+                'absolute touch-none z-30',
+                edge === 'n' && 'top-0 left-3 right-3 h-1.5 cursor-ns-resize',
+                edge === 's' && 'bottom-0 left-3 right-3 h-1.5 cursor-ns-resize',
+                edge === 'w' && 'left-0 top-3 bottom-3 w-1.5 cursor-ew-resize',
+                edge === 'e' && 'right-0 top-3 bottom-3 w-1.5 cursor-ew-resize',
+              )}
+            />
+          ))}
+          {(['nw', 'ne', 'sw', 'se'] as const).map(edge => (
+            <div
+              key={edge}
+              onPointerDown={dock.onResizeStart(edge)}
+              className={cn(
+                'absolute w-3.5 h-3.5 touch-none z-30',
+                edge === 'nw' && 'top-0 left-0 cursor-nwse-resize',
+                edge === 'ne' && 'top-0 right-0 cursor-nesw-resize',
+                edge === 'sw' && 'bottom-0 left-0 cursor-nesw-resize',
+                edge === 'se' && 'bottom-0 right-0 cursor-nwse-resize',
+              )}
+            />
+          ))}
+        </>
+      )}
 
       {!configured ? (
         <div className="flex-1 overflow-y-auto p-4 space-y-3 text-sm">
@@ -1371,7 +1885,8 @@ export const AIChat = () => {
               <span className="text-xs font-bold uppercase tracking-wider text-muted">Model</span>
               <select
                 value={store.aiModel}
-                onChange={(e) => store.setAiModel(e.target.value)}
+                onChange={(e) => { store.setAiModel(e.target.value); setTestResult(null); }}
+                data-testid="model-select"
                 className="mt-1 w-full bg-app-text/5 border border-app-border rounded-md px-2 py-1.5 outline-none"
               >
                 <option value="" className="text-black bg-white">Choose a model…</option>
@@ -1381,17 +1896,56 @@ export const AIChat = () => {
               </select>
             </label>
           )}
-          {models.length === 0 && store.aiBaseUrl && (
-            <label className="block">
-              <span className="text-xs font-bold uppercase tracking-wider text-muted">Model (manual)</span>
-              <input
-                type="text"
-                placeholder="gpt-4o-mini, llama-3.1-8b…"
-                value={store.aiModel}
-                onChange={(e) => store.setAiModel(e.target.value)}
-                className="mt-1 w-full bg-app-text/5 border border-app-border rounded-md px-2 py-1.5 outline-none focus:border-accent/50"
-              />
-            </label>
+          {/* Manual entry stays available even after a list loads.
+            *
+            * Some servers list one set of names and accept another, and some
+            * list nothing at all while working perfectly. Hiding the field the
+            * moment a list arrives takes the escape hatch away from exactly the
+            * people who need it. */}
+          <label className="block">
+            <span className="text-xs font-bold uppercase tracking-wider text-muted">
+              {models.length > 0 ? 'Model (or type one)' : 'Model (manual)'}
+            </span>
+            <input
+              type="text"
+              placeholder="gpt-4o-mini, llama-3.1-8b…"
+              value={store.aiModel}
+              onChange={(e) => { store.setAiModel(e.target.value); setTestResult(null); }}
+              className="mt-1 w-full bg-app-text/5 border border-app-border rounded-md px-2 py-1.5 outline-none focus:border-accent/50"
+            />
+          </label>
+
+          {/* The button that actually proves it works — see `testConnection`. */}
+          <button
+            onClick={testConnection}
+            disabled={!store.aiBaseUrl || !store.aiModel || testing || probing}
+            data-testid="test-connection"
+            title={!store.aiModel ? 'Choose or type a model first' : 'Send one tiny request and report what happens'}
+            className="w-full flex items-center justify-center gap-2 py-2 rounded-md border border-app-border font-medium disabled:opacity-50 hover:border-accent/50"
+          >
+            {testing ? <Loader2 size={16} className="animate-spin" /> : <PlugZap size={16} />}
+            {testing ? 'Testing…' : 'Test connection'}
+          </button>
+
+          {testResult && (
+            <div className={cn(
+              'rounded-md border p-2.5 text-xs leading-relaxed',
+              testResult.ok
+                ? 'border-emerald-500/40 bg-emerald-500/5 text-emerald-400'
+                : 'border-amber-500/40 bg-amber-500/5 text-app-text',
+            )}>
+              <p className={testResult.ok ? '' : 'text-amber-400'}>{testResult.title}</p>
+              {testResult.fixes.length > 0 && (
+                <ul className="mt-1.5 space-y-1 text-muted list-disc pl-4">
+                  {testResult.fixes.map(f => <li key={f}>{f}</li>)}
+                </ul>
+              )}
+              {testResult.raw && (
+                <p className="mt-1.5 text-[10px] text-muted/70 font-mono break-all">
+                  {testResult.raw}
+                </p>
+              )}
+            </div>
           )}
           {error && <p className="text-red-500 text-xs">{error}</p>}
         </div>
@@ -1457,10 +2011,37 @@ export const AIChat = () => {
             )}
           </div>
 
+          {/*
+            * The context block folds.
+            *
+            * Open by default and remembered, because WHICH passages the model
+            * is about to be shown is the most consequential thing on this
+            * panel — but once a reader has settled on a scope it is a header
+            * eating the top fifth of a narrow column, so it can be put away.
+            * The summary line keeps the size and the scope visible while
+            * closed, so folding it never means losing track of what is sent.
+            */}
           <div className="border-b border-app-border px-2.5 py-2 space-y-2 bg-app-text/[0.03]">
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] uppercase tracking-wider text-muted font-bold">Context</span>
-              <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => store.setAiContextOpen(!store.aiContextOpen)}
+              aria-expanded={store.aiContextOpen}
+              data-testid="context-toggle"
+              className="w-full flex items-center justify-between gap-2 -my-0.5 py-0.5 rounded hover:bg-app-text/5 transition-colors"
+            >
+              <span className="flex items-center gap-1 min-w-0">
+                <ChevronDown
+                  size={12}
+                  className={cn('shrink-0 text-muted transition-transform', !store.aiContextOpen && '-rotate-90')}
+                />
+                <span className="text-[10px] uppercase tracking-wider text-muted font-bold">Context</span>
+                {!store.aiContextOpen && (
+                  <span className="text-[10px] text-muted truncate normal-case">
+                    · {SCOPES.find(sc => sc.value === scope)?.label ?? scope}
+                    {scope === 'zones' && activeZone ? ` · ${activeZone.name}` : ''}
+                  </span>
+                )}
+              </span>
+              <span className="flex items-center gap-1.5">
                 {inContextPins > 0 && (
                   <span
                     className="text-[10px] font-bold text-accent bg-accent/10 rounded px-1.5 py-0.5"
@@ -1472,8 +2053,9 @@ export const AIChat = () => {
                 <span className="text-[10px] text-muted font-mono" title={`${contextChars.toLocaleString()} characters sent to the model`}>
                   {sizeLabel}
                 </span>
-              </div>
-            </div>
+              </span>
+            </button>
+            {store.aiContextOpen && (<>
             <div className="flex items-center gap-1">
               {SCOPES.map(sc => {
                 const disabled = sc.value === 'swipes' && swipeCount < 2;
@@ -1601,9 +2183,22 @@ export const AIChat = () => {
                 <ThroughlinePanel onClose={() => setSpineOpen(false)} />
               </div>
             )}
+            </>)}
           </div>
 
-          <div className="flex-1 overflow-y-auto p-3 space-y-3 relative">
+          {/* ── The chat body ────────────────────────────────────────────────
+            * Two boxes, deliberately. The outer one is the SIZE of the body and
+            * never scrolls; the inner one scrolls inside it.
+            *
+            * The panels below (Advanced, Cowrite, Summarize, Tasks) are
+            * `absolute inset-0`, and an absolute box inside a scroller is
+            * positioned against the CONTENT, not the visible window — so with a
+            * long conversation they opened somewhere far up the scrollback and
+            * the button appeared to do nothing at all. Splitting the scroll off
+            * gives them a fixed frame to cover, so a panel opens over what the
+            * reader is looking at no matter how far down they are. */}
+          <div className="flex-1 min-h-0 relative">
+          <div className="absolute inset-0 overflow-y-auto p-3 space-y-3">
             {turns.length === 0 && !streaming && (
               <div className="space-y-2 pt-2">
                 <p className="text-xs text-muted text-center">
@@ -1634,6 +2229,7 @@ export const AIChat = () => {
                 onEdit={(text) => editTurnText(t.id, text)}
                 onDelete={() => deleteTurn(t.id)}
                 onRetry={() => retryFrom(t)}
+                onPin={pinTurn}
               />
             ))}
             {streaming && (
@@ -1647,6 +2243,7 @@ export const AIChat = () => {
             )}
             {error && <p className="text-red-500 text-xs px-1">{error}</p>}
             <div ref={bottomRef} />
+          </div>
 
             {advancedOpen && (
               <AdvancedPanel
@@ -1654,6 +2251,11 @@ export const AIChat = () => {
                 onChange={store.setAiAdvanced}
                 localBase={isLocalBase(resolvedBase || store.aiBaseUrl)}
                 onClose={() => setAdvancedOpen(false)}
+                model={store.aiModel}
+                models={models}
+                onModel={store.setAiModel}
+                onReloadModels={loadModels}
+                reloading={probing}
               />
             )}
 
@@ -1683,9 +2285,75 @@ export const AIChat = () => {
                 onClose={() => setTasksOpen(false)}
               />
             )}
+
+            {reviewOpen && (
+              <ProposalReview
+                proposals={proposals}
+                busy={streaming}
+                onApply={applyProposal}
+                onDiscard={discardProposal}
+                onApplyAll={applyAllProposals}
+                onClose={() => setReviewOpen(false)}
+              />
+            )}
           </div>
 
           <div className="border-t border-app-border p-2.5 space-y-2">
+            {/* What this next message is for. The chip is the whole of the
+              * "/lensedit" idea made visible: the reader can see which tool is
+              * loaded and take it off again, rather than hoping the model read
+              * their intent correctly. */}
+            {armed && (
+              <div
+                className="flex items-center gap-1.5 text-[11px] rounded-md bg-accent/[0.07] border border-accent/40 px-2 py-1.5"
+                data-testid="armed-chip"
+              >
+                {armed.tool === 'lens.propose' ? <Wand2 size={13} className="text-accent shrink-0" />
+                  : <Pin size={13} className="text-accent shrink-0" />}
+                <span className="text-accent font-bold shrink-0">{armLabel(armed)}</span>
+                <span className="flex-1 min-w-0 truncate text-muted">
+                  {armIncomplete(armed)
+                    ? 'nothing selected — pick a passage first'
+                    : 'the assistant will use this tool for your next message'}
+                </span>
+                {armed.tool === 'lens.propose' && (
+                  <button
+                    onClick={() => setLensModalOpen(true)}
+                    className="px-1.5 py-0.5 rounded hover:bg-app-text/10 shrink-0 text-accent"
+                    title="Change the selection"
+                  >
+                    edit
+                  </button>
+                )}
+                <button
+                  onClick={() => setArmed(null)}
+                  className="p-0.5 rounded hover:bg-app-text/10 opacity-70 hover:opacity-100 shrink-0"
+                  title="Cancel — send an ordinary message instead"
+                >
+                  <X size={13} />
+                </button>
+              </div>
+            )}
+            {/* Rewrites waiting on a yes. Deliberately in the composer rather
+              * than only behind a button: an unreviewed proposal is work the
+              * reader asked for that has not landed, and burying it reads as
+              * the assistant having done nothing. */}
+            {pendingCount > 0 && !reviewOpen && (
+              <button
+                onClick={() => setReviewOpen(true)}
+                data-testid="pending-proposals"
+                className="w-full flex items-center gap-1.5 text-[11px] rounded-md bg-emerald-500/10 border border-emerald-500/40 px-2 py-1.5 hover:bg-emerald-500/15"
+              >
+                <Wand2 size={13} className="text-emerald-400 shrink-0" />
+                <span className="font-bold text-emerald-400 shrink-0">
+                  {pendingCount} suggested edit{pendingCount === 1 ? '' : 's'}
+                </span>
+                <span className="flex-1 min-w-0 truncate text-muted text-left">
+                  waiting for you to accept or reject
+                </span>
+                <span className="text-accent shrink-0">review</span>
+              </button>
+            )}
             {lensMode && (
               <div className="flex items-center gap-1.5 text-[11px] rounded-md bg-accent/[0.07] border border-accent/40 px-2 py-1.5">
                 <Wand2 size={13} className="text-accent shrink-0" />
@@ -1742,14 +2410,31 @@ export const AIChat = () => {
                   {store.aiModel}
                 </button>
                 <button
-                  onClick={lensMode ? () => setLensMode(false) : enterLens}
-                  title="Lens edit — have the AI rewrite a message into the Lens layer"
+                  onClick={() => setLensModalOpen(true)}
+                  title="Lens edit — search the story, pick passages, review every rewrite before it goes in"
+                  data-testid="lens-modal-open"
                   className={cn(
                     'p-1.5 rounded-md hover:bg-app-text/10',
-                    lensMode ? 'text-accent bg-accent/10' : 'opacity-60 hover:opacity-100',
+                    lensModalOpen || armed?.tool === 'lens.propose'
+                      ? 'text-accent bg-accent/10' : 'opacity-60 hover:opacity-100',
                   )}
                 >
                   <Wand2 size={15} />
+                </button>
+                {/* The pin equivalent of arming a Lens edit: it does not make
+                  * anything, it tells the assistant that the next message is a
+                  * request for a pin rather than a question about one. */}
+                <button
+                  onClick={() => setArmed(a => (a?.tool === 'pins.create' ? null : { tool: 'pins.create' }))}
+                  title="Make a pin — the assistant writes your next message into a new pin"
+                  aria-pressed={armed?.tool === 'pins.create'}
+                  data-testid="arm-pin"
+                  className={cn(
+                    'p-1.5 rounded-md hover:bg-app-text/10',
+                    armed?.tool === 'pins.create' ? 'text-accent bg-accent/10' : 'opacity-60 hover:opacity-100',
+                  )}
+                >
+                  <Pin size={15} />
                 </button>
                 <button
                   onClick={() => setCowriteOpen(v => !v)}
@@ -1814,7 +2499,9 @@ export const AIChat = () => {
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(input); }
                 }}
-                placeholder={lensMode ? "Describe the revision (e.g. 'rewrite in Spanish')…" : 'Ask about the story…'}
+                placeholder={armed ? armPlaceholder(armed)
+                  : lensMode ? "Describe the revision (e.g. 'rewrite in Spanish')…"
+                  : 'Ask about the story…'}
                 className="flex-1 resize-none max-h-28 bg-app-text/5 border border-app-border rounded-lg px-3 py-2 text-sm outline-none focus:border-accent/50"
               />
               {streaming ? (
@@ -1844,6 +2531,22 @@ export const AIChat = () => {
       <ContextZoneBuilder
         storyId={storyId}
         onSaved={(id) => { setScope('zones'); setActiveZoneId(id); }}
+      />
+    )}
+    {lensModalOpen && (
+      <LensEditModal
+        initial={armed?.tool === 'lens.propose' ? armed.targets : undefined}
+        busy={streaming}
+        onClose={() => setLensModalOpen(false)}
+        onArm={(picks, instruction) => {
+          setArmed({ tool: 'lens.propose', targets: clampTargets(picks.map(p => p.index)) });
+          setLensModalOpen(false);
+          // The instruction typed in the modal seeds the composer rather than
+          // sending: the reader chose to talk about it, so give them the
+          // sentence back with the cursor in it.
+          if (instruction) setInput(instruction);
+        }}
+        onRunNow={(picks, instruction) => { void runLensPicks(picks, instruction); }}
       />
     )}
     </>

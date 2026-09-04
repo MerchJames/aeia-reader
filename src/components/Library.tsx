@@ -1,11 +1,16 @@
 import React, { useMemo, useRef, useState } from 'react';
-import { BookOpen, Check, FileJson, FileText, Image, MessageSquare, Settings, Sparkles, Tag, Trash2, Upload, X } from 'lucide-react';
+import {
+  BookOpen, Check, FileJson, FileText, Image, MessageSquare, RefreshCw, Settings,
+  Sparkles, Tag, Trash2, Upload, X,
+} from 'lucide-react';
 import { useAppStore } from '../store';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { StoryFormat, StoryMeta } from '../types';
 import { ImportModal } from './ImportModal';
 import { Onboarding } from './Onboarding';
-import { DeepSearch, LibraryToolbar } from './LibraryToolbar';
+import { DeepSearch, LibraryToolbar, type FormatFilter } from './LibraryToolbar';
+import { FolderRail } from './FolderRail';
+import { ALL_FOLDERS, filterByFolder, sortFolders } from '../utils/folders';
 import { cn } from '../utils/cn';
 import { AEIA_MARK } from '../assets/aeiaMark';
 import {
@@ -60,11 +65,25 @@ const coverGradient = (id: string) => {
 const StoryCard = ({ story, suggestions }: { story: StoryMeta; suggestions: string[] }) => {
   const openStory = useAppStore(s => s.openStory);
   const deleteStoryById = useAppStore(s => s.deleteStoryById);
+  const renameStory = useAppStore(s => s.renameStory);
+  const stSyncEnabled = useAppStore(s => s.stSyncEnabled);
+  const requestStSync = useAppStore(s => s.requestStSync);
   const userTags = useAuraV2Store(s => s.libraryTagsByStory);
   const setStoryTags = useAuraV2Store(s => s.setStoryTags);
+  const folders = useAuraV2Store(s => s.folders);
+  const folderByStory = useAuraV2Store(s => s.folderByStory);
+  const setStoryFolder = useAuraV2Store(s => s.setStoryFolder);
   const lastReadAt = useAuraV2Store(s => s.statsByStory[story.id]?.lastReadAt);
   const [editingTags, setEditingTags] = useState(false);
   const [draftTag, setDraftTag] = useState('');
+  const [renaming, setRenaming] = useState(false);
+  const [draftTitle, setDraftTitle] = useState('');
+
+  const commitRename = () => {
+    setRenaming(false);
+    const next = draftTitle.trim();
+    if (next && next !== story.title) void renameStory(story.id, next);
+  };
   const pct = story.progressPct ?? 0;
   const tags = tagsFor(story, userTags);
   const since = sinceLabel(lastReadAt);
@@ -97,12 +116,67 @@ const StoryCard = ({ story, suggestions }: { story: StoryMeta; suggestions: stri
         </div>
 
         <div className="flex-1 min-w-0 p-4">
-          <h3 className="font-bold truncate pr-6" data-testid="card-title">{story.title}</h3>
+          {/* Double-click to rename.
+            *
+            * A chat exported from a recent SillyTavern carries
+            * `character_name: "unused"` in its header — a placeholder, not a
+            * name — so some imports arrive called after their file and some
+            * after nothing at all. The name has to be editable, and the name
+            * itself is where anyone would look for that.
+            *
+            * Double-click rather than single, because on this card a single
+            * click opens the story. The title stops its own clicks from
+            * reaching the card for the same reason: a rename that also
+            * navigated away would be unusable. */}
+          {renaming ? (
+            <input
+              autoFocus
+              value={draftTitle}
+              onClick={e => e.stopPropagation()}
+              onChange={e => setDraftTitle(e.target.value)}
+              onBlur={commitRename}
+              onKeyDown={e => {
+                e.stopPropagation();
+                if (e.key === 'Enter') commitRename();
+                if (e.key === 'Escape') { setRenaming(false); e.currentTarget.blur(); }
+              }}
+              aria-label={`Rename ${story.title}`}
+              data-testid="card-title-input"
+              className="font-bold w-full pr-6 bg-transparent border-b border-accent/60 outline-none"
+            />
+          ) : (
+            <h3
+              onClick={e => e.stopPropagation()}
+              onDoubleClick={e => {
+                e.stopPropagation();
+                setDraftTitle(story.title);
+                setRenaming(true);
+              }}
+              title="Double-click to rename this chat"
+              data-testid="card-title"
+              className="font-bold truncate pr-6 cursor-text hover:text-accent transition-colors"
+            >
+              {story.title}
+            </h3>
+          )}
           <div className="flex items-center gap-1.5 text-xs text-muted mt-1">
             {FORMAT_ICON[story.format]}
             <span>{FORMAT_LABEL[story.format]}</span>
             <span>·</span>
             <span>{story.messageCount} messages</span>
+            {/* A synced chat is a different kind of thing from an imported
+              * one — it is still being written next door — so it says so on
+              * the card rather than only in the filter. */}
+            {stSyncEnabled && story.stChatId && (
+              <span
+                className="flex items-center gap-1 px-1.5 rounded-full bg-accent/10 text-accent text-[10px] font-medium"
+                title={story.stSyncedAt
+                  ? `Kept in step with SillyTavern · last synced ${new Date(story.stSyncedAt).toLocaleString()}`
+                  : 'Kept in step with SillyTavern'}
+              >
+                <RefreshCw size={9} /> synced
+              </span>
+            )}
           </div>
           <div className="text-xs text-muted mt-0.5">
             {since
@@ -174,6 +248,34 @@ const StoryCard = ({ story, suggestions }: { story: StoryMeta; suggestions: stri
                 <Tag size={9} /> {tags.length ? 'edit' : 'tag'}
               </button>
             )}
+            {/* Filing, as a plain select.
+              *
+              * Not drag-and-drop: dragging a card onto a chip is a nice gesture
+              * on a mouse and an impossible one on a phone, and this list is
+              * already touch-first. A select also states the current folder
+              * without hovering, which a drop target cannot.
+              *
+              * Hidden until there is somewhere to file TO — before the first
+              * folder exists this is a control offering one option, "None". */}
+            {folders.length > 0 && (
+              <select
+                value={folderByStory[story.id] ?? ''}
+                onClick={e => e.stopPropagation()}
+                onChange={e => {
+                  e.stopPropagation();
+                  setStoryFolder(story.id, e.target.value || null);
+                }}
+                aria-label={`Folder for ${story.title}`}
+                data-testid="card-folder"
+                className="px-1.5 min-h-7 text-[10px] rounded-full bg-app-text/5 border border-app-border
+                           text-muted outline-none focus:border-accent/50 max-w-[8rem]"
+              >
+                <option value="" className="text-black bg-white">No folder</option>
+                {sortFolders(folders).map(f => (
+                  <option key={f.id} value={f.id} className="text-black bg-white">{f.name}</option>
+                ))}
+              </select>
+            )}
           </div>
 
           <div className="mt-3">
@@ -190,6 +292,27 @@ const StoryCard = ({ story, suggestions }: { story: StoryMeta; suggestions: stri
         </div>
       </div>
 
+      {/* Sync, per story, beside delete.
+        *
+        * Only for SillyTavern chats, and only when the sync is switched on:
+        * there is nothing to sync a Kobold save or a .docx against, and an
+        * always-present button for a feature the reader has not enabled is the
+        * clutter the gate exists to avoid. It opens the story first — the
+        * panel aligns against the open one — which is why it is a request
+        * rather than a direct call. */}
+      {stSyncEnabled && story.format === 'sillytavern' && (
+        <button
+          onClick={(e) => { e.stopPropagation(); requestStSync(story.id); }}
+          title={story.stChatId
+            ? 'Sync with SillyTavern again'
+            : 'Sync this story with a SillyTavern chat'}
+          aria-label={`Sync ${story.title} with SillyTavern`}
+          data-testid="card-sync"
+          className="absolute top-2.5 right-11 p-1.5 rounded-md text-muted opacity-0 group-hover:opacity-100 hover:text-accent hover:bg-accent/10 transition-all"
+        >
+          <RefreshCw size={15} />
+        </button>
+      )}
       <button
         onClick={(e) => {
           e.stopPropagation();
@@ -211,6 +334,7 @@ export const Library = () => {
   const libraryLoaded = useAppStore(s => s.libraryLoaded);
   const importFiles = useAppStore(s => s.importFiles);
   const setSettingsOpen = useAppStore(s => s.setSettingsOpen);
+  const stSyncEnabled = useAppStore(s => s.stSyncEnabled);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
@@ -231,14 +355,34 @@ export const Library = () => {
   const openStory = useAppStore(s => s.openStory);
   const [query, setQuery] = useState('');
   const [sort, setSort] = useState<LibrarySort>('lastRead');
-  const [format, setFormat] = useState<StoryFormat | 'all'>('all');
+  const [format, setFormat] = useState<FormatFilter>('all');
   const [activeTags, setActiveTags] = useState<string[]>([]);
+  const [activeFolder, setActiveFolder] = useState<string>(ALL_FOLDERS);
+
+  const folders = useAuraV2Store(s => s.folders);
+  const folderByStory = useAuraV2Store(s => s.folderByStory);
+  const addFolder = useAuraV2Store(s => s.addFolder);
+  const renameFolder = useAuraV2Store(s => s.renameFolder);
+  const removeFolder = useAuraV2Store(s => s.removeFolder);
 
   const tagOptions = useMemo(() => allTags(library, userTags), [library, userTags]);
   const tagSuggestions = useMemo(() => tagOptions.map(t => t.tag), [tagOptions]);
-  const shown = useMemo(
+  /**
+   * The folder filter is applied to the LIBRARY first, then the rest.
+   *
+   * Order matters for what the rail can honestly say. `shown` is what the rail
+   * counts, so counting after every filter would make each chip report the
+   * stories matching the search AND already in that folder — every chip but the
+   * selected one reading zero. Counting the search result before the folder
+   * narrowing is what lets a reader search, then see where the hits live.
+   */
+  const searched = useMemo(
     () => sortStories(filterStories(library, { query, tags: activeTags, format }, userTags), sort, stats),
     [library, query, activeTags, format, userTags, sort, stats],
+  );
+  const shown = useMemo(
+    () => filterByFolder(searched, folderByStory, activeFolder, folders),
+    [searched, folderByStory, activeFolder, folders],
   );
 
   const toggleTag = (tag: string) => setActiveTags(prev =>
@@ -401,6 +545,17 @@ export const Library = () => {
           </div>
         ) : (
           <div className="flex flex-col gap-4">
+            <FolderRail
+              folders={folders}
+              assignments={folderByStory}
+              stories={shown}
+              selected={activeFolder}
+              onSelect={setActiveFolder}
+              onAdd={addFolder}
+              onRename={renameFolder}
+              onRemove={removeFolder}
+            />
+
             <LibraryToolbar
               query={query}
               onQuery={setQuery}
@@ -408,6 +563,7 @@ export const Library = () => {
               onSort={setSort}
               format={format}
               onFormat={setFormat}
+              showSynced={stSyncEnabled}
               tags={tagOptions}
               activeTags={activeTags}
               onToggleTag={toggleTag}

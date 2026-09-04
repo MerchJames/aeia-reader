@@ -3,13 +3,16 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   Bot, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Loader2, Lock, LockOpen, Move,
-  PanelRightClose, PanelRightOpen, Pin as PinIcon, Wand2, X,
+  ArrowLeft, ArrowRight, BookOpen, PanelRightClose, PanelRightOpen, Pencil, Pin as PinIcon,
+  Plus, Trash2, Wand2, X,
 } from 'lucide-react';
 import { useAppStore } from '../store';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { Pin } from '../types';
+import { activePageIndex, isBook, pageLabel, pagesOf } from '../utils/pinBook';
 import { cn } from '../utils/cn';
 import { askText } from '../utils/aiCall';
+import { samplerParamsFrom } from '../utils/aiClient';
 import { resolveContent } from '../utils/lens';
 import { buildPinUpdateMessages, PinUpdateMode } from '../utils/pinUpdate';
 
@@ -19,6 +22,32 @@ import { buildPinUpdateMessages, PinUpdateMode } from '../utils/pinUpdate';
  * summary can be rebuilt with "what's happened since". Runs off the live stores
  * on demand (not per render).
  */
+/**
+ * The stacking band the whole dock lives in — cards, column and toggle.
+ *
+ * Everything here sits BELOW every panel and modal in the app (the lowest of
+ * those is 50), because the dock is furniture at the edge of the reading
+ * surface and a panel is a thing the reader just opened and is looking at. It
+ * used to be the other way round in places — the toggle at 50 and a floating
+ * pin at 60 — so opening the Codex or a centred modal left the pin controls
+ * sitting on top of it, which is the one arrangement neither of them wants.
+ *
+ * A number rather than a Tailwind class so the four values here are visibly one
+ * band; splitting them across `z-40`/`z-50` literals is how they drifted apart.
+ */
+const DOCK_Z = 40;
+
+/**
+ * Room for a rewritten pin, in tokens.
+ *
+ * A rewrite is usually about as long as what it rewrites, so the pin's own
+ * length is the only honest estimate available. Floored well above the 1024 a
+ * local backend tends to default to — the case this exists for — and capped so
+ * a 150k-character pin does not ask for a budget no endpoint will honour.
+ */
+const pinRewriteBudget = (content: string): number =>
+  Math.min(16000, Math.max(2048, Math.ceil(content.length / 3) + 512));
+
 const collectPinSource = (pin: Pin): string => {
   const app = useAppStore.getState();
   const storyId = app.currentStory?.id;
@@ -109,6 +138,21 @@ const PinCard = ({
 
   const versions = pin.versions;
   const activeVersion = pin.activeVersion ?? (versions ? versions.length - 1 : 0);
+  const pages = pagesOf(pin);
+  const pageIndex = activePageIndex(pin);
+  const addPinPage = useAuraV2Store(s => s.addPinPage);
+  const updatePinPage = useAuraV2Store(s => s.updatePinPage);
+  const setPinActivePage = useAuraV2Store(s => s.setPinActivePage);
+  const removePinPage = useAuraV2Store(s => s.removePinPage);
+  const movePinPage = useAuraV2Store(s => s.movePinPage);
+  const editPinPage = useAuraV2Store(s => s.editPinPage);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const startEdit = () => { setDraft(pin.content); setEditing(true); };
+  const commitDraft = () => {
+    editPinPage(storyId, pin.id, draft);
+    setEditing(false);
+  };
 
   const runUpdate = async () => {
     const app = useAppStore.getState();
@@ -127,8 +171,22 @@ const PinCard = ({
         sourceText: mode === 'source' ? collectPinSource(pin) : undefined,
         card: app.currentStory?.card,
       });
-      const reply = await askText({ base, key, model }, messages,
-        { label: 'Reworking a pin', params: { temperature: 0.4 } });
+      /*
+       * Room to answer, and the reader's own ceiling.
+       *
+       * This call named neither, so no `max_tokens` was sent and whatever the
+       * endpoint defaults to applied — which on most local backends is 512 or
+       * 1024, and a pin is a DOCUMENT. A four-thousand-word chart came back cut
+       * off at a thousand tokens with nothing to say why. The rewrite of a pin
+       * is at least as long as the pin, so the budget is sized from it; the
+       * reader's Advanced setting is merged last and still wins if they set one.
+       */
+      const reply = await askText({ base, key, model }, messages, {
+        label: 'Reworking a pin',
+        params: { temperature: 0.4 },
+        reader: samplerParamsFrom(app.aiAdvanced),
+        budget: pinRewriteBudget(pin.content),
+      });
       if (!reply) { setError('Empty reply'); return; }
       addPinVersion(storyId, pin.id, {
         content: reply,
@@ -204,7 +262,11 @@ const PinCard = ({
   const style: React.CSSProperties = live
     ? {
         position: 'fixed', left: live.x, top: live.y, width: 320, maxWidth: '85vw',
-        zIndex: dragging ? 70 : locked ? 45 : 60,
+        // Inside the dock's own band (see DOCK_Z): a dragged card rises above
+        // its neighbours and a floating one above a docked one, but none of
+        // them above a panel. A floating pin used to sit at 60, which put it
+        // over the Codex, the Sheets rail and every centred modal.
+        zIndex: dragging ? DOCK_Z + 3 : locked ? DOCK_Z + 1 : DOCK_Z + 2,
       }
     : { position: 'relative' };
 
@@ -238,6 +300,20 @@ const PinCard = ({
         >
           <Bot size={12} />
         </button>
+        {/* The two ways to change a pin, side by side: by hand, or by asking.
+          * They keep history differently on purpose — see `applyManualEdit`. */}
+        <button
+          onClick={() => (editing ? setEditing(false) : startEdit())}
+          title="Edit this text by hand (your first edit keeps the original)"
+          aria-pressed={editing}
+          data-testid="pin-edit-page"
+          className={cn(
+            'p-1 rounded-md hover:bg-app-text/10 transition-colors',
+            editing ? 'text-accent bg-accent/15' : 'text-app-text opacity-70 hover:opacity-100',
+          )}
+        >
+          <Pencil size={12} />
+        </button>
         {aiReady && (
           <button
             onClick={() => setComposerOpen(o => !o)}
@@ -265,6 +341,16 @@ const PinCard = ({
           {pin.collapsed ? <ChevronDown size={12} /> : <ChevronUp size={12} />}
         </button>
         <button
+          onClick={() => addPinPage(storyId, pin.id, { content: '' })}
+          title={isBook(pin)
+            ? 'Add a page to this pin'
+            : 'Add a page — turns this pin into a small book you can leaf through'}
+          data-testid="pin-add-page"
+          className="p-1 rounded-md text-app-text opacity-70 hover:opacity-100 hover:bg-app-text/10 transition-colors"
+        >
+          <Plus size={12} />
+        </button>
+        <button
           onClick={() => updatePin(storyId, pin.id, { docked: false })}
           title="Remove from dock (kept in the Sheets panel)"
           className="p-1 rounded-md text-app-text opacity-70 hover:opacity-100 hover:bg-app-text/10 transition-colors"
@@ -274,13 +360,129 @@ const PinCard = ({
       </div>
       {!pin.collapsed && (
         <div className="max-h-80 overflow-y-auto p-2 bg-surface">
-          {pin.format === 'html' ? (
+          {editing ? (
+            /*
+              * Writing straight into a page.
+              *
+              * A pin used to be something you CAPTURED — a chart the model
+              * drew, a passage you kept — and the only way to change one was to
+              * ask the assistant. Pages break that: "add a page" hands the
+              * reader an empty one, and an empty page with no way to type into
+              * it is a dead end. Saved as an ordinary page edit, not as a
+              * version, because typing is not a redraft.
+              */
+            <div className="space-y-1.5">
+              <textarea
+                autoFocus
+                value={draft}
+                onChange={e => setDraft(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Escape') { e.stopPropagation(); setEditing(false); }
+                  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) commitDraft();
+                }}
+                rows={8}
+                placeholder="Write this page…"
+                className="w-full text-xs bg-app-text/[0.04] border border-accent/40 rounded-md px-2 py-1.5 outline-none resize-y font-mono leading-relaxed"
+              />
+              <div className="flex items-center gap-2">
+                <span className="flex-1 text-[10px] text-muted">⌘/Ctrl + Enter to save</span>
+                <button
+                  onClick={() => setEditing(false)}
+                  className="text-[10px] px-2 py-0.5 rounded hover:bg-app-text/10 text-muted"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={commitDraft}
+                  className="text-[10px] px-2 py-0.5 rounded bg-accent text-white font-medium"
+                  data-testid="pin-page-save"
+                >
+                  Save
+                </button>
+              </div>
+            </div>
+          ) : pin.format === 'html' ? (
             <HtmlPin pin={pin} />
-          ) : (
+          ) : pin.content.trim() ? (
             <div className="markdown-body text-xs overflow-x-auto text-app-text">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{pin.content}</ReactMarkdown>
             </div>
+          ) : (
+            <button
+              onClick={startEdit}
+              className="w-full py-4 text-[11px] text-muted italic hover:text-accent transition-colors"
+            >
+              This page is empty — click to write it.
+            </button>
           )}
+        </div>
+      )}
+
+      {/*
+        * Page bar — only once a pin is actually a book.
+        *
+        * Above the version switcher and visually quieter than it, because the
+        * two answer different questions and a reader must not confuse them:
+        * this one is WHICH entry, the one below is which draft of it. A pin
+        * that is a single note shows neither, which is nearly all of them.
+        */}
+      {!pin.collapsed && isBook(pin) && (
+        <div className="flex items-center gap-1 px-2 py-1 border-t border-app-border/50 text-[10px] text-app-text/70">
+          <BookOpen size={11} className="shrink-0 opacity-60" />
+          <button
+            onClick={() => setPinActivePage(storyId, pin.id, Math.max(0, pageIndex - 1))}
+            disabled={pageIndex === 0}
+            className="w-5 h-5 rounded-full hover:bg-app-text/10 flex items-center justify-center disabled:opacity-25"
+            title="Previous page"
+          >
+            <ChevronLeft size={12} />
+          </button>
+          <span className="font-mono tabular-nums shrink-0">{pageIndex + 1}/{pages.length}</span>
+          <button
+            onClick={() => setPinActivePage(storyId, pin.id, Math.min(pages.length - 1, pageIndex + 1))}
+            disabled={pageIndex === pages.length - 1}
+            className="w-5 h-5 rounded-full hover:bg-app-text/10 flex items-center justify-center disabled:opacity-25"
+            title="Next page"
+          >
+            <ChevronRight size={12} />
+          </button>
+          <button
+            onDoubleClick={() => {
+              const name = window.prompt('Name this page', pages[pageIndex].title ?? '');
+              if (name !== null) updatePinPage(storyId, pin.id, pageIndex, { title: name.trim() });
+            }}
+            title="Double-click to name this page"
+            className="flex-1 min-w-0 truncate text-left px-1 rounded hover:bg-app-text/5"
+          >
+            {pageLabel(pages[pageIndex], pageIndex)}
+          </button>
+          <button
+            onClick={() => movePinPage(storyId, pin.id, pageIndex, -1)}
+            disabled={pageIndex === 0}
+            className="w-5 h-5 rounded hover:bg-app-text/10 flex items-center justify-center disabled:opacity-25"
+            title="Move this page earlier"
+          >
+            <ArrowLeft size={11} />
+          </button>
+          <button
+            onClick={() => movePinPage(storyId, pin.id, pageIndex, 1)}
+            disabled={pageIndex === pages.length - 1}
+            className="w-5 h-5 rounded hover:bg-app-text/10 flex items-center justify-center disabled:opacity-25"
+            title="Move this page later"
+          >
+            <ArrowRight size={11} />
+          </button>
+          <button
+            onClick={() => {
+              if (window.confirm(`Remove "${pageLabel(pages[pageIndex], pageIndex)}" from this pin?`)) {
+                removePinPage(storyId, pin.id, pageIndex);
+              }
+            }}
+            className="w-5 h-5 rounded hover:bg-app-text/10 hover:text-red-500 flex items-center justify-center"
+            title="Remove this page"
+          >
+            <Trash2 size={11} />
+          </button>
         </div>
       )}
 
@@ -420,7 +622,10 @@ export const PinDock = () => {
 
   return (
     <>
-      <div className="fixed right-4 top-20 z-50 pointer-events-auto flex items-center gap-1.5">
+      <div
+        style={{ zIndex: DOCK_Z + 4 }}
+        className="fixed right-4 top-20 pointer-events-auto flex items-center gap-1.5"
+      >
         <DockSetSwitcher storyId={story.id} />
         {docked.length > 0 && (
           <button
@@ -434,7 +639,10 @@ export const PinDock = () => {
         )}
       </div>
       {dockOpen && column.length > 0 && (
-        <div className="fixed right-4 top-[6.5rem] bottom-28 z-40 w-80 max-w-[85vw] flex flex-col gap-2 pointer-events-none">
+        <div
+          style={{ zIndex: DOCK_Z }}
+          className="fixed right-4 top-[6.5rem] bottom-28 w-80 max-w-[85vw] flex flex-col gap-2 pointer-events-none"
+        >
           <div className="pointer-events-auto flex-1 min-h-0 overflow-y-auto space-y-2 pr-1">
             {column.map(p => <PinCard key={p.id} pin={p} storyId={story.id} />)}
           </div>

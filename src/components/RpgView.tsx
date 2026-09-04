@@ -8,6 +8,7 @@ import { useSceneVfx, useSceneWeather } from '../hooks/useSceneWeather';
 import { SceneFx } from './SceneFx';
 import { SceneVfx } from './SceneVfx';
 import { processText, balanceEmphasis, truncateToWord } from '../utils/textProcessor';
+import { useFontColor } from '../hooks/useFontColor';
 import { renderWithEmphasis } from './StageView';
 import { MarkupRenderContext } from '../utils/bookLayout';
 import { resolveCharColors } from '../utils/markupStyles';
@@ -49,6 +50,7 @@ import { latestImages } from '../utils/storyImages';
  */
 export const RpgView = () => {
   const store = useAppStore();
+  const fontColor = useFontColor();
   const v2 = useAuraV2Store();
   const storyId = store.currentStory?.id;
   const story = store.currentStory;
@@ -107,6 +109,7 @@ export const RpgView = () => {
     : current
       ? processText(resolveContent(current, overrides, lensOn), {
         hideMetadata: store.hideMetadata && !current.hidden,
+        fontColorMode: store.fontColorMode,
         oocHandling: store.oocHandling,
         autoFormat: store.autoFormat,
         autoFormatRules: store.autoFormatRules,
@@ -163,9 +166,10 @@ export const RpgView = () => {
   const bodyHtml = useMemo(
     () => paragraphs.map(p => renderWithEmphasis(
       p, emphasis, false, perform, claimed, playedRef.current.set, performMatcher(perform), markupCtx,
+      fontColor,
     )).join('<br/><br/>'),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [paragraphs, emphasis, perform, markupCtx],
+    [paragraphs, emphasis, perform, markupCtx, fontColor],
   );
 
   /**
