@@ -1,0 +1,285 @@
+/*
+ * Aeia Bridge styling.
+ *
+ * Deliberately thin. Everything here uses SillyTavern's own variables
+ * (`--SmartThemeBodyColor` and friends) rather than fixed colours, so the panel
+ * follows whatever theme the user is running instead of being a bright patch in
+ * the middle of a dark one.
+ *
+ * The exception is the two diff colours. Those carry meaning — this text is
+ * going, that text is arriving — and a theme-derived colour cannot say it. They
+ * are tinted backgrounds rather than coloured text so they stay legible on both
+ * light and dark themes, and the strike-through on the "before" block means the
+ * distinction survives for anyone who cannot see the difference between the two
+ * hues at all.
+ */
+
+.aeia-bridge-settings .aeia-hint {
+    display: block;
+    opacity: 0.7;
+    margin-bottom: 8px;
+    line-height: 1.4;
+}
+
+.aeia-bridge-settings label {
+    display: block;
+    margin-top: 6px;
+    margin-bottom: 2px;
+}
+
+.aeia-bridge-settings .aeia-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 8px 0;
+}
+
+.aeia-bridge-settings .aeia-row .menu_button {
+    flex: 1 1 auto;
+    white-space: nowrap;
+}
+
+/* ---- The confirmation popup ---- */
+
+.aeia-confirm {
+    text-align: left;
+    max-height: 60vh;
+    overflow-y: auto;
+}
+
+.aeia-confirm > p {
+    margin: 0 0 10px;
+}
+
+.aeia-diff {
+    border: 1px solid var(--SmartThemeBorderColor, rgba(128, 128, 128, 0.4));
+    border-radius: 6px;
+    padding: 8px;
+    margin-bottom: 8px;
+}
+
+.aeia-diff-who {
+    font-size: 0.8em;
+    opacity: 0.65;
+    margin-bottom: 6px;
+}
+
+.aeia-before,
+.aeia-after {
+    /* Chat text arrives with its own line breaks and they are part of the
+       message — collapsing them would show a diff of something the user is not
+       actually being asked about. */
+    white-space: pre-wrap;
+    word-break: break-word;
+    padding: 6px 8px;
+    border-radius: 4px;
+    font-size: 0.92em;
+    line-height: 1.45;
+}
+
+.aeia-before {
+    background: rgba(220, 60, 60, 0.14);
+    text-decoration: line-through;
+    opacity: 0.75;
+    margin-bottom: 4px;
+}
+
+.aeia-after {
+    background: rgba(60, 190, 120, 0.16);
+}
+
+.aeia-skipped {
+    font-size: 0.85em;
+    opacity: 0.75;
+    margin-top: 10px;
+}
+
+/* ---- The floating panel ---- */
+
+/*
+ * Small, and it stays out of the way.
+ *
+ * Positioned in percentages (see `clampDock`) so a spot chosen on one screen is
+ * still on screen on another. `position: fixed` rather than absolute: it has to
+ * survive the chat scrolling, which is the whole reason it exists.
+ *
+ * z-index sits above the chat and below SillyTavern's own popups — the preview
+ * dialog must never open behind the panel that launched it.
+ */
+.aeia-dock {
+    position: fixed;
+    z-index: 3000;
+    width: 190px;
+    border-radius: 10px;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(128, 128, 128, 0.4));
+    background: var(--SmartThemeBlurTintColor, rgba(20, 20, 20, 0.92));
+    backdrop-filter: blur(10px);
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+    color: var(--SmartThemeBodyColor, inherit);
+    overflow: hidden;
+    user-select: none;
+}
+
+.aeia-dock[hidden] { display: none; }
+
+.aeia-dock-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
+    font-size: 0.85em;
+    border-bottom: 1px solid var(--SmartThemeBorderColor, rgba(128, 128, 128, 0.3));
+    /* The header IS the handle, so it says so with the cursor. */
+    cursor: grab;
+    touch-action: none;
+}
+
+.aeia-dock-head:active { cursor: grabbing; }
+.aeia-dock-title { font-weight: 600; }
+
+.aeia-dock-state {
+    margin-left: auto;
+    font-size: 0.78em;
+    opacity: 0.6;
+    white-space: nowrap;
+}
+
+/* Connected is the one state worth a colour: it is the difference between the
+   buttons working and the buttons complaining. */
+.aeia-dock-state.is-live { color: rgb(80, 200, 130); opacity: 0.95; }
+
+/* The second pass, while it runs.
+
+   Its own line under the header rather than in the status word, because the two
+   say different things — the status word is about the connection and this is
+   about one reply, and a line that flickered between them would be readable as
+   neither. Hidden when there is nothing happening, so the panel is its usual
+   size for the whole time the feature is idle. */
+.aeia-dock-stage {
+    padding: 5px 8px;
+    font-size: 0.76em;
+    opacity: 0.75;
+    font-style: italic;
+    border-bottom: 1px solid var(--SmartThemeBorderColor, rgba(128, 128, 128, 0.3));
+    /* One line, however long the stage label is: a wrapping status line would
+       resize the panel under the reader's pointer while they were dragging it. */
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.aeia-dock-stage[hidden] { display: none; }
+
+.aeia-dock-x {
+    cursor: pointer;
+    opacity: 0.55;
+    padding: 0 2px;
+}
+.aeia-dock-x:hover { opacity: 1; }
+
+.aeia-dock-body {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 8px;
+}
+
+.aeia-dock-body .menu_button {
+    width: 100%;
+    margin: 0;
+    white-space: nowrap;
+    font-size: 0.85em;
+}
+
+.aeia-dock-body .menu_button.disabled {
+    opacity: 0.45;
+    pointer-events: none;
+}
+
+@media (max-width: 600px) {
+    /* On a phone the chat is the whole screen; a floating panel over it is in
+       the way rather than to hand. The drawer still has every button. */
+    .aeia-dock { display: none; }
+}
+
+/* ---- Aeia, framed ---- */
+
+/*
+ * A panel, not a modal.
+ *
+ * SillyTavern's own popup would close the moment the writer touched the chat
+ * behind it, and the whole request was for something that could be left
+ * hanging. Resizable, because the sync is a list the reader has to read.
+ */
+.aeia-frame-host {
+    position: fixed;
+    right: 24px;
+    bottom: 24px;
+    z-index: 3050;
+    width: min(560px, calc(100vw - 48px));
+    height: min(640px, calc(100vh - 96px));
+    display: flex;
+    flex-direction: column;
+    border-radius: 12px;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(128, 128, 128, 0.45));
+    background: var(--SmartThemeBlurTintColor, rgba(18, 18, 18, 0.96));
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+    overflow: hidden;
+    resize: both;
+    min-width: 320px;
+    min-height: 220px;
+}
+
+.aeia-frame-host[hidden] { display: none; }
+
+.aeia-frame-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    font-size: 0.86em;
+    color: var(--SmartThemeBodyColor, inherit);
+    border-bottom: 1px solid var(--SmartThemeBorderColor, rgba(128, 128, 128, 0.3));
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+    flex: 0 0 auto;
+}
+
+.aeia-frame-head:active { cursor: grabbing; }
+.aeia-frame-title { font-weight: 600; margin-right: auto; }
+
+.aeia-frame-btn {
+    cursor: pointer;
+    opacity: 0.6;
+    padding: 2px 4px;
+    border-radius: 4px;
+}
+.aeia-frame-btn:hover { opacity: 1; background: rgba(128, 128, 128, 0.2); }
+
+.aeia-frame {
+    flex: 1 1 auto;
+    width: 100%;
+    border: 0;
+    display: block;
+    /* The frame paints its own theme; a transparent one would show the chat
+       through Aeia's own background. */
+    background: #101010;
+}
+
+/* Minimised: the header stays, so it can be brought back without hunting for
+   a button somewhere else. */
+.aeia-frame-host.is-min {
+    height: auto;
+    resize: none;
+}
+.aeia-frame-host.is-min .aeia-frame { display: none; }
+
+@media (max-width: 600px) {
+    .aeia-frame-host {
+        right: 8px;
+        left: 8px;
+        bottom: 8px;
+        width: auto;
+        height: min(70vh, 520px);
+    }
+}
