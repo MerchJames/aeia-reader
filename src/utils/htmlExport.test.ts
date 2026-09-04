@@ -13,7 +13,7 @@
  */
 import type { Chain, Story } from '../types';
 import { THEMES } from '../themes';
-import { ExportTypography, exportStoryHtml, isSelfContained, readingStylesheet } from './htmlExport';
+import { ExportTypography, exportStoryHtml, isSelfContained, readingStylesheet, MAX_EMBEDDED_CHARS } from './htmlExport';
 import { FONT_STACKS } from './fontEmbed';
 import { walkStory } from './storyWalk';
 
@@ -382,6 +382,68 @@ for (const id of ['dark', 'light', 'sepia', 'terminal', 'book'] as const) {
 }
 ok(readingStylesheet(THEMES.dark, TYPE, '#ff0000').includes('#ff0000'), 'an accent override wins');
 ok(readingStylesheet(THEMES.dark, TYPE).includes('@media print'), 'it is printable');
+
+/* ── An avatar is embedded once, not once per message ────────────────────── */
+{
+  /*
+   * The bug this pins: `m.avatar` was inlined into every single message. The
+   * same portrait is the same base64 for every line a character speaks, so a
+   * long chat built a string of hundreds of megabytes and the export died with
+   * `RangeError: Invalid string length` — a message that says nothing about
+   * what went wrong, on the readers who had read the most.
+   */
+  const avatar = `data:image/png;base64,${'A'.repeat(20_000)}`;
+  const many = Array.from({ length: 300 }, (_, i) => ({
+    id: `m${i}`, name: 'Mara', role: 'ai' as const,
+    text: 'She set the lamp down.', images: [], avatar,
+  }));
+  const walked = {
+    title: 'Long', characterName: 'Mara', userName: 'You',
+    chapters: [{ index: 1, messages: many }],
+    messages: many, wordCount: 300 * 5,
+  };
+  const { html } = exportStoryHtml(walked as never, {
+    theme: THEMES.dark, typography: TYPE, layout: 'chat',
+  });
+
+  // 300 messages × 20KB would be 6MB of duplicated portrait. Once is ~20KB.
+  const copies = html.split(avatar).length - 1;
+  ok(copies === 1, 'the portrait appears exactly once in the file');
+  ok(html.length < 1_000_000, `300 messages with one portrait stay small (${html.length} chars)`);
+  ok(html.includes('pic-0'), 'and every message references it by class');
+  ok(html.split('pic-0').length - 1 >= 300 === true, 'all 300 of them');
+
+  // Two characters, two portraits, still one copy each.
+  const second = `data:image/png;base64,${'B'.repeat(20_000)}`;
+  const mixed = many.map((m, i) => (i % 2 ? { ...m, name: 'Rook', avatar: second } : m));
+  const two = exportStoryHtml({ ...walked, messages: mixed,
+    chapters: [{ index: 1, messages: mixed }] } as never,
+  { theme: THEMES.dark, typography: TYPE, layout: 'chat' });
+  ok(two.html.split(avatar).length - 1 === 1, 'the first portrait, once');
+  ok(two.html.split(second).length - 1 === 1, 'the second portrait, once');
+}
+
+/* ── Embedded images are budgeted rather than allowed to burst the string ── */
+{
+  // A remote image is already dropped-and-reported; this is the same treatment
+  // for a self-contained one that simply will not fit.
+  const big = `data:image/png;base64,${'C'.repeat(2_000_000)}`;
+  const shots = Array.from({ length: 80 }, (_, i) => ({
+    id: `s${i}`, name: 'Mara', role: 'ai' as const,
+    text: 'A picture.', images: [big], avatar: undefined,
+  }));
+  const walked = {
+    title: 'Gallery', chapters: [{ index: 1, messages: shots }],
+    messages: shots, wordCount: 160,
+  };
+  const { html, droppedImages } = exportStoryHtml(walked as never, {
+    theme: THEMES.dark, typography: TYPE, layout: 'chat',
+  });
+  ok(droppedImages > 0, 'past the budget, the rest are dropped');
+  ok(html.length < MAX_EMBEDDED_CHARS + 2_000_000,
+    'so the file stays inside what a browser string can hold');
+  ok(html.includes('could not be embedded'), 'and the file says so, rather than failing silently');
+}
 
 console.log(`${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);

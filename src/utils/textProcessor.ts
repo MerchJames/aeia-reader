@@ -1,4 +1,6 @@
-import { AutoFormatRule, OocHandling, Role } from '../types';
+import { AutoFormatRule, FontColorMode, OocHandling, Role } from '../types';
+
+import { markColorRuns } from './fontColor';
 
 export interface ProcessOptions {
   hideMetadata?: boolean;
@@ -19,6 +21,14 @@ export interface ProcessOptions {
   userName?: string;
   /** Role of the message, for role-targeted rules. */
   role?: Role;
+  /**
+   * What to do with a colour the model wrote (`<font color=…>`).
+   *
+   * Defaults to 'ignore' when a caller says nothing, which is the behaviour
+   * every existing call site had — so a renderer that has not been taught to
+   * paint colour runs cannot be handed one.
+   */
+  fontColorMode?: FontColorMode;
 }
 
 export const ruleAppliesTo = (rule: AutoFormatRule, role?: Role): boolean =>
@@ -155,7 +165,9 @@ const KNOWN_TAG_RE = new RegExp(`</?(?:${HTML_TAGS.join('|')})\\b[^>]*>`, 'gi');
 const FENCE_RE = /```[\s\S]*?```/g;
 const CODE_SPAN_RE = /`[^`\n]*`/g;
 
-export const normalizeInlineHtml = (text: string): string => {
+export const normalizeInlineHtml = (
+  text: string, fontColorMode: FontColorMode = 'ignore',
+): string => {
   if (!text.includes('<')) return text; // the overwhelmingly common case
   const parked: string[] = [];
   // A distinctive sentinel, never a bare index: prose is full of literal
@@ -168,6 +180,10 @@ export const normalizeInlineHtml = (text: string): string => {
   // Fences first, then inline code — the same claiming order the channel passes
   // use, so a fence containing a backtick is not half-eaten by the span rule.
   let s = text.replace(FENCE_RE, park).replace(CODE_SPAN_RE, park);
+
+  // A deliberate colour, claimed before the generic strip further down can eat
+  // the tag it lives on. A no-op unless the reader asked for colours.
+  s = markColorRuns(s, fontColorMode);
 
   // Structure that markdown spells differently.
   s = s.replace(/<br\b[^>]*>/gi, '\n');
@@ -194,7 +210,8 @@ export const normalizeInlineHtml = (text: string): string => {
 export const processText = (text: string, opts: ProcessOptions = {}) => {
   // Images first: an <img> carries its meaning in an attribute, so it has to
   // become markdown before the tag-stripping above can reach it.
-  let processed = applyOoc(normalizeInlineHtml(normalizeImages(text)), opts.oocHandling);
+  let processed = applyOoc(
+    normalizeInlineHtml(normalizeImages(text), opts.fontColorMode), opts.oocHandling);
 
   if (opts.substituteNames) {
     if (opts.characterName) processed = processed.replace(/\{\{char\}\}/gi, opts.characterName);

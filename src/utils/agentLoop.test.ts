@@ -51,6 +51,10 @@ const ctx: ToolContext = {
   listSheets: () => [],
   createPin: () => 'pin-new',
   addPinVersion: () => { written++; return 2; },
+  listLens: () => [],
+  proposeLens: (target, _content, _note) => ({
+    index: target, name: 'Mara', before: `beat ${target}`, noop: false,
+  }),
 };
 
 /** A `send` that replays a script, and records what it was asked. */

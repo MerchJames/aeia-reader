@@ -71,6 +71,17 @@ export interface ZoneTask {
   targetPinId: string | null;
   /** A steer applied to every pass, on top of the format. */
   instruction?: string;
+  /**
+   * A crew of context pockets, run in order, instead of a walk over zones.
+   *
+   * Absent on every task written before pockets existed, and on every task the
+   * reader builds as a plain read — which is why it is optional rather than an
+   * empty array. A task with steps runs `runPockets`; a task without them runs
+   * `runZoneTask` exactly as it always did. Two engines, one saved thing,
+   * because "read these zones into a document" and "have these pockets each do
+   * their part" are the same act of planning at two levels of detail.
+   */
+  steps?: import('./contextPocket').PocketStep[];
   createdAt: number;
   updatedAt: number;
   lastRun?: {

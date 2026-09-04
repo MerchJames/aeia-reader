@@ -8,7 +8,7 @@
  */
 import type { Story, StoryMeta } from '../types';
 import {
-  allTags, filterStories, searchAllStories, sortStories, tagsFor,
+  allTags, filterStories, searchAllStories, sortStories, tagsFor, isSynced,
 } from './librarySearch';
 
 let pass = 0, fail = 0;
@@ -119,7 +119,41 @@ const run = async () => {
   const perStory = await searchAllStories(visitAll, 'the', { perStory: 1 });
   ok(perStory.every(r => r.hits.length <= 1), 'perStory caps hits within a story');
 
-  console.log(`${pass} passed, ${fail} failed`);
+  /* ── Synced chats are a relationship, not a format ───────────────────────── */
+{
+  // "Imported from a .jsonl once" and "kept in step with a chat somebody is
+  // still writing" are different things, and `format` alone cannot tell them
+  // apart — every synced chat is `sillytavern` too.
+  const plain: StoryMeta = {
+    id: 'a', title: 'An import', format: 'sillytavern', messageCount: 10, importedAt: 1,
+  };
+  const synced: StoryMeta = {
+    id: 'b', title: 'A synced chat', format: 'sillytavern', messageCount: 10, importedAt: 2,
+    stChatId: 'chat-1', stSyncedAt: 99,
+  };
+  const doc: StoryMeta = {
+    id: 'c', title: 'A document', format: 'document', messageCount: 3, importedAt: 3,
+  };
+  const all = [plain, synced, doc];
+
+  ok(!isSynced(plain), 'an ordinary import is not synced');
+  ok(isSynced(synced), 'one with a chat id is');
+
+  const ids = (f: Parameters<typeof filterStories>[1]) =>
+    filterStories(all, f).map(m => m.id).join();
+
+  ok(ids({ format: 'synced' }) === 'b', 'the synced filter finds only the synced one');
+  ok(ids({ format: 'sillytavern' }) === 'a,b',
+    'and the format filter still finds both, synced or not');
+  ok(ids({ format: 'all' }) === 'a,b,c', 'all is still everything');
+
+  // The filters compose with the rest rather than replacing them.
+  ok(ids({ format: 'synced', query: 'document' }) === '',
+    'a query still narrows a synced filter');
+  ok(ids({ format: 'synced', query: 'synced chat' }) === 'b', 'and matches within it');
+}
+
+console.log(`${pass} passed, ${fail} failed`);
   if (fail) process.exit(1);
 };
 

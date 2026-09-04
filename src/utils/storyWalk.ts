@@ -17,6 +17,15 @@ import { resolveContent } from './lens';
 import { processText } from './textProcessor';
 
 export interface WalkOptions {
+  /**
+   * How to carry the colours the author wrote (see `utils/fontColor`).
+   *
+   * Left off, the walk produces plain words — which is right for a caller that
+   * wants text (a summary, a search index) and wrong for one that is
+   * reproducing the page, so it is stated rather than defaulted either way.
+   */
+  fontColorMode?: import('../types').FontColorMode;
+
   /** Lens overrides + whether the curated view is on. */
   overrides?: MessageOverride[];
   lensOn?: boolean;
@@ -83,6 +92,7 @@ export const walkStory = (
     const raw = resolveContent(msg, opts.overrides, opts.lensOn ?? false);
     const text = processText(raw, {
       hideMetadata: opts.hideMetadata && !msg.hidden,
+      fontColorMode: opts.fontColorMode,
       substituteNames: opts.substituteNames,
       characterName: story.characterName,
       userName: story.userName,

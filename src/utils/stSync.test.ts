@@ -31,6 +31,8 @@ import {
   alignSync, looksLikeSameChat, mergeToFile, messageLines, parseStFile, patchLine, summarize,
 } from './stSync';
 
+import { headerName, parseSillyTavernText } from './parser';
+
 let pass = 0, fail = 0;
 const ok = (cond: boolean, msg: string) => { if (cond) { pass++; } else { fail++; console.error('✗', msg); } };
 const eq = (a: unknown, b: unknown, msg: string) => {
@@ -255,6 +257,26 @@ const OURS: OurMessage[] = [
     'and somebody else\'s chat is refused — syncing the wrong file is the one mistake with no undo');
   ok(!looksLikeSameChat(alignSync(OURS, parseStFile(HEADER))),
     'as is an empty one');
+
+  /*
+   * The trap on the other side of that answer.
+   *
+   * Aligning a real file against NO story pairs nothing, so this says "not the
+   * same chat" — correctly, in the sense that there is no chat here to be the
+   * same as. It is not a finding, and a caller that shows it as one accuses a
+   * file of being a stranger to a story that does not exist yet.
+   *
+   * That is precisely what the sync panel did in SillyTavern's frame, where the
+   * chat arrives BEFORE the story is imported: it judged once, against nothing,
+   * and still had the verdict on screen after the import created the story from
+   * that very file. So the panel now asks only when it has a story, and
+   * re-aligns when the story underneath it changes.
+   */
+  const rowsAgainstNothing = alignSync([], parseStFile(FILE));
+  ok(!looksLikeSameChat(rowsAgainstNothing),
+    'with no story to compare against there is no verdict — the caller must not show one');
+  ok(rowsAgainstNothing.every(r => r.status === 'added-there'),
+    'every message reads as new, which is true of an empty library and of nothing else');
 }
 
 /*
@@ -304,6 +326,36 @@ const OURS: OurMessage[] = [
   eq((oob.swipes as string[])[0], 'y', 'an out-of-range swipe_id writes to the first slot rather than past the end');
   ok(!(base.swipes as string[]).includes('something new'),
     'and the original object is never mutated');
+}
+
+/* ── SillyTavern's "unused" placeholder is not a name ────────────────────── */
+{
+  // Modern SillyTavern hardcodes `user_name: 'unused', character_name: 'unused'`
+  // into every header it saves (public/script.js, saveChat). Taken literally, a
+  // chat file copied off disk imported as a story called "unused", starring
+  // "unused", talking to "unused" — which is what a real file from the owner's
+  // SillyTavern actually did.
+  eq(headerName('unused'), undefined, 'the placeholder is not a name');
+  eq(headerName('UNUSED'), undefined, 'whatever its case');
+  eq(headerName('  unused  '), undefined, 'or its padding');
+  eq(headerName(''), undefined, 'and neither is nothing');
+  eq(headerName(null), undefined, 'or a missing field');
+  eq(headerName('Elara'), 'Elara', 'a real name survives');
+  eq(headerName(' Elara '), 'Elara', 'trimmed');
+  // The one case worth stating: somebody's character really is called Unused.
+  // They lose the header name and get it from the messages instead, which is
+  // the same answer by a different route.
+  eq(headerName('Unused'), undefined, 'a character genuinely called that falls back to the messages');
+
+  const file = [
+    JSON.stringify({ user_name: 'unused', character_name: 'unused', chat_metadata: {} }),
+    JSON.stringify({ name: 'Elara', is_user: false, mes: 'She set the lamp down.' }),
+    JSON.stringify({ name: 'Rook', is_user: true, mes: 'I said nothing.' }),
+  ].join('\n');
+  const story = parseSillyTavernText(file, 'chat.jsonl');
+  eq(story.characterName, 'Elara', 'the character is taken from the messages');
+  eq(story.userName, 'Rook', 'and so is the reader');
+  eq(story.title, 'Elara', 'and the story is named after the character, not "unused"');
 }
 
 console.log(`${pass} passed, ${fail} failed`);

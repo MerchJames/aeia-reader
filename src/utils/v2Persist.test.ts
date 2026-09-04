@@ -42,7 +42,37 @@ const ok = (cond: boolean, msg: string) => { if (cond) { pass++; } else { fail++
 // produces: that lands as a version of a pin, in pinsByStory, where the reader
 // can step back through it. A task holding its own output would be a second
 // copy of every document, rewritten on every run.
-ok(PERSISTED_SLICES.length === 45, 'every persisted slice is declared');
+// 46: +crossings (Crossing[]) — GLOBAL, not perStory, and for exactly the
+// reason throughlines is: a crossing is a line drawn BETWEEN two stories and
+// belongs to neither. Sharding it would force a choice with no right answer —
+// file it under story A and it is invisible from B; file it under both and
+// deleting it is a two-sided problem where one side can win. What it does NOT
+// hold is any transcript: each end keeps a message id and a short excerpt, so a
+// crossing is an observation about two stories rather than a third copy of
+// either. Nothing merges; the excerpt exists only so a crossing still reads
+// when its story is closed.
+// 47: +pocketsByStory (Record<storyId, ContextPocket[]>) — story-keyed, so
+// perStory, and sharded beside zonesByStory for the same reason tasksByStory
+// is: a pocket is a zone with a job attached, and a zone belongs to one chat.
+// "All of my own messages, so you can write as me" is a sentence about THIS
+// story's transcript; carried to another chat it would name zone ids that do
+// not exist there. What is NOT here is anything a pocket produced: a run's
+// output is drafts the reader keeps or discards, or a version of a pin — never
+// a record of its own, because a crew that saved every draft it ever made would
+// grow without bound and nobody would read the middle of it.
+// 48: +folders (Folder[]) and 49: +folderByStory (Record<storyId, folderId>) —
+// library organisation, and the first two GLOBAL slices that are about the
+// library rather than the reader. Global on both counts: the folder list
+// belongs to the whole library, and the assignment map is one small record for
+// all of it. Sharding folderByStory per story would write a record per chat to
+// answer "which folder is this in", which is the exact cost the sharding
+// exists to avoid, backwards.
+// They are two slices rather than one because an EMPTY folder has to survive.
+// Deriving the list from the assignments — folders are whatever names are in
+// use — cannot represent a folder you made before filing anything, and drops a
+// folder the moment its last story leaves. Both are things people do in the
+// first minute.
+ok(PERSISTED_SLICES.length === 49, 'every persisted slice is declared');
 ok(PERSISTED_SLICES.some(s => s.slice === 'throughlines' && !s.perStory),
   'throughlines are global — a per-story copy of a cross-story record is a contradiction');
 ok(new Set(PERSISTED_SLICES.map(s => s.slice)).size === PERSISTED_SLICES.length, 'no slice is declared twice');

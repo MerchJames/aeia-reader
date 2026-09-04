@@ -19,7 +19,8 @@
  */
 
 import type {
-  CharacterChannelColors, DialogueAnimation, DialogueStyle, MarkupPresets, Mood, SceneDescriptor, SceneEmphasis,
+  CharacterChannelColors, DialogueAnimation, DialogueStyle, FontColorMode, MarkupPresets, Mood,
+  SceneDescriptor, SceneEmphasis,
   ScenePerformCue, Story,
 } from '../types';
 import type { ThemeDef } from '../themes';
@@ -51,6 +52,15 @@ export interface ExportTypography {
 
 export interface ExportOptions {
   theme: ThemeDef;
+  /**
+   * How to paint the colours the author wrote into the text.
+   *
+   * The file is meant to be the page as the reader reads it, and a colour is a
+   * distinction the author drew — so an export that dropped it would be quietly
+   * less faithful than the app. `theme.isDark` supplies the other half, which
+   * is why 'adapt' needs no second field here.
+   */
+  fontColorMode?: FontColorMode;
   accent?: string;
   typography: ExportTypography;
   layout?: ExportLayout;
@@ -86,6 +96,14 @@ export interface ExportOptions {
   };
   /** Open on a title page. On by default; `false` starts at chapter one. */
   cover?: boolean;
+  /**
+   * A line of the reader's own under the title.
+   *
+   * The only thing the title page could not say. Everything else on it is
+   * derived — the names, the measure, the date — so this is the one place the
+   * person who made the file gets to name what it is.
+   */
+  coverSubtitle?: string;
   /** Stamped on the cover. Injected rather than read from the clock so the
    *  output is reproducible and the tests can pin a date. */
   exportedAt?: number;
@@ -111,6 +129,20 @@ const escapeHtml = (s: string): string =>
 
 /** Only `data:` survives — anything else would make the file phone home. */
 export const isSelfContained = (src: string): boolean => src.startsWith('data:');
+
+/**
+ * How much embedded image data one exported file may carry, in characters of
+ * base64.
+ *
+ * Not a judgement about taste — it is the ceiling that keeps the export from
+ * failing outright. A JavaScript string tops out near half a gigabyte, and past
+ * that every concatenation in here throws `RangeError: Invalid string length`,
+ * which tells the reader nothing and gets more likely the more they have read.
+ * 96MB is a very large self-contained page and still leaves an order of
+ * magnitude of headroom; anything beyond it is dropped and reported, exactly as
+ * a remote image already is.
+ */
+export const MAX_EMBEDDED_CHARS = 96 * 1024 * 1024;
 
 const moodTint = (mood: Mood, tension: number): string => {
   const a = sceneAtmosphere(mood, tension);
@@ -216,6 +248,7 @@ padding:4rem 1.5rem 3rem;gap:0}
 letter-spacing:.2em;text-transform:uppercase;font-weight:600}
 .cover h1{font-size:clamp(2.1em,7vw,3.2em);line-height:1.08;margin:0;
 letter-spacing:-.02em;text-wrap:balance}
+.cover .subtitle{margin:.9rem 0 0;font-style:italic;font-size:1.02em;color:var(--muted)}
 .cover .byline{margin:1rem 0 0;font-size:1.05em;color:var(--text);opacity:.75}
 .cover .stat{margin:.35rem 0 0;color:var(--muted);font-size:.85em}
 .cover .dateline{margin:.15rem 0 0;color:var(--muted);font-size:.78em;opacity:.75}
@@ -450,7 +483,9 @@ export const readingLength = (words: number): string => {
  * logo repeated down the side of somebody's story is a watermark, not a
  * credit.
  */
-const coverHtml = (walked: WalkedStory, layout: ExportLayout, at: number): string => {
+const coverHtml = (
+  walked: WalkedStory, layout: ExportLayout, at: number, subtitle?: string,
+): string => {
   const who = walked.characterName || walked.messages.find(m => m.role === 'ai')?.name || '';
   const art = walked.coverImage && isSelfContained(walked.coverImage)
     ? `<span class="art"><img src="${escapeHtml(walked.coverImage)}" alt=""></span>`
@@ -482,6 +517,7 @@ const coverHtml = (walked: WalkedStory, layout: ExportLayout, at: number): strin
 ${art}
 ${kicker}
 <h1>${escapeHtml(walked.title)}</h1>
+${subtitle ? `<p class="subtitle">${escapeHtml(subtitle)}</p>` : ''}
 ${byline ? `<p class="byline">${byline}</p>` : ''}
 <p class="stat">${stat}</p>
 <p class="dateline">Exported ${escapeHtml(date)}</p>
@@ -502,6 +538,8 @@ export const exportStoryHtml = (
   opts: ExportOptions,
 ): ExportResult => {
   let dropped = 0;
+  /** Running total of embedded image bytes — see MAX_EMBEDDED_CHARS. */
+  let embedded = 0;
   // A highlight belongs to ONE message. Applying every highlight to every
   // passage painted the same words all over the story — wrong on its face, and
   // the reason the work grew with (highlights × messages) rather than with the
@@ -522,6 +560,29 @@ export const exportStoryHtml = (
   const layout: ExportLayout = opts.layout ?? 'storybook';
   const marks = opts.sceneMarks !== false && (!!opts.scenes || !!opts.readerMarks);
 
+  /*
+   * One copy of each avatar, referenced by class.
+   *
+   * This used to inline `m.avatar` into every single message. The same portrait
+   * is the same three hundred kilobytes of base64 for every line the character
+   * speaks, so a long chat built a string of hundreds of megabytes and the
+   * export died with `RangeError: Invalid string length` — a failure that says
+   * nothing about what went wrong and gets worse the more you have read.
+   *
+   * Now each distinct portrait is emitted once as a CSS rule and each message
+   * carries a class name. A two-thousand-message chat costs what a two-message
+   * one does.
+   */
+  const avatars = new Map<string, string>();
+  const avatarClass = (src: string): string | null => {
+    if (!isSelfContained(src)) return null;
+    const found = avatars.get(src);
+    if (found) return found;
+    const name = `pic-${avatars.size}`;
+    avatars.set(src, name);
+    return name;
+  };
+
   const chapterHtml = walked.chapters.map(ch => {
     const d = ch.messages.map(m => opts.scenes?.[m.id]).find(Boolean);
     const tint = opts.sceneMood !== false && d ? moodTint(d.mood, d.tension) : '';
@@ -539,7 +600,10 @@ export const exportStoryHtml = (
         ),
         animate: true,
       } : undefined;
-      let inner = m.text.split(/\n{2,}/).map(p => `<p>${renderInline(p, { markupCtx })}</p>`).join('');
+      const fontColor = opts.fontColorMode
+        ? { mode: opts.fontColorMode, dark: opts.theme.isDark }
+        : undefined;
+      let inner = m.text.split(/\n{2,}/).map(p => `<p>${renderInline(p, { markupCtx, fontColor })}</p>`).join('');
       const mine = byMessage.get(m.id);
       if (mine || anywhere.length) inner = applyHighlights(inner, [...(mine ?? []), ...anywhere]);
       // The Director's two tracks, marked through the same scanner the reader
@@ -558,11 +622,15 @@ export const exportStoryHtml = (
       }
       const imgs = m.images.map(src => {
         if (!isSelfContained(src)) { dropped++; return ''; }
+        if (embedded + src.length > MAX_EMBEDDED_CHARS) { dropped++; return ''; }
+        embedded += src.length;
         return `<img src="${escapeHtml(src)}" alt="">`;
       }).join('');
 
-      const pic = m.avatar && isSelfContained(m.avatar)
-        ? `<span class="pic"><img src="${escapeHtml(m.avatar)}" alt=""></span>`
+      // The avatar is referenced, never repeated. See `avatarClass`.
+      const cls = m.avatar ? avatarClass(m.avatar) : null;
+      const pic = cls
+        ? `<span class="pic ${cls}"></span>`
         : `<span class="pic" style="background:${avatarColor(m.name)}">${escapeHtml(m.name.charAt(0).toUpperCase())}</span>`;
 
       return `<article class="${m.role === 'user' ? 'user' : 'ai'}">${pic}`
@@ -574,6 +642,18 @@ export const exportStoryHtml = (
       + `${body}</section>`;
   }).join('\n');
 
+  /*
+   * The portraits, once each.
+   *
+   * `background-image` rather than an `<img>` so the rule can carry the data
+   * URI and the markup carries only a class name — which is the whole saving.
+   * Emitted after the walk because that is when every avatar in use is known.
+   */
+  const avatarCss = [...avatars.entries()]
+    .map(([src, cls]) => `.${cls}{background-image:url("${src.replace(/"/g, '%22')}");`
+      + 'background-size:cover;background-position:center}')
+    .join('');
+
   const toc = walked.chapters.length > 1
     ? `<nav class="toc"><h2>Contents</h2><ol>${walked.chapters.map(ch => {
         const d = ch.messages.map(m => opts.scenes?.[m.id]).find(Boolean);
@@ -584,7 +664,9 @@ export const exportStoryHtml = (
 
   const byline = [walked.characterName, walked.userName].filter(Boolean).join(' &amp; ');
   const showCover = opts.cover !== false;
-  const cover = showCover ? coverHtml(walked, layout, opts.exportedAt ?? Date.now()) : '';
+  const cover = showCover
+    ? coverHtml(walked, layout, opts.exportedAt ?? Date.now(), opts.coverSubtitle)
+    : '';
 
   // The control bar carries the reveal AND the layout toggle, so it ships
   // whenever either is on.
@@ -607,7 +689,7 @@ export const exportStoryHtml = (
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${escapeHtml(walked.title)}</title>
-<style>${readingStylesheet(opts.theme, opts.typography, opts.accent)}${marks ? PERFORM_CSS + EMPHASIS_CSS : ''}</style>
+<style>${readingStylesheet(opts.theme, opts.typography, opts.accent)}${marks ? PERFORM_CSS + EMPHASIS_CSS : ''}${avatarCss}</style>
 </head>
 <body data-layout="${layout}">
 ${cover || `<header class="story">

@@ -15,7 +15,7 @@ const ok = (cond: boolean, msg: string) => { if (cond) { pass++; } else { fail++
 // group, the icon table, the App dispatch and the onboarding step — and the
 // count is what makes forgetting one of them fail here rather than ship as a
 // blank row in the menu readers discover views in.
-ok(VIEW_ORDER.length === 13, `all thirteen views are catalogued (${VIEW_ORDER.length})`);
+ok(VIEW_ORDER.length === 14, `all fourteen views are catalogued (${VIEW_ORDER.length})`);
 
 /* ── Reading views vs list views ───────────────────────────────────────────
  *
@@ -109,6 +109,169 @@ ok(moveView(bar, 'storybook', -1).join() === bar.join(), 'the first view cannot 
 ok(moveView(bar, 'chat', 1).join() === bar.join(), 'the last view cannot move right');
 ok(moveView(bar, 'vn', -1).join() === bar.join(), 'moving an unpinned view is a no-op');
 ok(bar.join() === 'storybook,book,chat', 'reordering never mutates the input');
+
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * What a preset GATES
+ *
+ * Two different jobs that look alike and must not be confused:
+ *
+ *   SEEDS say "start with these on the bar". Everything else is one click away
+ *   in the overflow, because the overflow is where views are discovered.
+ *
+ *   HIDDEN say "not in this workspace at all" — gone from the bar AND the menu.
+ *
+ * The tests below are mostly about the second one not eating the first. A
+ * workspace that hides things is a workspace a reader can get stuck in, so
+ * every hiding rule here is paired with an assertion that there is a way out.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+import {
+  HIDDEN_TOOLS, HIDDEN_VIEWS, TOOL_ORDER, allowedViews, toolAllowed,
+  viewAfterModeChange, viewAllowed,
+} from './viewBar';
+import { UiMode } from '../types';
+
+const MODES: UiMode[] = ['read', 'cowrite', 'scenes', 'all'];
+
+// --- All is the escape hatch ------------------------------------------------
+// Every "you can't get there from here" message in the app points at All. If
+// All itself hid anything, that advice would be a lie and there would be no
+// way to reach the hidden thing at all.
+ok(HIDDEN_VIEWS.all.length === 0, 'All hides no view — it is the escape hatch');
+ok(HIDDEN_TOOLS.all.length === 0, 'and no tool');
+ok(allowedViews('all').length === VIEW_ORDER.length, 'so All offers every view there is');
+
+// --- Settings is never gated ------------------------------------------------
+// A workspace you cannot leave, with no way to reach the switch that changes
+// it, is a trap. Settings is how a reader gets out of one.
+for (const mode of MODES) {
+  ok(toolAllowed('settings', mode), `${mode} keeps Settings — the way out of any preset`);
+}
+
+// --- No preset is empty -----------------------------------------------------
+for (const mode of MODES) {
+  ok(allowedViews(mode).length > 0, `${mode} offers at least one view`);
+  ok(allowedViews(mode).includes('storybook'),
+    `${mode} keeps Storybook — every preset needs one plain way to read`);
+  ok(allowedViews(mode).includes('chat'),
+    `${mode} keeps Chat — the transcript is the story's ground truth`);
+}
+
+// --- The preset each rule was written for -----------------------------------
+ok(!viewAllowed('book', 'cowrite'), 'Cowrite hides the book spread');
+ok(!viewAllowed('vn', 'cowrite'), 'and the visual novel');
+ok(!viewAllowed('stage', 'cowrite') && !viewAllowed('sandbox', 'cowrite'),
+  'and the other two presentation views — this workspace is about the words');
+ok(viewAllowed('overview', 'cowrite') && viewAllowed('branches', 'cowrite'),
+  'while keeping the lists, which is how you navigate a draft');
+
+ok(!viewAllowed('branches', 'scenes'), 'Scenes hides Branches');
+ok(!viewAllowed('overview', 'scenes') && !viewAllowed('highlights', 'scenes'),
+  'and the other two lists — Scenes shows the story, never a table about it');
+for (const v of READING_VIEWS) {
+  ok(viewAllowed(v, 'scenes'), `Scenes keeps every reading view, including ${v}`);
+}
+// Stated as an identity rather than a list, so adding a list view later cannot
+// silently leak one into Scenes.
+ok(HIDDEN_VIEWS.scenes.length === LIST_VIEWS.length
+  && LIST_VIEWS.every(v => HIDDEN_VIEWS.scenes.includes(v)),
+  'Scenes hides exactly the list views — no more, no fewer');
+
+ok(HIDDEN_VIEWS.read.length === 0, 'Read hides no view — reading is what every view is for');
+
+// --- Tools ------------------------------------------------------------------
+ok(!toolAllowed('frame', 'read') && !toolAllowed('sheets', 'read') && !toolAllowed('multiverse', 'read'),
+  'Read drops Frame, Sheets and Multiverse');
+ok(toolAllowed('codex', 'read') && toolAllowed('autofocus', 'read'),
+  'and keeps the two that serve reading: the Codex and Autofocus');
+ok(TOOL_ORDER.filter(t => toolAllowed(t, 'read')).length === 3,
+  'leaving Read with exactly three tools in the header');
+
+ok(!toolAllowed('autofocus', 'cowrite'), 'Cowrite drops Autofocus — handsfree is not a writing posture');
+ok(toolAllowed('ai', 'cowrite'), 'and keeps the assistant, which is the whole preset');
+
+ok(!toolAllowed('autofocus', 'scenes') && !toolAllowed('multiverse', 'scenes')
+  && !toolAllowed('sheets', 'scenes') && !toolAllowed('codex', 'scenes')
+  && !toolAllowed('frame', 'scenes'),
+  'Scenes drops every text-and-structure tool');
+
+// Branching links one story to ANOTHER — structural work on the text, so it
+// belongs with Cowrite and nowhere near a preset about reading or showing.
+ok(toolAllowed('branching', 'cowrite'), 'Cowrite keeps Branching');
+ok(!toolAllowed('branching', 'read') && !toolAllowed('branching', 'scenes'),
+  'and the two presets that are not about structure drop it');
+ok(toolAllowed('branching', 'all'), 'All keeps it, like everything else');
+
+for (const mode of MODES) {
+  for (const t of HIDDEN_TOOLS[mode]) {
+    ok(TOOL_ORDER.includes(t), `${mode} hides "${t}", which is a real tool id`);
+  }
+  for (const v of HIDDEN_VIEWS[mode]) {
+    ok(VIEW_ORDER.includes(v), `${mode} hides "${v}", which is a real view`);
+  }
+}
+
+// --- Switching preset must not strand the reader ----------------------------
+// The failure: reading in Book view, switch to Cowrite, and the bar no longer
+// contains the view you are looking at. Nothing is broken and nothing works.
+for (const mode of MODES) {
+  for (const v of VIEW_ORDER) {
+    const landed = viewAfterModeChange(v, mode);
+    ok(viewAllowed(landed, mode), `switching to ${mode} from ${v} lands on a view ${mode} offers`);
+  }
+}
+ok(viewAfterModeChange('storybook', 'cowrite') === 'storybook',
+  'a reader whose view is still offered is not moved at all');
+ok(viewAfterModeChange('overview', 'cowrite') === 'overview', 'nor for a list view Cowrite keeps');
+// Cowrite's first seed is the Workspace, so that is where a reader who cannot
+// stay put lands — the view the preset is actually for, rather than whichever
+// happened to be first in the canonical order.
+ok(viewAfterModeChange('book', 'cowrite') === 'workspace',
+  'and one who must move lands on the preset\'s own starting point, not an arbitrary view');
+ok(viewAfterModeChange('branches', 'scenes') === 'storybook', 'the same leaving a list behind in Scenes');
+
+// --- The bar filters, it does not rewrite -----------------------------------
+// A pin list is made once and kept forever; a preset is a statement about now.
+// So the preset filters the pins for display and leaves them alone underneath,
+// which is what makes switching back to All bring every one of them straight
+// back.
+{
+  const pins: ViewMode[] = ['storybook', 'book', 'vn', 'chat'];
+  const inCowrite = resolveVisibleViews(pins, 'cowrite', 'storybook');
+  ok(!inCowrite.includes('book') && !inCowrite.includes('vn'),
+    'a pinned view the preset hides is not shown');
+  ok(inCowrite.includes('storybook') && inCowrite.includes('chat'), 'while the rest of the pins stay');
+  ok(resolveVisibleViews(pins, 'all', 'storybook').length === pins.length,
+    'and switching back to All restores every pin, untouched');
+
+  // The one case where a hidden view is still shown: the reader is ON it.
+  const onBook = resolveVisibleViews(pins, 'cowrite', 'book');
+  ok(onBook.includes('book'),
+    'the view the reader is actually on is always on the bar, preset or not');
+
+  // A pin list consisting entirely of views this preset hides would otherwise
+  // render an empty bar — a dead end with no way back to a view.
+  const allHidden = resolveVisibleViews(['book', 'vn', 'sandbox'], 'cowrite', 'storybook');
+  ok(allHidden.length > 0, 'a pin list the preset hides entirely falls back to the seed, never to nothing');
+}
+
+// --- The overflow is scoped too ---------------------------------------------
+{
+  const shown = resolveVisibleViews(null, 'cowrite');
+  const more = overflowViews(shown, 'cowrite');
+  ok(!more.includes('book'), 'the overflow does not offer a view the preset hides');
+  ok(more.every(v => viewAllowed(v, 'cowrite')), 'none of them, in fact');
+  ok(shown.concat(more).length === allowedViews('cowrite').length,
+    'and between the bar and the overflow, every view the preset offers is reachable');
+
+  for (const mode of MODES) {
+    const bar = resolveVisibleViews(null, mode);
+    const rest = overflowViews(bar, mode);
+    ok(new Set([...bar, ...rest]).size === allowedViews(mode).length,
+      `in ${mode}, nothing the preset offers is unreachable`);
+  }
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);

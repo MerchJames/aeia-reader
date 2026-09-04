@@ -101,6 +101,14 @@ export const CUT_SLICES: readonly string[] = [
  * into either policy.
  */
 export const NEVER_IN_A_CUT: readonly string[] = [
+  // How the reader files their own library, and a name is a judgement: a Cut
+  // carrying "Abandoned" or "Guilty pleasures" would tell its recipient what
+  // its sender privately thinks of the story they were just given. The
+  // assignments are worse — a map keyed by every story id on this machine,
+  // most of which the recipient will never see, and none of which are theirs.
+  // Neither half describes the story being shared, so neither travels.
+  'folders',
+  'folderByStory',
   'sheetsByStory',         // tracking sheets the reader built for themselves
   'annotationsByStory',    // margin notes
   'askByStory',            // interviews with the cast
@@ -115,12 +123,25 @@ export const NEVER_IN_A_CUT: readonly string[] = [
   // rather than performance — the same reason its zones are private — and the
   // document it produces is a pin, which is not shared either.
   'tasksByStory',
+  // A pocket is a zone with a job attached, so it is private for both of the
+  // reasons its parts are: it names zone ids that exist only on this machine,
+  // and its purpose and voice are the reader's own working method — often a
+  // written account of how THEY sound, which is about as personal as anything
+  // in this app gets. A Cut carries the direction, not the diary.
+  'pocketsByStory',
   'visitorsByStory',       // characters borrowed from OTHER private chats
   // The reader's own persona and the shape of their whole library — the titles
   // of every other story they keep and a written account of what happened to
   // them in each. Sending that with a Cut would leak a shelf, and land on the
   // receiver as an instruction about who THEY are playing.
   'throughlines',
+  // Lines the reader drew between this story and their OTHER private chats.
+  // Each end carries a title and a quoted excerpt, so shipping these would hand
+  // the receiver the names of stories they were never given and fragments of
+  // their text — a leak whose whole shape is "here is what else I am reading".
+  // The observation is also about a relationship the receiver cannot see either
+  // side of, so it would arrive meaningless as well as private.
+  'crossings',
   'tasteMarks',            // what the reader's own marks taught the Director
   'libraryTagsByStory',    // how they organise their own shelf
   'recapSeen',

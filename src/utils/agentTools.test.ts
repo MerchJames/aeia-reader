@@ -24,7 +24,7 @@
  * is asserted to be refused.
  */
 import {
-  AGENT_TOOLS, MAX_CALLS_PER_STEP, MAX_READ_MESSAGES, TOOL_OUTPUT_CHARS,
+  AGENT_TOOLS, GUIDE_SETTINGS, MAX_CALLS_PER_STEP, MAX_READ_MESSAGES, TOOL_OUTPUT_CHARS,
   type ToolContext, parseToolCalls, renderToolCatalog, runToolCall,
   stripToolCalls, truncateMiddle,
 } from './agentTools';
@@ -83,7 +83,21 @@ const ctx: ToolContext = {
     versions.push({ pinId, content, instruction });
     return pin.versionCount + versions.filter(v => v.pinId === pinId).length;
   },
+  listLens: () => lensEdits,
+  proposeLens: (target, content, note) => {
+    const msg = messages[target - 1];
+    if (!msg) return null;
+    const noop = msg.content.replace(/\s+/g, ' ').trim() === content.replace(/\s+/g, ' ').trim();
+    if (!noop) staged.push({ target, content, note });
+    return { index: target, name: msg.name, before: msg.content, noop };
+  },
 };
+
+/** Everything the staging tool touched — it must never touch anything else. */
+const staged: { target: number; content: string; note: string }[] = [];
+const lensEdits = [
+  { index: 2, name: 'Mara', original: messages[1]?.content ?? '', content: 'A colder version.', note: 'colder' },
+];
 
 const call = (reply: string) => parseToolCalls(reply);
 const run = (tool: string, args: Record<string, unknown>) => runToolCall({ tool, args }, ctx);
@@ -291,8 +305,128 @@ const fence = (body: string) => '```aura-tool\n' + body + '\n```';
   ok(String(r.content).length < TOOL_OUTPUT_CHARS + 200, 'a huge pin comes back inside the budget');
 }
 
+/* ------------------------------------------------------------------ */
+/* Proposing a Lens edit — the tool that must NOT be able to write      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The assistant can suggest a rewrite of the story. It cannot perform one.
+ *
+ * That is not a rule the panel enforces by remembering to show a dialog — it is
+ * enforced here, by `lens.propose` having no route to the store at all. A Lens
+ * override changes what a passage SAYS, everywhere, silently, and the reader
+ * might not reread it for an hour; "the assistant rewrote message 40 while you
+ * were discussing something else" is not a feature.
+ */
+{
+  const before = staged.length;
+  const r = await run('lens.propose', { message: 2, content: 'A much colder line.', note: 'colder' });
+  ok(r.ok === true, 'a well-formed proposal is accepted');
+  eq(r.staged, true, 'and says it was staged');
+  eq(staged.length, before + 1, 'exactly one thing was queued');
+  ok(/reader/i.test(String(r.note)), 'and the model is told a person decides');
+  ok(/cannot apply it yourself/i.test(String(r.note)),
+    'in words that leave no room for it to claim the change is done');
+}
+
+{
+  // A model that skipped story.read and guessed a number.
+  const r = await run('lens.propose', { message: 999, content: 'text' });
+  ok(!r.ok, 'a message that does not exist is refused');
+  ok(/no message 999/i.test(String(r.error)), 'by number');
+  ok(String(r.error).includes(String(messages.length)), 'and told how many there are');
+
+  const noTarget = await run('lens.propose', { content: 'text' });
+  ok(!noTarget.ok, 'and so is a proposal with nothing to apply it to');
+  ok(/story.search|story.read/i.test(String(noTarget.hint)), 'with a hint on how to find one');
+}
+
+{
+  const r = await run('lens.propose', { message: 2, content: '  ' });
+  ok(!r.ok, 'an empty rewrite is refused');
+  ok(/whole passage/i.test(String(r.hint)), 'and the model is reminded it must send the entire passage');
+}
+
+{
+  // The echo. A model with nothing to add hands the passage straight back, and
+  // applying that would badge a message as edited with nothing to show for it.
+  const before = staged.length;
+  const r = await run('lens.propose', { message: 1, content: messages[0].content });
+  ok(!r.ok, 'a rewrite identical to the passage is refused');
+  eq(staged.length, before, 'and nothing at all is queued');
+  ok(String(r.passage).length > 0, 'the passage comes back so the model can see what it sent');
+}
+
+{
+  const r = await run('lens.list', {});
+  ok(r.ok === true, 'the model can see the Lens edits already in place');
+  eq((r.edits as unknown[]).length, 1, 'all of them');
+}
+
 eq(AGENT_TOOLS.filter(t => t.writes).length, 2,
   'exactly two tools write, and both of them go through a pin version');
+eq(AGENT_TOOLS.filter(t => t.stages).length, 1,
+  'and exactly one only proposes');
+eq(AGENT_TOOLS.filter(t => t.writes && t.stages).length, 0,
+  'with no tool claiming to be both — a staging tool that also writes is the bug this guards');
+ok(!AGENT_TOOLS.some(t => t.name.startsWith('lens.') && t.writes),
+  'nothing under lens.* may write: applying an override is a person\'s decision, not a tool call');
+
+/**
+ * The fourth category, and the line it must not cross.
+ *
+ * `navigates` exists so the guide can move the reader around the app without
+ * the "exactly two tools write" tripwire above losing its meaning. That only
+ * holds while navigation stays navigation: the moment a tool that changes the
+ * view can also change a pin, the categories stop describing risk and the
+ * reader's approval model quietly gets wider.
+ */
+eq(AGENT_TOOLS.filter(t => t.navigates && (t.writes || t.stages)).length, 0,
+  'no tool both navigates and changes the story — the categories describe risk, '
+  + 'and one tool in two of them makes them describe nothing');
+
+eq(AGENT_TOOLS.filter(t => t.navigates).map(t => t.name).sort().join(','),
+  'app.goto,app.setting',
+  'exactly two tools move the reader around, and both are reversible in one action');
+
+/**
+ * The guide's tools are hidden unless the guide is on.
+ *
+ * A tool the model can see is a tool it will eventually reach for. An assistant
+ * helping someone cowrite has no business switching their view, so the
+ * catalogue simply does not mention it.
+ */
+{
+  const plain = renderToolCatalog();
+  const guided = renderToolCatalog(true);
+  for (const name of ['guide.docs', 'guide.where', 'app.goto', 'app.setting']) {
+    ok(!plain.includes(name), `the ordinary catalogue does not offer ${name}`);
+    ok(guided.includes(name), `the guided catalogue does offer ${name}`);
+  }
+  ok(plain.includes('pins.read'), 'while the ordinary tools are there in both');
+  ok(guided.includes('pins.read'), 'and the guide keeps them too');
+  ok(guided.includes('guide.docs before explaining'),
+    'and the guided catalogue tells it to look things up rather than invent them');
+}
+
+/**
+ * What the guide may change, stated as a list rather than trusted to a review.
+ *
+ * Every one of these is cosmetic and instantly visible. The absences are the
+ * point: nothing about the AI endpoint, syncing, or the reader's data. If this
+ * assertion is failing because someone added a key, the question to ask is
+ * whether a reader would notice the change immediately and be able to undo it.
+ */
+eq([...GUIDE_SETTINGS.map(s => s.key)].sort().join(','),
+  'autoStream,contentWidth,dropCaps,fontFamily,fontSize,paragraphSpacing,'
+  + 'playbackSpeed,readingMode,showHiddenMessages,showImages,smartTypography,'
+  + 'theme,uiMode', 'the guide may change exactly these display settings, and nothing else');
+
+for (const banned of ['aiBaseUrl', 'aiApiKey', 'aiModel', 'stSyncEnabled', 'aiAgentMode']) {
+  ok(!GUIDE_SETTINGS.some(s => s.key === banned),
+    `the guide cannot touch ${banned} — it is not cosmetic and not obviously reversible`);
+}
+
 
 console.log(`${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);

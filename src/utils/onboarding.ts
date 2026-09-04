@@ -119,15 +119,15 @@ export const ONBOARDING_STEPS: readonly OnboardingStep[] = [
   },
   {
     id: 'views',
-    title: 'Thirteen ways to read the same story',
+    title: 'Fourteen ways to read the same story',
     body:
-      'The same log can be a book, a chat, a visual novel, a stage — or a game '
-      + 'you sit in front of and press to continue. Three of them show its shape '
-      + 'instead: a screenplay, a comic page, a map of the whole thing. Only the '
-      + 'ones you pin sit on the bar; the rest live under “…”, so the top of the '
-      + 'screen stays yours.',
+      'The same log can be a book, a chat, a visual novel, a stage — or a game you '
+      + 'press to continue. Three show its shape instead: a screenplay, a comic '
+      + 'page, a map. Only what you pin sits on the bar. The chip beside it '
+      + 'narrows the whole app to one kind of work; All puts everything back.',
     views: [
       'storybook', 'chat', 'book', 'script', 'panels', 'atlas', 'stage', 'vn', 'rpg', 'sandbox',
+      'workspace',
       'overview', 'highlights', 'branches',
     ],
   },
@@ -204,6 +204,30 @@ export const ONBOARDING_STEPS: readonly OnboardingStep[] = [
       'Cowrite — rank and fuse alternate beats, summarise, discuss',
     ],
     demo: 'connect',
+  },
+  {
+    /**
+     * The one step about a feature that CHANGES THE STORY.
+     *
+     * It exists because that is a different promise from the rest of the tour.
+     * Everything else the assistant does is additive — a pin, a summary, a
+     * reaction. A Lens edit rewrites what a passage says, and a reader needs to
+     * know before they meet it that nothing lands without their say-so.
+     */
+    id: 'lens',
+    title: 'Rewrites you approve, one at a time',
+    body:
+      'Optional, like the rest. Ask the assistant to change a passage and it does '
+      + 'not — it shows you the rewrite against the original, every moved word '
+      + 'marked, and waits. Accept, and the story reads differently. Reject, and '
+      + 'nothing happened. Your imported text is never overwritten either way.',
+    ai: true,
+    example: [
+      'Pick passages by searching for them, not by counting messages',
+      'Every rewrite arrives as a suggestion, never as a change',
+      'Added words are highlighted, removed words struck through',
+      'Turn the Lens off to read the original again, any time',
+    ],
   },
   {
     id: 'export',

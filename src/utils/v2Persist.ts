@@ -48,6 +48,7 @@ export const PERSISTED_SLICES: readonly { slice: string; perStory: boolean }[] =
   { slice: 'activePinSetByStory', perStory: true },
   { slice: 'zonesByStory', perStory: true },
   { slice: 'tasksByStory', perStory: true },
+  { slice: 'pocketsByStory', perStory: true },
   { slice: 'chatThreadsByStory', perStory: true },
   { slice: 'activeThreadByStory', perStory: true },
   { slice: 'sceneByStory', perStory: true },
@@ -74,8 +75,15 @@ export const PERSISTED_SLICES: readonly { slice: string; perStory: boolean }[] =
   // the READER, not to any one chat — it is the record of the person they play
   // across all of them (see utils/throughline).
   { slice: 'throughlines', perStory: false },
+  { slice: 'crossings', perStory: false },
   { slice: 'codexEnabled', perStory: false },
   { slice: 'codexUseAI', perStory: false },
+  // Library organisation. Global rather than per-story on purpose: the folder
+  // LIST belongs to the library, and the assignments are one small map for the
+  // whole of it — sharding a `Record<storyId, folderId>` per story would write
+  // one record per chat to answer "which folder is this in".
+  { slice: 'folders', perStory: false },
+  { slice: 'folderByStory', perStory: false },
   { slice: 'codexHighlight', perStory: false },
 ];
 

@@ -115,10 +115,18 @@ const eq = (a: unknown, b: unknown, msg: string) => {
     ['utils/sceneDirector.ts', 'budgets per batch and splits its own retries'],
   ]);
 
+  /*
+   * `src/src` is a stale duplicate of this whole tree that nothing imports and
+   * nothing builds. Walking it reported its dead copy of `AIChat.tsx` as an
+   * offender — a failure no edit to the shipping code could ever fix, which is
+   * the worst kind of guard to have: one that is red for a reason unrelated to
+   * what it is guarding. The tree itself should go; until it does, it is not
+   * code this rule is about.
+   */
   const walk = (dir: string): string[] =>
     fs.readdirSync(dir, { withFileTypes: true }).flatMap(e => {
       const full = path.join(dir, e.name);
-      if (e.isDirectory()) return walk(full);
+      if (e.isDirectory()) return e.name === 'src' && dir === root ? [] : walk(full);
       return /\.tsx?$/.test(e.name) && !e.name.includes('.test.') ? [full] : [];
     });
 

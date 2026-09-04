@@ -36,8 +36,19 @@ export interface LibraryFilter {
   query?: string;
   /** Every tag here must be present (AND) — narrowing, not widening. */
   tags?: string[];
-  format?: StoryFormat | 'all';
+  /**
+   * `'synced'` is not a format — it is the stories kept in step with a
+   * SillyTavern chat, which is a RELATIONSHIP rather than a file type. It sits
+   * in the same control because from the reader's side it answers the same
+   * question ("which of these are which?"), and because a synced chat is always
+   * `sillytavern` anyway, so a second filter alongside would only ever be used
+   * one at a time.
+   */
+  format?: StoryFormat | 'all' | 'synced';
 }
+
+/** Is this story kept in step with a SillyTavern chat? */
+export const isSynced = (meta: StoryMeta): boolean => !!meta.stChatId;
 
 /** Tags shown for a story: the reader's if they have set any, else the card's. */
 export const tagsFor = (
@@ -76,7 +87,8 @@ export const filterStories = (
   const format = filter.format ?? 'all';
 
   return metas.filter(m => {
-    if (format !== 'all' && m.format !== format) return false;
+    if (format === 'synced') { if (!isSynced(m)) return false; }
+    else if (format !== 'all' && m.format !== format) return false;
 
     if (wanted.length) {
       const have = new Set(tagsFor(m, userTags).map(t => t.toLowerCase()));

@@ -8,7 +8,8 @@
  * a page never has to clip text.
  */
 
-import { DialogueAnimation, DialogueStyle, MarkupPresets, StoredChannel } from '../types';
+import { DialogueAnimation, DialogueStyle, FontColorMode, MarkupPresets, StoredChannel } from '../types';
+import { hasColorMarks, resolveColor, splitColorRuns, stripColorMarks } from './fontColor';
 import { CharColorBundle, markupClass } from './markupStyles';
 
 /**
@@ -82,13 +83,48 @@ const replaceOutsideTags = (
 };
 
 /**
+ * Colour runs → spans, for the renderers that build HTML strings.
+ *
+ * Run LAST, after every other pass, for the same reason the generated HTML is
+ * parked: painting first would put a `<span>` where the dialogue pass expects a
+ * quote and the emphasis pass expects an asterisk. Running last means a run can
+ * legitimately contain markup — `<font red>she **meant** it</font>` is one
+ * coloured span around an already-bolded word — which is the shape an author
+ * writing colour as notation actually produces.
+ */
+const paintColorHtml = (
+  html: string, fontColor?: { mode: FontColorMode; dark: boolean },
+): string => {
+  if (!fontColor || fontColor.mode === 'ignore' || !hasColorMarks(html)) {
+    // Even with colours off, a mark must never reach the page: the text may
+    // have been processed while they were on.
+    return hasColorMarks(html) ? stripColorMarks(html) : html;
+  }
+  return splitColorRuns(html)
+    .map(run => {
+      const css = run.color ? resolveColor(run.color, fontColor.mode, fontColor.dark) : null;
+      // The colour is an attribute value we generated from a parsed number, not
+      // author text — but quote-escape it anyway rather than trusting that.
+      return css
+        ? `<span class="expr-authored-color" style="color:${css.replace(/"/g, '')}">${run.text}</span>`
+        : run.text;
+    })
+    .join('');
+};
+
+/**
  * Minimal inline markdown → HTML for book prose. The book view is a reading
  * surface: paragraphs, emphasis, dialogue and the odd image plate — tables
  * and the rest stay with the chat/storybook views.
  */
 export const renderInline = (
   md: string,
-  opts?: { images?: boolean; markupCtx?: MarkupRenderContext },
+  opts?: {
+    images?: boolean;
+    markupCtx?: MarkupRenderContext;
+    /** How to paint the colours the author wrote. Omitted = drop them. */
+    fontColor?: { mode: FontColorMode; dark: boolean };
+  },
 ): string => {
   let s = escapeHtml(md);
   // Generated HTML is parked behind private-use sentinels until the end —
@@ -130,7 +166,8 @@ export const renderInline = (
   s = s.replace(/(["“])([^"“”\n]+)(["”])/g,
     (_m, o, body, c) => `<span class="book-say">${o}${body}${c}</span>`);
   s = s.replace(/\n/g, '<br>');
-    return s.replace(/\uE000(\d+)\uE001/g, (_m, i) => guarded[Number(i)]);
+    return paintColorHtml(
+      s.replace(/\uE000(\d+)\uE001/g, (_m, i) => guarded[Number(i)]), opts?.fontColor);
   }
 
   /**
@@ -178,7 +215,8 @@ export const renderInline = (
   s = replaceOutsideTags(s, /(^|[\s({[\u2014\u2013-])'([^'\n]+)'(?=[\s.,!?;:)}\]\u2014\u2013-]|$)/g,
     (_m, pre, body) => `${pre}<span class="mk-aside ${asideCls}">'${body}'</span>`);
   s = s.replace(/\n/g, '<br>');
-  return s.replace(/\uE000(\d+)\uE001/g, (_m, i) => guarded[Number(i)]);
+  return paintColorHtml(
+      s.replace(/\uE000(\d+)\uE001/g, (_m, i) => guarded[Number(i)]), opts?.fontColor);
 };
 
 /** Sentence-boundary split used to break paragraphs too tall for one page. */

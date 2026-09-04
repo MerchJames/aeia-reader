@@ -37,6 +37,8 @@
  * Pure: no store, no React, no DOM, no fetch.
  */
 
+import { messageFromStObject } from './parser';
+
 /* ------------------------------------------------------------------ */
 /* Reading the file without losing it                                  */
 /* ------------------------------------------------------------------ */
@@ -91,20 +93,19 @@ export const parseStFile = (text: string): StLine[] => {
 /**
  * The message lines, in order — the ones an alignment can pair up.
  *
- * Mirrors the import filter in `parser.ts` exactly: a line with no text and no
- * images is not a message there, so it must not be one here either, or every
- * index after the first empty entry is off by one and the whole alignment
- * walks a message behind.
+ * This asks `parser.ts` rather than deciding for itself. The rule is "a line
+ * with text, or with images, is a message"; when the two copies of it disagree
+ * by a single line, every index after that line is off by one and the whole
+ * alignment walks a message behind, reporting edits nobody made.
+ *
+ * They HAD disagreed. The copy that used to live here looked at `extra.image`
+ * and `extra.image_swipes`; the importer also accepts `extra.inline_image` and
+ * `extra.images`. A chat containing a message that was nothing but an inline
+ * image — no text — imported as a message here and did not exist there, and
+ * everything after it in that chat aligned one position out.
  */
 export const messageLines = (lines: readonly StLine[]): StLine[] =>
-  lines.filter(l => l.obj && !l.isHeader && (l.mes.trim().length > 0 || hasImages(l.obj)));
-
-const hasImages = (obj: Record<string, unknown>): boolean => {
-  const extra = obj.extra as Record<string, unknown> | undefined;
-  if (!extra) return false;
-  return typeof extra.image === 'string'
-    || (Array.isArray(extra.image_swipes) && extra.image_swipes.length > 0);
-};
+  lines.filter(l => l.obj && !l.isHeader && messageFromStObject(l.obj, 'probe') !== null);
 
 /* ------------------------------------------------------------------ */
 /* Aligning the two sides                                              */
@@ -283,6 +284,62 @@ export interface MergeResult {
   incoming: number;
 }
 
+/** One message of ours to be written over ST's copy of it. */
+export interface PushEdit {
+  /** Position in the FILE's non-empty lines — `StLine.index`, header included. */
+  index: number;
+  /** What we want it to say. */
+  text: string;
+  /**
+   * What ST said when we looked.
+   *
+   * Dead weight when we are rewriting a file we have in our hands, and the
+   * whole safety story when these edits are sent to a live SillyTavern instead:
+   * the chat may have moved on between our reading it and the reader pressing
+   * the button, and an index alone cannot tell. The receiver compares this
+   * against what it currently holds and refuses anything that no longer
+   * matches, so a stale edit is declined out loud rather than written over
+   * something it was never meant to touch.
+   */
+  was: string;
+}
+
+/**
+ * The edits a push consists of — every place our version should replace theirs.
+ *
+ * Split out of `mergeToFile` so the two ways of pushing cannot drift: writing a
+ * merged `.jsonl` and handing edits to a live SillyTavern extension are the
+ * same decision about the same rows, and the day they disagree is the day one
+ * of them writes something the reader did not approve in the other.
+ */
+export const pushEdits = (rows: readonly SyncRow[]): {
+  edits: PushEdit[];
+  /** Conflicts still awaiting a decision — a push refuses while any remain. */
+  unresolved: number;
+  /** Messages ST has that we should pull in. Not a push, but counted here. */
+  incoming: number;
+} => {
+  const edits: PushEdit[] = [];
+  let unresolved = 0;
+  let incoming = 0;
+
+  for (const row of rows) {
+    if (row.status === 'added-there') { incoming++; continue; }
+    if (row.status === 'conflict' && !row.resolution) { unresolved++; continue; }
+    if (!row.ours || !row.theirs) continue;
+    const take = row.status === 'ours'
+      || (row.status === 'conflict' && row.resolution === 'ours');
+    if (take && row.theirs.mes !== row.ours.current) {
+      edits.push({ index: row.theirs.index, text: row.ours.current, was: row.theirs.mes });
+    }
+    if (row.status === 'theirs' || (row.status === 'conflict' && row.resolution === 'theirs')) {
+      incoming++;
+    }
+  }
+
+  return { edits, unresolved, incoming };
+};
+
 /**
  * Rebuild the file with our edits in it.
  *
@@ -295,23 +352,8 @@ export const mergeToFile = (
   lines: readonly StLine[],
   rows: readonly SyncRow[],
 ): MergeResult => {
-  const patch = new Map<number, string>();
-  let unresolved = 0;
-  let incoming = 0;
-
-  for (const row of rows) {
-    if (row.status === 'added-there') { incoming++; continue; }
-    if (row.status === 'conflict' && !row.resolution) { unresolved++; continue; }
-    if (!row.ours || !row.theirs) continue;
-    const take = row.status === 'ours'
-      || (row.status === 'conflict' && row.resolution === 'ours');
-    if (take && row.theirs.mes !== row.ours.current) {
-      patch.set(row.theirs.index, row.ours.current);
-    }
-    if (row.status === 'theirs' || (row.status === 'conflict' && row.resolution === 'theirs')) {
-      incoming++;
-    }
-  }
+  const { edits, unresolved, incoming } = pushEdits(rows);
+  const patch = new Map(edits.map(e => [e.index, e.text]));
 
   const out = lines.map(line => {
     const next = patch.get(line.index);

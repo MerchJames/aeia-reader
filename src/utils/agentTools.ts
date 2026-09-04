@@ -242,6 +242,44 @@ export interface ToolContext {
   createPin: (title: string, content: string, format: 'html' | 'markdown') => string;
   /** Returns the new 1-based version number, or null when the pin is gone. */
   addPinVersion: (pinId: string, content: string, instruction: string) => number | null;
+  /** Lens edits already in place, so the model can see what it is building on. */
+  listLens: () => LensRow[];
+  /**
+   * Put a rewrite in front of the reader. Explicitly NOT a write — see
+   * `lensProposal.ts`. Returns null when the message does not exist.
+   */
+  proposeLens: (target: number, content: string, note: string) => LensStaged | null;
+
+  /* ---- Guide-only. Absent unless the AI Tour Guide is switched on, and the
+   * tools that use them say so rather than pretending to work. ---- */
+
+  /** Where the reader is: screen, view, preset, story, passage. */
+  readerPlace?: () => Record<string, unknown>;
+  /** Move them. Returns a ToolResult so a refusal can explain itself. */
+  goTo?: (to: { view: string; uiMode: string; panel: string }) => ToolResult;
+  /** Change one allowlisted display setting. */
+  setSetting?: (key: string, value: unknown) => ToolResult;
+}
+
+/** A Lens override the reader already has in place. */
+export interface LensRow {
+  index: number;
+  name: string;
+  /** The story's own text. */
+  original: string;
+  /** What the Lens shows instead. */
+  content: string;
+  note?: string;
+}
+
+/** What came of staging a proposal — the model reads this and reports it. */
+export interface LensStaged {
+  index: number;
+  name: string;
+  /** The passage as it stands, so a model that guessed wrong can tell. */
+  before: string;
+  /** True when the rewrite is indistinguishable from the passage it replaces. */
+  noop: boolean;
 }
 
 /* ------------------------------------------------------------------ */
@@ -256,8 +294,32 @@ export interface AgentTool {
   params: string;
   /** True for the two that change something — rendered apart in the catalogue. */
   writes?: boolean;
+  /**
+   * True for a tool that only PUTS SOMETHING IN FRONT OF THE READER.
+   *
+   * Deliberately not `writes`. A staging tool has no path to the store at all;
+   * the most it can do is add a row to a review queue that a person then
+   * approves or throws away. Keeping the flags separate is what lets the
+   * "exactly two tools write" tripwire stay true and keep meaning something as
+   * the tool surface grows.
+   */
+  stages?: boolean;
+  /**
+   * True for a tool that changes WHAT IS ON SCREEN, and nothing else.
+   *
+   * A fourth category rather than a second kind of write, because the two are
+   * not comparable risks. A write changes the reader's story; this changes
+   * which view they are looking at, or a cosmetic setting they can see change
+   * and change back. Folding these into `writes` would break the "exactly two
+   * tools write" tripwire and, worse, would make it stop meaning anything.
+   *
+   * Everything reachable this way is reversible by the reader in one action.
+   */
+  navigates?: boolean;
   run: (args: Record<string, unknown>, ctx: ToolContext) => ToolResult | Promise<ToolResult>;
 }
+
+import { docById, docIndex, searchDocs } from './guideDocs';
 
 const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
 const num = (v: unknown): number | null => {
@@ -303,7 +365,125 @@ const findZone = (ctx: ToolContext, arg: unknown): ZoneRow | null => {
     ?? null;
 };
 
+
+/**
+ * Settings the guide may change on the reader's behalf.
+ *
+ * An allowlist, not a denylist, and short on purpose. Everything here is
+ * cosmetic, instantly visible, and undone by changing it back — a reader who
+ * says "make the text bigger" gets bigger text and can see it happen.
+ *
+ * What is deliberately absent is more informative than what is present: no AI
+ * endpoint or key, no sync toggles, nothing that spends money, nothing about
+ * storage, and nothing whose effect the reader would not immediately notice. A
+ * guide that can quietly repoint the assistant at another endpoint is not a
+ * guide. When the answer involves one of those, the guide opens the settings
+ * panel and lets the reader do it.
+ */
+export const GUIDE_SETTINGS: readonly {
+  key: string; label: string; values: string; kind: 'enum' | 'number' | 'boolean';
+}[] = [
+  { key: 'readingMode', label: 'How much the app performs the text', kind: 'enum', values: 'plain | lit | cinema | performance' },
+  { key: 'uiMode', label: 'Workspace preset', kind: 'enum', values: 'read | cowrite | scenes | all' },
+  { key: 'theme', label: 'Colour theme', kind: 'enum', values: 'any theme name, e.g. dark, sepia, book, terminal' },
+  { key: 'fontSize', label: 'Text size in pixels', kind: 'number', values: '12–32' },
+  { key: 'fontFamily', label: 'Typeface', kind: 'enum', values: 'theme | sans | serif | mono | handwriting | typewriter | dyslexic' },
+  { key: 'contentWidth', label: 'Reading column width', kind: 'number', values: '480–1400' },
+  { key: 'paragraphSpacing', label: 'Space between paragraphs', kind: 'number', values: '0–3' },
+  { key: 'playbackSpeed', label: 'Reveal speed', kind: 'number', values: '0.25–4' },
+  { key: 'autoStream', label: 'Reveal text as it is read', kind: 'boolean', values: 'true | false' },
+  { key: 'showHiddenMessages', label: 'Show narrator and hidden entries', kind: 'boolean', values: 'true | false' },
+  { key: 'showImages', label: 'Show images from the chat', kind: 'boolean', values: 'true | false' },
+  { key: 'dropCaps', label: 'Large opening letters', kind: 'boolean', values: 'true | false' },
+  { key: 'smartTypography', label: 'Curly quotes and dashes', kind: 'boolean', values: 'true | false' },
+];
+
+const GUIDE_SETTING_KEYS = new Set(GUIDE_SETTINGS.map(s => s.key));
+
 export const AGENT_TOOLS: readonly AgentTool[] = [
+  {
+    name: 'guide.docs',
+    description:
+      'Look up how this app works. Search in the READER\'S words, not the app\'s — '
+      + '"read aloud" and "voice" both find the same answer. Use this before '
+      + 'explaining any feature; never describe a button from memory.',
+    params: 'query: string, id?: string (fetch one entry outright)',
+    run: (args) => {
+      const id = str(args.id);
+      if (id) {
+        const doc = docById(id);
+        return doc
+          ? { ok: true, doc }
+          : { ok: false, error: `No entry called ${JSON.stringify(id)}.`, index: docIndex() };
+      }
+      const query = str(args.query);
+      if (!query) return { ok: false, error: 'Give a query, or an id.', index: docIndex() };
+      const hits = searchDocs(query);
+      return hits.length
+        ? { ok: true, hits }
+        : {
+          ok: false,
+          error: `Nothing in the manual matches ${JSON.stringify(query)}.`,
+          hint: 'Say so plainly rather than guessing. These are every subject covered:',
+          index: docIndex(),
+        };
+    },
+  },
+  {
+    name: 'guide.where',
+    description:
+      'Where the reader is right now: screen, view, workspace preset, the story '
+      + 'they have open and the passage they are on. Call this first when they say '
+      + '"this", "here" or "the current one".',
+    params: '',
+    run: (_args, ctx) => (ctx.readerPlace
+      ? { ok: true, ...ctx.readerPlace() }
+      : { ok: false, error: 'The guide is not switched on for this session.' }),
+  },
+  {
+    name: 'app.goto',
+    description:
+      'Take the reader somewhere: a view, a workspace preset, or a panel. Say what '
+      + 'you are about to do first — a screen that changes without warning is '
+      + 'disorienting. Nothing here alters the story.',
+    params: 'view?: string, uiMode?: read|cowrite|scenes|all, panel?: string',
+    navigates: true,
+    run: (args, ctx) => {
+      if (!ctx.goTo) return { ok: false, error: 'The guide is not switched on for this session.' };
+      const view = str(args.view).toLowerCase();
+      const uiMode = str(args.uiMode).toLowerCase();
+      const panel = str(args.panel).toLowerCase();
+      if (!view && !uiMode && !panel) {
+        return { ok: false, error: 'Name a view, a uiMode, or a panel.' };
+      }
+      return ctx.goTo({ view, uiMode, panel });
+    },
+  },
+  {
+    name: 'app.setting',
+    description:
+      'Change one of the reader\'s display settings. Only the cosmetic ones are '
+      + 'reachable; anything about the AI endpoint, syncing or their data is not, '
+      + 'and for those you should open the settings panel instead. Call with no '
+      + 'arguments to see what is available.',
+    params: 'key: string, value: string | number | boolean',
+    navigates: true,
+    run: (args, ctx) => {
+      if (!ctx.setSetting) return { ok: false, error: 'The guide is not switched on for this session.' };
+      const key = str(args.key);
+      if (!key) return { ok: true, settings: GUIDE_SETTINGS };
+      if (!GUIDE_SETTING_KEYS.has(key)) {
+        return {
+          ok: false,
+          error: `“${key}” is not a setting the guide may change.`,
+          hint: 'Open the settings panel with app.goto instead, and tell the reader where to look.',
+          settings: GUIDE_SETTINGS,
+        };
+      }
+      if (args.value === undefined) return { ok: false, error: 'Give a value.', settings: GUIDE_SETTINGS };
+      return ctx.setSetting(key, args.value);
+    },
+  },
   {
     name: 'pins.list',
     description: 'Every pin beside this story: id, title, size and how many versions it has.',
@@ -503,6 +683,85 @@ export const AGENT_TOOLS: readonly AgentTool[] = [
       };
     },
   },
+  {
+    name: 'lens.list',
+    description:
+      'Lens edits the reader already has on this story — the passages that show '
+      + 'rewritten text instead of the original.',
+    params: '',
+    run: (_args, ctx) => {
+      const rows = ctx.listLens();
+      if (!rows.length) {
+        return { ok: true, edits: [], note: 'This story has no Lens edits yet.' };
+      }
+      return {
+        ok: true,
+        edits: rows.map(r => ({
+          message: r.index,
+          name: r.name,
+          note: r.note,
+          shows: truncateMiddle(r.content, 600),
+          instead_of: truncateMiddle(r.original, 300),
+        })),
+      };
+    },
+  },
+  {
+    name: 'lens.propose',
+    description:
+      'Offer the reader a rewrite of one message. This does NOT change the story — '
+      + 'it shows them the change and they accept or reject it. Read the message first.',
+    params:
+      '"message": the reading number, "content": the complete rewritten passage, '
+      + '"note": what you changed and why (one line)',
+    stages: true,
+    run: (args, ctx) => {
+      const target = num(args.message ?? args.index ?? args.id ?? args.n);
+      if (target === null) {
+        return {
+          ok: false,
+          error: 'lens.propose needs "message" — the reading number of the message to rewrite.',
+          hint: 'Use story.search or story.read to find it first.',
+        };
+      }
+      if (target < 1 || target > ctx.messageCount) {
+        return {
+          ok: false,
+          error: `There is no message ${target}. This story has ${ctx.messageCount}.`,
+        };
+      }
+      const content = str(args.content ?? args.text ?? args.rewrite ?? args.body);
+      if (!content) {
+        return {
+          ok: false,
+          error: 'lens.propose needs "content" — the complete rewritten passage.',
+          hint: 'Send the whole passage, not a diff or a fragment. It replaces the message.',
+        };
+      }
+      const note = str(args.note ?? args.instruction ?? args.why);
+      const staged = ctx.proposeLens(target, content, note);
+      if (!staged) return { ok: false, error: `Message ${target} could not be read.` };
+      if (staged.noop) {
+        return {
+          ok: false,
+          error: 'That rewrite is the same as the passage it would replace, so nothing was staged.',
+          hint: 'Either make the change the reader asked for, or say that the passage already does it.',
+          passage: truncateMiddle(staged.before, 1200),
+        };
+      }
+      return {
+        ok: true,
+        staged: true,
+        message: staged.index,
+        name: staged.name,
+        chars: content.length,
+        note:
+          'Waiting for the reader. They can see your rewrite next to the original and will '
+          + 'accept or reject it — you cannot apply it yourself. Tell them what you changed, '
+          + 'briefly, and stop.',
+      };
+    },
+  },
 ];
 
 export const toolByName = (name: string): AgentTool | undefined =>
@@ -553,11 +812,27 @@ export const renderToolResult = (step: AgentStep): string =>
  * directive rather than a schema. Every line here was earned by a way the
  * protocol can be misunderstood.
  */
-export const renderToolCatalog = (): string => {
+/**
+ * The catalogue the model is given.
+ *
+ * `guiding` adds the four tools that move the reader around the app. They are
+ * off by default and listed only when the AI Tour Guide is switched on: an
+ * assistant that is helping cowrite has no business changing which view the
+ * reader is looking at, and a tool it can see is a tool it will eventually
+ * reach for.
+ */
+/** The four tools that exist only for the guide. */
+const GUIDE_TOOL_NAMES = new Set(['guide.docs', 'guide.where', 'app.goto', 'app.setting']);
+export const isGuideTool = (t: AgentTool): boolean => GUIDE_TOOL_NAMES.has(t.name);
+
+export const renderToolCatalog = (guiding = false): string => {
   const line = (t: AgentTool) =>
     `  ${t.name}${t.params ? ` — ${t.params}` : ''}\n      ${t.description}`;
-  const reads = AGENT_TOOLS.filter(t => !t.writes).map(line).join('\n');
-  const writes = AGENT_TOOLS.filter(t => t.writes).map(line).join('\n');
+  const offered = AGENT_TOOLS.filter(t => guiding || !isGuideTool(t));
+  const reads = offered.filter(t => !t.writes && !t.stages && !t.navigates).map(line).join('\n');
+  const moves = offered.filter(t => t.navigates).map(line).join('\n');
+  const writes = offered.filter(t => t.writes).map(line).join('\n');
+  const stages = offered.filter(t => t.stages).map(line).join('\n');
 
   return [
     '--- TOOLS ---',
@@ -577,11 +852,31 @@ export const renderToolCatalog = (): string => {
     'CHANGING A PIN:',
     writes,
     '',
+    'SUGGESTING A CHANGE TO THE STORY ITSELF:',
+    stages,
+    ...(guiding ? [
+      '',
+      'SHOWING THE READER AROUND:',
+      moves,
+    ] : []),
+    '',
     'RULES:',
     '- One block per reply. Do not chain calls you have not seen the result of.',
     '- Read a pin before you rewrite it. "content" replaces the pin entirely.',
     '- A write always makes a NEW VERSION; nothing is ever overwritten, so you do',
     '  not need permission to save. Say what you changed afterwards.',
+    '- Read a message before you propose rewriting it, and send the WHOLE passage.',
+    '- A proposed rewrite is not applied. The reader sees it beside the original and',
+    '  decides. Never say you have changed the story — say you have suggested it.',
+    ...(guiding ? [
+      '- Look the answer up with guide.docs before explaining any feature. If it is',
+      '  not in the manual, say you are not sure rather than inventing a button.',
+      '- Say where you are taking them BEFORE calling app.goto. A screen that changes',
+      '  without warning is disorienting.',
+      '- You may change the display settings on the allowlist. For anything else —',
+      '  the AI endpoint, syncing, their data — open the panel and tell them where to',
+      '  look. Do not ask for a setting you cannot reach.',
+    ] : []),
     '- When you have the answer, just answer. No block means you are done.',
   ].join('\n');
 };

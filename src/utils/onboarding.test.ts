@@ -12,8 +12,30 @@ import { VIEW_LABEL, VIEW_ORDER } from './viewBar';
 let pass = 0, fail = 0;
 const ok = (cond: boolean, msg: string) => { if (cond) { pass++; } else { fail++; console.error('✗', msg); } };
 
-ok(ONBOARDING_STEPS.length >= 4 && ONBOARDING_STEPS.length <= 14,
+// A ceiling, not a target — a tour nobody finishes teaches nothing, and every
+// step added is a step someone reads or skips. Raised deliberately, three times:
+// to 14 when the tour first covered nine views, to 16 for reading-with-someone,
+// visitors and export, and to 17 for the Lens.
+//
+// The Lens earned an appendage rather than a replacement because it is the only
+// thing in the app that CHANGES THE STORY. Every other AI feature is additive —
+// a pin, a summary, a reaction you can ignore — and meeting a rewrite for the
+// first time without having been told it needs approving is the one surprise
+// the tour exists to prevent. Workspaces, by contrast, were folded into the
+// views step rather than appended: they are the same subject, what is on screen.
+//
+// Anything past this should replace a step, not append one.
+ok(ONBOARDING_STEPS.length >= 4 && ONBOARDING_STEPS.length <= 17,
   `the tour is short enough to finish (${ONBOARDING_STEPS.length} steps)`);
+
+// The three heaviest features to explain in prose are the three that must SHOW
+// rather than tell: what a companion's line looks like when it lands, what a
+// visitor's brief actually is, and that an exported file really does stand
+// alone. Each was a paragraph nobody could picture before it had a demo.
+for (const id of ['company', 'visitors', 'export']) {
+  const step = ONBOARDING_STEPS.find(s => s.id === id);
+  ok(!!step?.demo, `${id}: shows it rather than describing it`);
+}
 // A tour that only describes is a wall of text. Most steps should SHOW.
 const shown = ONBOARDING_STEPS.filter(s => s.demo || s.example || s.views).length;
 ok(shown >= ONBOARDING_STEPS.length - 2, `nearly every step demonstrates something (${shown}/${ONBOARDING_STEPS.length})`);
