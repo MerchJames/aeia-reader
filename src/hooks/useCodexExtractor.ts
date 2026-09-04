@@ -67,7 +67,11 @@ export const useCodexExtractor = () => {
     const v2 = useAuraV2Store.getState();
     // Already seeded (any card-sourced entry present) — don't re-merge, it
     // would inflate mention counts on every open.
-    if ((v2.codexByStory[storyId] ?? []).some(e => e.source === 'card')) return;
+    // Any authored entry means this card has already been seeded. Checking
+    // only for 'card' missed a card whose contribution was entirely its
+    // lorebook, which re-seeded on every open and inflated its mention counts.
+    if ((v2.codexByStory[storyId] ?? [])
+      .some(e => e.source === 'card' || e.source === 'lorebook')) return;
     const seeded = cardToEntities(card);
     if (seeded.length) v2.upsertEntities(storyId, seeded);
   }, [codexEnabled, storyId, scanned === 0]);

@@ -1,3 +1,10 @@
+/**
+ * Note the one import: `DockRect` is defined in `utils/panelDock.ts` alongside
+ * the clamping rules that give it meaning, and re-used here rather than
+ * redeclared. `panelDock` imports nothing at all, so there is no cycle.
+ */
+import type { DockRect } from './utils/panelDock';
+
 export type Role = 'user' | 'ai';
 
 /** Which image backend the reader points at — see `services/image/`. */
@@ -42,8 +49,20 @@ export interface Message {
   images?: string[];
   /** Alternate versions of this message (SillyTavern swipes / card greetings). */
   swipes?: string[];
-  /** SillyTavern narrator / `/hide`-den entry — shown, but visually marked. */
+  /** SillyTavern narrator / `/hide`-den entry — marked, and shown only when
+   *  the reader asks for it (`showHiddenMessages`). */
   hidden?: boolean;
+  /**
+   * The model's chain of thought for this passage, as the chat file recorded it.
+   *
+   * SillyTavern stores it out of band in `extra.reasoning`; other front-ends
+   * leave it inline as a `<think>` block in the message text. Either way it is
+   * NOT prose — it is the model talking to itself — so it is lifted out of
+   * `content` at import and kept here, to be shown in its own collapsible
+   * section or not at all. Never streamed, never read aloud, never sent as
+   * story context.
+   */
+  reasoning?: string;
   /** Force a new chain (page) to begin at this message — used for document chapters. */
   startsChain?: boolean;
 }
@@ -143,6 +162,16 @@ export interface StoryMeta {
   progressPct?: number;
   /** Card tags shown in the library (from an attached character card). */
   tags?: string[];
+  /**
+   * The SillyTavern chat this story is kept in step with, and when it last was.
+   *
+   * Set the first time a sync succeeds, and the reason the library can show
+   * synced chats as their own group: "imported from a .jsonl once" and "kept in
+   * step with a chat that is still being written" are different relationships,
+   * and `format: 'sillytavern'` cannot tell them apart.
+   */
+  stChatId?: string;
+  stSyncedAt?: number;
 }
 
 export interface Story extends StoryMeta {
@@ -164,6 +193,9 @@ export type ViewMode =
   // v3: three views that present the story's SHAPE rather than its words —
   // a screenplay, a comic page, and a map of the whole thing.
   | 'script' | 'panels' | 'atlas'
+  // The cowriting view: the text arranged how you like it, with pins, sets,
+  // sheets and branchlines on a rail beside it.
+  | 'workspace'
   | 'overview' | 'highlights' | 'branches';
 /**
  * Top-level workspace preset — gates which tools/views are visible so the app
@@ -234,6 +266,23 @@ export type CharacterChannelColors = Record<string, Partial<Record<ColorableChan
  */
 export type MagnifierStyle = 'light' | 'glass' | 'box' | 'ruler' | 'iris';
 export type OocHandling = 'show' | 'dim' | 'hide';
+
+/**
+ * What to do with a colour the model wrote into the text (`<font color=…>`).
+ *
+ * The reader's own styling normally wins — that is the whole point of the
+ * markup channels — so the tag used to be dropped and the words kept. But an
+ * author who colour-codes deliberately (a status readout, one speaker per
+ * colour, a system voice) loses the distinction entirely that way, which is
+ * what "it throws some stuff off" means.
+ *
+ *   'ignore'   — drop the tag, keep the words. What this app did before.
+ *   'original' — render the colour exactly as written.
+ *   'adapt'    — keep the HUE the author chose but re-light it for the theme in
+ *                use, so a `#111` on a dark page is still readable and a pale
+ *                pastel on a light one still has contrast.
+ */
+export type FontColorMode = 'ignore' | 'original' | 'adapt';
 
 export type RuleTarget = 'all' | 'ai' | 'user';
 
@@ -706,10 +755,26 @@ export interface Pin {
   content: string;
   /** Message the visual was captured from, when known. */
   messageId?: string;
-  /** Version history — absent until the pin is first updated (then length ≥ 2). */
+  /**
+   * Version history — absent until the pin is first updated (then length ≥ 2).
+   *
+   * Once a pin has pages, this mirrors the ACTIVE page's history rather than
+   * holding one of its own; `utils/pinBook` owns keeping the two in step.
+   */
   versions?: PinVersion[];
   /** Which version `content` currently reflects. */
   activeVersion?: number;
+  /**
+   * The pin as a small book — a journal, a run of summaries, a set of charts.
+   *
+   * Absent for every pin that is a single note, which is nearly all of them,
+   * and appears only when the reader adds a second page. A pin with no `pages`
+   * is a book of one whose page lives in the fields above; see `utils/pinBook`,
+   * which is the only thing that should read this array directly.
+   */
+  pages?: import('./utils/pinBook').PinPage[];
+  /** Which page is showing. `content` always mirrors it. */
+  activePage?: number;
   inContext: boolean;
   docked: boolean;
   collapsed?: boolean;
@@ -823,6 +888,100 @@ export interface AppConfig {
    *  broken quote/emphasis markup (lands as an undoable Lens override). */
   aiRepairFormatting: boolean;
   hideMetadata: boolean;
+  /**
+   * Show the model's chain of thought, where the chat file kept one.
+   *
+   * Off by default: it is the machinery behind the prose, and a reader opening
+   * a story wants the story. On, it renders as its own collapsed section above
+   * the passage — the shape SillyTavern shows it in — never as prose.
+   */
+  showReasoning: boolean;
+  /**
+   * Show entries SillyTavern marked `is_system` / `/hide`.
+   *
+   * Off by default at the reader's request. Note this flag also covers narrator
+   * lines in some chats, so a story that suddenly reads thin is a reason to
+   * turn it on rather than a bug.
+   */
+  showHiddenMessages: boolean;
+  /** What to do with `<font color=…>` the model wrote — see `FontColorMode`. */
+  fontColorMode: FontColorMode;
+  /**
+   * Is the SillyTavern sync switched on?
+   *
+   * Off by default and gated both ways: with it off, the Sync panel cannot be
+   * opened, the library shows no sync affordances, and `useStBridge` attaches
+   * no message listener at all — so a reader who does not use SillyTavern is
+   * not merely spared the buttons, they are running none of the code that
+   * would listen for another window talking to this one.
+   */
+  stSyncEnabled: boolean;
+  /**
+   * Aeia standing in as SillyTavern's model endpoint.
+   *
+   * Separate from `stSyncEnabled` and deliberately so — they are opposite
+   * shapes. The sync is a thing the reader opens, uses, and closes; this is a
+   * thing that has to be up for a whole evening of writing, because
+   * SillyTavern calls it every time they press send. One switch for both would
+   * mean closing the sync panel killed the endpoint mid-story.
+   *
+   * Desktop only: SillyTavern's SERVER makes this call, so there is no CORS
+   * arrangement that would let a browser tab answer it. A page cannot listen.
+   */
+  proxyEnabled: boolean;
+  /** The backend Aeia passes the story to. Falls back to the assistant's. */
+  proxyBaseUrl: string;
+  proxyApiKey: string;
+  /** Override the model SillyTavern named. Empty means use theirs. */
+  proxyModel: string;
+  /**
+   * Which version is the message, and which is the swipe.
+   *
+   * `processed` — nothing appears until the pass has run, and the result is the
+   * message. `original` — the reply streams in exactly as fast as it does
+   * today, and the processed version arrives as swipe 2.
+   *
+   * A real trade rather than a preference: post-processing needs the whole
+   * reply, and a token that has been sent cannot be taken back.
+   */
+  proxyPrimary: 'processed' | 'original';
+  /** Whose pins, sheets and zones the pipelines use. Empty = the open story. */
+  proxyStoryId: string;
+  /** Which of that material goes in, and where. Ids, not categories. */
+  proxyMaterial: import('./utils/proxyMaterial').MaterialPick;
+  /** Characters of injected material allowed per prompt. */
+  proxyBudget: number;
+  /** Context messages containing any of these lines are dropped. */
+  proxyDrop: string;
+  /** Move the reader's turn to the end of the prompt, after the material. */
+  proxyInstructionLast: boolean;
+  /**
+   * What the reply goes through, in order.
+   *
+   * A list rather than switches because the ORDER is the reader's to set: a
+   * contradiction check quotes a sentence out of the text it was handed, and if
+   * formatting has moved that sentence since, the repair lands on nothing.
+   */
+  proxyReply: import('./utils/replyPipeline').ReplyStep[];
+  /**
+   * Is the assistant's CONTEXT block expanded?
+   *
+   * Open by default, because which passages the model is about to be shown is
+   * the single most consequential thing on that panel and hiding it by default
+   * is how a reader ends up asking a question of the wrong scope. Collapsible
+   * because once it is set, it is a header taking up the top fifth of a narrow
+   * panel.
+   */
+  aiContextOpen: boolean;
+  /**
+   * Is the assistant panel pinned where it is?
+   *
+   * The header IS the drag handle and the edges ARE the resize grips, so a
+   * panel that is where you want it is also a panel you keep nudging by
+   * accident on the way to a button. Locking refuses the gesture without moving
+   * anything or hiding a control.
+   */
+  aiDockLocked: boolean;
   /** Show images embedded in messages / attached to them. */
   showImages: boolean;
   /** In autofocus, keep the streaming line auto-zoomed and centered. */
@@ -1009,6 +1168,29 @@ export interface AppConfig {
    * hands turns them on.
    */
   aiAgentMode: boolean;
+  /**
+   * The AI Tour Guide: the assistant may show the reader around the app.
+   *
+   * Separate from `aiAgentMode` because it is a different kind of permission.
+   * Agent mode lets the assistant work on the STORY; this lets it work on the
+   * APP — look things up in the manual, change which view is on screen, adjust
+   * a display setting. Someone may well want one and not the other, and
+   * bundling them would mean a reader who wants help finding a button has to
+   * also hand over their pins.
+   *
+   * Off by default, like every AI feature here.
+   */
+  aiTourGuide: boolean;
+  /**
+   * Where the assistant panel sits, once the reader has moved it.
+   *
+   * `null` means the bottom-right corner it has always lived in. Stored as
+   * plain numbers rather than a preset name: the reader can put it anywhere,
+   * and a preset would quietly discard a position that took three drags to get
+   * right. Re-clamped against the CURRENT window every time it is read — see
+   * `panelDock.ts` for why that is not optional.
+   */
+  aiDock: DockRect | null;
 }
 
 export interface AppState extends AppConfig {
@@ -1072,6 +1254,15 @@ export interface AppState extends AppConfig {
   swipeSelections: Record<string, number>;
   /** AI assistant modal open (transient). */
   aiOpen: boolean;
+  /**
+   * The assistant is being rendered INSIDE a view rather than floating over the
+   * app (transient — it belongs to whatever is on screen, not to the reader).
+   *
+   * There is one assistant with one conversation, so it is mounted in exactly
+   * one place: a view that hosts it says so here, and `App` stands the floating
+   * copy down. Two mounts would be two chats writing into the same thread.
+   */
+  aiEmbedded: boolean;
   /** Message id the reader asked to Lens-edit; opens the AI panel in edit mode (transient). */
   lensEditTarget: string | null;
   /**
@@ -1085,15 +1276,51 @@ export interface AppState extends AppConfig {
 
   // Library actions
   initLibrary: () => Promise<void>;
-  /** Import stories, optionally with companion character cards to auto-map. */
+  /**
+   * Import stories, optionally with companion character cards to auto-map.
+   *
+   * `attached` names the files that did NOT become stories because they were
+   * already part of one — absorbed as an earlier checkpoint, or added as a
+   * branch. Counting those as failures is wrong (nothing was lost) and counting
+   * them as imports is a lie, so the caller is told which story swallowed each
+   * one. The sync needs it: a chat absorbed into an existing story has to be
+   * stamped onto THAT story, or the next sync offers to import it again.
+   */
   importFiles: (files: File[], cardFiles?: File[]) =>
-    Promise<{ imported: number; errors: string[]; notes: string[] }>;
+    Promise<{
+      imported: number; errors: string[]; notes: string[];
+      /** Which file produced which new story. Positions cannot be relied on:
+       *  branch files of one chat collapse into a single story. */
+      created: { file: string; storyId: string }[];
+      attached: { file: string; storyId: string }[];
+    }>;
   /** Read a different timeline of the open story (null = the trunk). */
   setActiveTimeline: (timelineId: string | null) => void;
   /** Detach an attached branch from the open story (non-destructive to trunk). */
   removeTimeline: (timelineId: string) => void;
   /** Copy a timeline out into its own standalone library story. */
   snipTimelineToStory: (timelineId: string) => Promise<void>;
+  /**
+   * Replace the open story's trunk messages with a synced list.
+   *
+   * Deliberately narrow: the list comes from `planPull`, which never invents
+   * or deletes a message and reuses existing ids wherever both sides have the
+   * same message, so everything keyed by message id survives. Refuses while a
+   * branch is being read — the sync compares against the trunk, and writing
+   * the trunk out from under a branch view is a change the reader cannot see.
+   */
+  applyStPull: (messages: Message[]) => Promise<void>;
+  /** Record that this story is kept in step with a SillyTavern chat. */
+  markStSynced: (storyId: string, chatId: string) => Promise<void>;
+  /**
+   * Open a story and go straight to its sync panel (transient).
+   *
+   * The library's per-story sync button is a request rather than a direct
+   * call, because opening a story is async and the panel lives in `App` — the
+   * flag is how the two meet without the library reaching into the reader.
+   */
+  syncRequestId: string | null;
+  requestStSync: (storyId: string) => void;
   openStory: (id: string) => Promise<void>;
   closeStory: () => void;
   deleteStoryById: (id: string) => Promise<void>;
@@ -1163,6 +1390,14 @@ export interface AppState extends AppConfig {
   setScenePerformance: (on: boolean) => void;
   setAiRepairFormatting: (on: boolean) => void;
   setHideMetadata: (hide: boolean) => void;
+  setShowReasoning: (on: boolean) => void;
+  setShowHiddenMessages: (on: boolean) => void;
+  setFontColorMode: (mode: FontColorMode) => void;
+  setStSyncEnabled: (on: boolean) => void;
+  setProxyEnabled: (on: boolean) => void;
+  setAiContextOpen: (open: boolean) => void;
+  setAiDockLocked: (locked: boolean) => void;
+  setAiEmbedded: (on: boolean) => void;
   setAutoStream: (autoStream: boolean) => void;
   setAutoFormat: (autoFormat: boolean) => void;
   setStyleQuotes: (styleQuotes: boolean) => void;
@@ -1271,6 +1506,8 @@ export interface AppState extends AppConfig {
   setAiApiKey: (key: string) => void;
   setAiModel: (model: string) => void;
   setAiAgentMode: (on: boolean) => void;
+  setAiTourGuide: (on: boolean) => void;
+  setAiDock: (rect: DockRect | null) => void;
   setAiOpen: (open: boolean) => void;
   /** Request a Lens edit for a message (opens the AI panel in edit mode); null clears it. */
   setLensEditTarget: (messageId: string | null) => void;

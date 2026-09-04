@@ -15,6 +15,9 @@ import {
   VIEW_GROUP, VIEW_ORDER, isReadingView, moveView, resolveVisibleViews, toggleView,
 } from './utils/viewBar';
 import { MARKUP_DEFAULTS, sanitizeMarkupPresets } from './utils/markupStyles';
+import { alertEvictable, alertSaveFailed } from './utils/alerts';
+import { askForPersistence } from './utils/storageHealth';
+import { reconcileSteps } from './utils/replyPipeline';
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -61,6 +64,25 @@ const collectStars = (chains: Chain[]): Record<string, ChainStarSettings> => {
 };
 
 /** Messages up to and including position [ci][mi], respecting the layout. */
+/**
+ * Is this passage one the reader has asked not to see?
+ *
+ * `hidden` marks SillyTavern's `is_system` / `/hide` entries. They stay in the
+ * chains either way — filtering them out at BUILD time would be a data loss
+ * bug, because `buildStorySnapshot` writes the chains back over the story's
+ * messages on close, and the hidden ones would never come back. So they are
+ * skipped for PLAYBACK instead: not shown, not streamed, not stepped onto.
+ *
+ * Read from the store rather than threaded through thirteen call sites. Safe
+ * because nothing here runs at module init — the first call is a reader
+ * opening a story, long after `useAppStore` exists.
+ */
+const isSkipped = (msg: Message | undefined): boolean =>
+  !!msg?.hidden && !useAppStore.getState().showHiddenMessages;
+
+const shown = (messages: Message[]): Message[] =>
+  useAppStore.getState().showHiddenMessages ? messages : messages.filter(m => !m.hidden);
+
 const visibleThrough = (
   chains: Chain[], ci: number, mi: number, layoutMode: 'continuous' | 'paginated',
 ): Message[] => {
@@ -69,19 +91,44 @@ const visibleThrough = (
     for (let c = 0; c < ci; c++) out.push(...chains[c].messages);
   }
   out.push(...(chains[ci]?.messages.slice(0, mi + 1) ?? []));
-  return out;
+  return shown(out);
 };
 
 const nextPosition = (chains: Chain[], ci: number, mi: number) => {
-  if (chains[ci] && mi + 1 < chains[ci].messages.length) return { ci, mi: mi + 1 };
-  if (ci + 1 < chains.length) return { ci: ci + 1, mi: 0 };
-  return null;
+  let c = ci;
+  let m = mi;
+  // Walk forward until a passage the reader can actually see, so a run of
+  // hidden entries costs one step rather than one step each.
+  for (;;) {
+    if (chains[c] && m + 1 < chains[c].messages.length) m += 1;
+    else if (c + 1 < chains.length) { c += 1; m = 0; }
+    else return null;
+    if (!isSkipped(chains[c]?.messages[m])) return { ci: c, mi: m };
+  }
+};
+
+/**
+ * The position to actually sit at, given one that may be hidden.
+ *
+ * A saved resume point, or the first message of a story, can land on an entry
+ * the reader has chosen not to see. Streaming it would look like the app had
+ * frozen on an empty passage, so step forward to the next visible one (or back,
+ * if the hidden run reaches the end).
+ */
+const landing = (chains: Chain[], ci: number, mi: number) => {
+  if (!isSkipped(chains[ci]?.messages[mi])) return { ci, mi };
+  return nextPosition(chains, ci, mi) ?? prevPosition(chains, ci, mi);
 };
 
 const prevPosition = (chains: Chain[], ci: number, mi: number) => {
-  if (mi > 0) return { ci, mi: mi - 1 };
-  if (ci > 0) return { ci: ci - 1, mi: chains[ci - 1].messages.length - 1 };
-  return null;
+  let c = ci;
+  let m = mi;
+  for (;;) {
+    if (m > 0) m -= 1;
+    else if (c > 0) { c -= 1; m = chains[c].messages.length - 1; }
+    else return null;
+    if (!isSkipped(chains[c]?.messages[m])) return { ci: c, mi: m };
+  }
 };
 
 /** Messages shown before the message at [ci][mi] starts streaming. */
@@ -112,7 +159,11 @@ const CONFIG_KEYS: (keyof AppConfig)[] = [
   'theme', 'accentColor', 'fontFamily', 'fontSize', 'textColor', 'bgColor', 'animationStyle', 'streamEffect',
   'expressiveText', 'cinematicPacing', 'expressiveIntensity', 'dropCaps', 'sceneTheming',
   'sceneSoundscapes', 'emotionalTts', 'sceneEmphasis', 'scenePerformance', 'aiRepairFormatting',
-  'hideMetadata', 'showImages', 'autofocusAutoZoom', 'focusMagnifier', 'magnifierStyle',
+  'hideMetadata', 'showReasoning', 'showHiddenMessages', 'fontColorMode', 'aiContextOpen', 'aiDockLocked', 'stSyncEnabled',
+  'proxyEnabled', 'proxyBaseUrl', 'proxyApiKey', 'proxyModel', 'proxyPrimary',
+  'proxyStoryId', 'proxyMaterial', 'proxyBudget', 'proxyDrop', 'proxyInstructionLast',
+  'proxyReply',
+  'showImages', 'autofocusAutoZoom', 'focusMagnifier', 'magnifierStyle',
   'askCharacter', 'onboarded',
   'playbackSpeed', 'autoStream', 'autoFormat', 'autoFormatRules', 'statRules',
   'paragraphSpacing', 'dialogueOwnLine', 'smartTypography',
@@ -121,7 +172,7 @@ const CONFIG_KEYS: (keyof AppConfig)[] = [
   'contentWidth', 'oocHandling', 'phoneDialogueOnly', 'themeEffects', 'livingBackground',
   'readingMode', 'visibleViews',
   'revealMode', 'messagePause', 'pauseAtPageEnd', 'ttsEnabled', 'ttsVoiceURI', 'ttsRate',
-  'ttsPitch', 'ttsFollowSpeed', 'ttsMultiVoice', 'ttsDialogueOnly', 'aiBaseUrl', 'aiApiKey', 'aiModel', 'aiAdvanced', 'aiAgentMode',
+  'ttsPitch', 'ttsFollowSpeed', 'ttsMultiVoice', 'ttsDialogueOnly', 'aiBaseUrl', 'aiApiKey', 'aiModel', 'aiAdvanced', 'aiAgentMode', 'aiTourGuide', 'aiDock',
   'ttsEngine', 'kokoroBaseUrl', 'kokoroApiKey', 'kokoroVoice', 'kokoroUserVoice', 'ttsVoiceByCharacter',
   'liveReaction', 'liveReactor', 'liveReactionVisibility', 'liveReactionFreeze',
   'liveReactionFrame',
@@ -187,7 +238,10 @@ export const useAppStore = create<AppState>()(
               : m,
           ),
         });
-        void putStory(snapshot).catch(e => console.error('Failed to save story', e));
+        void putStory(snapshot).catch(e => {
+          console.error('Failed to save story', e);
+          alertSaveFailed('your reading progress');
+        });
       };
 
       const schedulePersist = () => {
@@ -216,6 +270,36 @@ export const useAppStore = create<AppState>()(
         scenePerformance: false,
         aiRepairFormatting: true,
         hideMetadata: true,
+        // Off by default: both are the machinery behind the story rather than
+        // the story, and a first open should be the prose.
+        showReasoning: false,
+        showHiddenMessages: false,
+        // On by default: a colour the author wrote is a distinction they meant,
+        // and dropping it silently was the old behaviour readers noticed.
+        fontColorMode: 'original',
+        stSyncEnabled: false,
+        proxyEnabled: false,
+        proxyBaseUrl: '',
+        proxyApiKey: '',
+        proxyModel: '',
+        proxyPrimary: 'processed',
+        proxyStoryId: '',
+        proxyMaterial: {
+          pins: [], sets: [], sheets: [], codex: [], highlights: [], zones: [],
+          activeSet: true, slot: 'system',
+        },
+        proxyBudget: 8000,
+        proxyDrop: '',
+        proxyInstructionLast: false,
+        proxyReply: [
+          { kind: 'tidy', enabled: true },
+          { kind: 'format', enabled: false },
+          { kind: 'check', enabled: false },
+          { kind: 'polish', enabled: false },
+        ],
+        aiContextOpen: true,
+        aiDockLocked: false,
+        aiEmbedded: false,
         showImages: true,
         autofocusAutoZoom: true,
         focusMagnifier: false,
@@ -293,6 +377,8 @@ export const useAppStore = create<AppState>()(
         pressToAdvance: false,
         livingBackground: false,
         aiAgentMode: false,
+        aiTourGuide: false,
+        aiDock: null,
         aiBaseUrl: '',
         aiApiKey: '',
         aiModel: '',
@@ -370,6 +456,9 @@ export const useAppStore = create<AppState>()(
           const errors: string[] = [];
           const imported: Story[] = [];
           const notesEarly: string[] = [];
+          /** Which file produced which new story, and which joined an old one. */
+          const created: { file: string; storyId: string }[] = [];
+          const attached: { file: string; storyId: string }[] = [];
           // Counted before Cuts are peeled off, so "one file, open it" still
           // holds for a Cut — otherwise dropping one in lands you back on the
           // library with a note, wondering whether it worked.
@@ -387,6 +476,7 @@ export const useAppStore = create<AppState>()(
               if (!cut || error) { errors.push(`${file.name}: ${error ?? 'not a Cut'}`); continue; }
               const story = await openCut(cut);
               imported.push(story);
+              created.push({ file: file.name, storyId: story.id });
               const bits = Object.keys(cut.direction).length;
               notesEarly.push(
                 `“${story.title}” opened from a Cut — ${bits} layer${bits === 1 ? '' : 's'} of `
@@ -483,6 +573,7 @@ export const useAppStore = create<AppState>()(
               const res = toTimeline(existing.messages, cand);
               if (res === 'absorbed') {
                 notes.push(`${entry.file.name} is already part of “${existing.title}” — skipped`);
+                attached.push({ file: entry.file.name, storyId: existing.id });
                 return true;
               }
               if (res) {
@@ -493,6 +584,7 @@ export const useAppStore = create<AppState>()(
                 await putStory(updated);
                 if (get().currentStory?.id === updated.id) set({ currentStory: updated });
                 notes.push(`${entry.file.name} attached as a branch of “${existing.title}”`);
+                attached.push({ file: entry.file.name, storyId: updated.id });
                 return true;
               }
             }
@@ -510,18 +602,21 @@ export const useAppStore = create<AppState>()(
               const story = makeStory(entry.parsed, entry.parsed.messages, fam.timelines);
               await putStory(story);
               imported.push(story);
+              created.push({ file: entry.file.name, storyId: story.id });
               if (fam.timelines.length > 0) {
                 notes.push(`“${story.title}”: attached ${fam.timelines.length} branch${
                   fam.timelines.length === 1 ? '' : 'es'} from this batch`);
               }
               for (const name of fam.absorbed) {
                 notes.push(`${name} is an earlier checkpoint of “${story.title}” — skipped`);
+                attached.push({ file: name, storyId: story.id });
               }
             }
             for (const entry of otherEntries) {
               const story = makeStory(entry.parsed, entry.parsed.messages);
               await putStory(story);
               imported.push(story);
+              created.push({ file: entry.file.name, storyId: story.id });
             }
           } catch (e: any) {
             errors.push(e?.message ?? 'import failed');
@@ -531,11 +626,34 @@ export const useAppStore = create<AppState>()(
             const metas = imported.map(
               ({ messages: _m, highlights: _h, stars: _s, card: _c, timelines: _t, ...meta }) => meta);
             set({ library: [...metas, ...get().library] });
+            /**
+             * The moment to ask the browser to keep this library.
+             *
+             * Not on startup: Firefox shows a permission prompt, and asking
+             * before the reader has put anything in is asking them to trust an
+             * app they have not used. The predictable answer is no, and a
+             * refusal is far harder to revisit than a deferral.
+             *
+             * Here, they have just handed us something they care about, and
+             * the request is obviously about keeping it. Fire-and-forget: the
+             * answer changes nothing about the import, and the backup panel
+             * shows the real state and can ask again.
+             */
+            const hadNothing = get().library.length === metas.length;
+            void askForPersistence()
+              .then(durability => {
+                // Warn only on the reader's FIRST content, and only if the ask
+                // was refused. Every later import would raise the same notice
+                // about the same unchanged situation, and a warning shown on
+                // repeat is a warning taught to be ignored.
+                if (hadNothing && durability === 'best-effort') alertEvictable();
+              })
+              .catch(() => { /* an unanswered ask is not an error */ });
           }
           if (imported.length === 1 && droppedCount === 1) {
             await get().openStory(imported[0].id);
           }
-          return { imported: imported.length, errors, notes };
+          return { imported: imported.length, errors, notes, created, attached };
         },
 
         setActiveTimeline: (timelineId) => {
@@ -572,6 +690,83 @@ export const useAppStore = create<AppState>()(
           schedulePersist();
         },
 
+        /**
+         * Write a synced message list into the open story.
+         *
+         * The plan is built and shown by the sync panel; this only commits it.
+         * Two things it takes care over:
+         *
+         * **The reader keeps their place.** A sync usually adds messages at the
+         * end, and rebuilding the chains renumbers everything. Their position is
+         * converted to an absolute index first and back afterwards, so pulling
+         * forty new messages leaves them exactly where they were reading rather
+         * than at a chain boundary that has moved under them.
+         *
+         * **It refuses while a branch is open.** The whole sync compares against
+         * the trunk; committing it while the reader is inside an attached
+         * timeline would rewrite text they are not looking at.
+         */
+        applyStPull: async (messages) => {
+          const cs = get().currentStory;
+          if (!cs || cs.activeTimeline || !messages.length) return;
+
+          const chains = get().chains;
+          let seen = 0;
+          for (let c = 0; c < get().currentChainIndex && c < chains.length; c++) {
+            seen += chains[c].messages.length;
+          }
+          const absolute = seen + get().currentMessageIndex;
+
+          const story: Story = { ...cs, messages };
+          const next = buildChains(timelineMessages(story), story.format, story.stars);
+
+          let ci = 0, mi = 0, count = 0;
+          outer: for (let c = 0; c < next.length; c++) {
+            for (let m = 0; m < next[c].messages.length; m++) {
+              ci = c; mi = m;
+              if (count === absolute) break outer;
+              count++;
+            }
+          }
+
+          set({
+            currentStory: story,
+            chains: next,
+            currentChainIndex: ci,
+            currentMessageIndex: mi,
+            visibleMessages: visibleThrough(next, ci, mi, get().layoutMode),
+            streamingMessage: null,
+            streamedText: '',
+            isStreaming: false,
+            library: get().library.map(m =>
+              m.id === story.id ? { ...m, messageCount: messages.length } : m),
+          });
+          await putStory(story);
+        },
+
+        markStSynced: async (storyId, chatId) => {
+          const now = Date.now();
+          const patch = { stChatId: chatId || undefined, stSyncedAt: now };
+          set({
+            library: get().library.map(m => (m.id === storyId ? { ...m, ...patch } : m)),
+            ...(get().currentStory?.id === storyId
+              ? { currentStory: { ...get().currentStory!, ...patch } }
+              : {}),
+          });
+          const story = get().currentStory?.id === storyId
+            ? get().currentStory
+            : await getStory(storyId);
+          if (story) await putStory({ ...story, ...patch });
+        },
+
+        syncRequestId: null,
+        requestStSync: (storyId) => {
+          set({ syncRequestId: storyId });
+          // Opening is async and may fail; the flag is cleared by whoever acts
+          // on it either way, so a failed open cannot leave it armed.
+          if (get().currentStory?.id !== storyId) void get().openStory(storyId);
+        },
+
         removeTimeline: (timelineId) => {
           const cs = get().currentStory;
           if (!cs) return;
@@ -582,7 +777,10 @@ export const useAppStore = create<AppState>()(
             timelines: (now.timelines ?? []).filter(t => t.id !== timelineId),
           };
           set({ currentStory: story });
-          void putStory(story).catch(e => console.error('Failed to save story', e));
+          void putStory(story).catch(e => {
+            console.error('Failed to save story', e);
+            alertSaveFailed('a change to this story');
+          });
         },
 
         snipTimelineToStory: async (timelineId) => {
@@ -639,26 +837,30 @@ export const useAppStore = create<AppState>()(
           };
 
           const p = story.progress;
-          const resumeTarget = p ? chains[p.chainIndex]?.messages[p.messageIndex] : undefined;
+          const resume = p && chains[p.chainIndex]?.messages[p.messageIndex]
+            ? landing(chains, p.chainIndex, p.messageIndex)
+            : null;
+          const resumeTarget = resume ? chains[resume.ci]?.messages[resume.mi] : undefined;
 
-          if (resumeTarget && p) {
+          if (resumeTarget && resume) {
             // Resume: everything before the saved position is shown, the saved
             // message streams next.
             set({
               ...base,
-              visibleMessages: visibleBefore(chains, p.chainIndex, p.messageIndex, layoutMode),
+              visibleMessages: visibleBefore(chains, resume.ci, resume.mi, layoutMode),
               streamingMessage: resumeTarget,
-              currentChainIndex: p.chainIndex,
-              currentMessageIndex: p.messageIndex,
+              currentChainIndex: resume.ci,
+              currentMessageIndex: resume.mi,
               isStreaming: autoStream,
             });
           } else if (autoStream) {
+            const start = landing(chains, 0, 0);
             set({
               ...base,
               visibleMessages: [],
-              streamingMessage: chains[0]?.messages[0] ?? null,
-              currentChainIndex: 0,
-              currentMessageIndex: 0,
+              streamingMessage: start ? chains[start.ci]?.messages[start.mi] ?? null : null,
+              currentChainIndex: start?.ci ?? 0,
+              currentMessageIndex: start?.mi ?? 0,
               isStreaming: true,
             });
           } else {
@@ -1049,6 +1251,25 @@ export const useAppStore = create<AppState>()(
         setScenePerformance: (scenePerformance) => set({ scenePerformance }),
         setAiRepairFormatting: (aiRepairFormatting) => set({ aiRepairFormatting }),
         setHideMetadata: (hideMetadata) => set({ hideMetadata }),
+        setShowReasoning: (showReasoning) => set({ showReasoning }),
+        setShowHiddenMessages: (showHiddenMessages) => {
+          set({ showHiddenMessages });
+          // What is on the page was filtered with the OLD answer; rebuild it
+          // with the new one rather than waiting for the next advance.
+          const { chains, currentChainIndex: ci, currentMessageIndex: mi, layoutMode } = get();
+          if (!chains.length) return;
+          set({
+            visibleMessages: get().streamingMessage
+              ? visibleBefore(chains, ci, mi, layoutMode)
+              : visibleThrough(chains, ci, mi, layoutMode),
+          });
+        },
+        setFontColorMode: (fontColorMode) => set({ fontColorMode }),
+        setStSyncEnabled: (stSyncEnabled) => set({ stSyncEnabled }),
+        setProxyEnabled: (proxyEnabled) => set({ proxyEnabled }),
+        setAiContextOpen: (aiContextOpen) => set({ aiContextOpen }),
+        setAiDockLocked: (aiDockLocked) => set({ aiDockLocked }),
+        setAiEmbedded: (aiEmbedded) => set({ aiEmbedded }),
         setAutoStream: (autoStream) => set({ autoStream }),
         setAutoFormat: (autoFormat) => set({ autoFormat }),
         setStyleQuotes: (styleQuotes) => set({ styleQuotes }),
@@ -1211,6 +1432,8 @@ export const useAppStore = create<AppState>()(
         setAiApiKey: (aiApiKey) => set({ aiApiKey }),
         setAiModel: (aiModel) => set({ aiModel }),
         setAiAgentMode: (aiAgentMode) => set({ aiAgentMode }),
+        setAiTourGuide: (aiTourGuide) => set({ aiTourGuide }),
+        setAiDock: (aiDock) => set({ aiDock }),
         setAiOpen: (aiOpen) => set({ aiOpen }),
         setLensEditTarget: (lensEditTarget) => set({ lensEditTarget, ...(lensEditTarget ? { aiOpen: true } : {}) }),
         setLensEditFocus: (lensEditFocus) => set({ lensEditFocus }),
@@ -1323,7 +1546,7 @@ export const useAppStore = create<AppState>()(
     },
     {
       name: 'aura-reader-settings',
-      version: 2,
+      version: 3,
       migrate: (persisted: unknown, version: number) => {
         const state = persisted as Record<string, unknown> | undefined;
         if (!state) return state as never;
@@ -1343,6 +1566,41 @@ export const useAppStore = create<AppState>()(
           state.visibleViews = VIEW_ORDER.filter(
             v => uiMode === 'all' || VIEW_GROUP[v] === 'read' || VIEW_GROUP[v] === uiMode,
           );
+        }
+        /*
+         * v2 → v3: the endpoint's material stopped being category switches and
+         * became a list of picked ids.
+         *
+         * Without this, a stored `proxyMaterial.pins === true` reaches
+         * `for (const id of pick.pins)` and throws — and an uncaught throw
+         * during render is a black screen with nothing on it. That is what it
+         * did, to the one person running it.
+         *
+         * The old intent is preserved rather than reset: "pins on" meant the
+         * pins the active set holds, which is exactly what `activeSet` means
+         * now, and the two reply switches become the two matching steps.
+         */
+        if (version < 3) {
+          const old = state.proxyMaterial as Record<string, unknown> | undefined;
+          if (!old || !Array.isArray(old.pins)) {
+            const slot = old?.slot;
+            state.proxyMaterial = {
+              pins: [], sets: [], sheets: [], codex: [], highlights: [],
+              zones: Array.isArray(old?.zones)
+                ? (old!.zones as unknown[]).filter(z => typeof z === 'string')
+                : [],
+              activeSet: old?.pins !== false,
+              slot: slot === 'end' || slot === 'before-last-user' ? slot : 'system',
+            };
+          }
+          state.proxyReply = reconcileSteps([
+            { kind: 'tidy', enabled: state.proxyTidy !== false },
+            { kind: 'format', enabled: false },
+            { kind: 'check', enabled: !!state.proxyCheck },
+            { kind: 'polish', enabled: false },
+          ]);
+          delete state.proxyTidy;
+          delete state.proxyCheck;
         }
         return state as never;
       },

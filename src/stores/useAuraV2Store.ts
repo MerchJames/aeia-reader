@@ -1,6 +1,11 @@
 import React from 'react';
 import { create } from 'zustand';
 import { applyOps, loadV2 } from '../lib/v2Storage';
+import { alertSaveFailed } from '../utils/alerts';
+import {
+  addFolder as addFolderTo, assignFolder, removeFolder as removeFolderFrom,
+  renameFolder as renameFolderIn, type Folder, type FolderAssignments,
+} from '../utils/folders';
 import { SliceBag, diffSlices, misdeclaredSlices, pickPersisted } from '../utils/v2Persist';
 import { Annotation, Chain, ChatThread, ChatTurn, ContextZone, CowritePreset, Message, MessageOverride, Pin, PinSet, PinVersion, SandboxActive, SandboxScope, SandboxTreatment, SceneArt, SceneCue, SceneDescriptor, SceneEmphasis, ScenePerformCue, Sheet, StyleConfig } from '../types';
 import { TasteEntry, recordTaste } from '../utils/tasteBlock';
@@ -9,11 +14,20 @@ import type { StoryRead } from '../utils/storyRead';
 import type { PacketRecord, StylePacket } from '../utils/stylePacket';
 import { readThread, type AskTurn } from '../utils/askCharacter';
 import type { ReactionPoint } from '../utils/liveReaction';
+import {
+  addCrossing as addCrossingTo, removeCrossing as removeCrossingFrom,
+  updateCrossing as updateCrossingIn, type Crossing,
+} from '../utils/crossing';
 import type { EmotionBucket } from '../lib/spriteStorage';
 import type { Visitor } from '../utils/visitor';
 import type { NarrativeFunction } from '../utils/narrativeFunction';
 import type { Arc, Throughline } from '../utils/throughline';
 import type { ZoneTask } from '../utils/zoneTask';
+import type { ContextPocket } from '../utils/contextPocket';
+import {
+  MAX_PAGE_VERSIONS, activePage, activePageIndex, addPage as addBookPage, editActivePage,
+  mergeInto, movePage, patchPage, removePage, syncActive, turnTo, withPages,
+} from '../utils/pinBook';
 import {
   moveArc as moveArcIn, orderedArcs, renumber as renumberArcs,
 } from '../utils/throughline';
@@ -23,6 +37,10 @@ import {
 /* ------------------------------------------------------------------ */
 
 export type EntityKind = 'character' | 'location' | 'item';
+
+/** The Codex's columns: the three kinds it extracts, plus the two the
+ *  reader writes — anchored notes and tracking sheets. */
+export type CodexTab = EntityKind | 'notes' | 'sheets';
 
 export interface CodexEntity {
   id: string;
@@ -41,12 +59,23 @@ export interface CodexEntity {
   firstSeenMessageId: string;
   mentions: number;
   updatedAt: number;
-  /** Merge priority: card (author-written) > ai > heuristic. */
-  source: 'heuristic' | 'ai' | 'card';
+  /** Merge priority: lorebook and card (author-written) > ai > heuristic. */
+  source: 'heuristic' | 'ai' | 'card' | 'lorebook';
+  /**
+   * Never removed by a rebuild.
+   *
+   * A rebuild wipes the story's codex so the extractor can start over, which is
+   * exactly right for entries the extractor MADE and exactly wrong for the ones
+   * it did not: an imported lorebook is authored material that no amount of
+   * re-reading will produce again, and a reader who has corrected an entry by
+   * hand has done work the scan cannot repeat either. Locked entries survive
+   * `clearCodex`; deleting one is still a thing the reader can do on purpose.
+   */
+  locked?: boolean;
 }
 
 const SOURCE_RANK: Record<CodexEntity['source'], number> = {
-  heuristic: 0, ai: 1, card: 2,
+  heuristic: 0, ai: 1, card: 2, lorebook: 3,
 };
 
 export interface StoryStats {
@@ -258,12 +287,13 @@ const MAX_OVERRIDES_PER_STORY = 500;
 const MAX_PINS_PER_STORY = 24;
 const MAX_PIN_SETS_PER_STORY = 30;
 /** Kept versions per pin (original is always preserved when trimming). */
-const MAX_PIN_VERSIONS = 12;
+
 /** Generous cap per pinned visual (~25k words) — big summary docs fit intact. */
 const MAX_PIN_CONTENT = 150_000;
 const MAX_ZONES_PER_STORY = 40;
 /** Tasks are hand-authored and few; the cap only stops an import loop. */
 const MAX_TASKS_PER_STORY = 40;
+const MAX_POCKETS_PER_STORY = 24;
 const MAX_THREADS_PER_STORY = 30;
 /** Trim a thread's history so a runaway conversation can't bloat localStorage. */
 const MAX_TURNS_PER_THREAD = 400;
@@ -375,6 +405,23 @@ interface AuraV2State {
    * its presence in an `arcs` list, so there is no second index that can
    * disagree with the first about which throughline a story is in.
    */
+  /**
+   * Lines drawn between two stories — see `utils/crossing.ts`.
+   *
+   * Global, like `throughlines` and for the same reason: a crossing belongs to
+   * neither story. Filing it under story A would make it invisible from B, and
+   * filing it under both would make deleting one a two-sided problem with a
+   * wrong answer.
+   */
+  crossings: Crossing[];
+  addCrossing: (c: Crossing) => void;
+  updateCrossing: (id: string, patch: Partial<Omit<Crossing, 'id'>>) => void;
+  removeCrossing: (id: string) => void;
+  /** Which stories the branching board has on screen, in column order. */
+  crossingBoard: string[];
+  setCrossingBoard: (storyIds: string[]) => void;
+  crossingBoardOpen: boolean;
+  setCrossingBoardOpen: (open: boolean) => void;
   throughlines: Throughline[];
   addThroughline: (t: Throughline) => void;
   updateThroughline: (id: string, patch: Partial<Throughline>) => void;
@@ -554,7 +601,9 @@ interface AuraV2State {
 
   /* Transient UI */
   codexOpen: boolean;
-  codexTab: EntityKind | 'notes';
+  /** Which column of the Codex is showing. 'sheets' is the reader's own
+   *  hand-kept tables, which moved in here from their old drawer. */
+  codexTab: CodexTab;
   /** Focused entity in the sidebar (opened from an inline mention). */
   codexFocusId: string | null;
   multiverseOpen: boolean;
@@ -573,7 +622,7 @@ interface AuraV2State {
   editingZoneId: string | null;
 
   setCodexOpen: (open: boolean) => void;
-  setCodexTab: (tab: EntityKind | 'notes') => void;
+  setCodexTab: (tab: CodexTab) => void;
   setCodexFocusId: (id: string | null) => void;
   setMultiverseOpen: (open: boolean) => void;
   setCodexEnabled: (on: boolean) => void;
@@ -581,6 +630,18 @@ interface AuraV2State {
   setCodexHighlight: (on: boolean) => void;
   markRecapSeen: (storyId: string) => void;
   setStoryTags: (storyId: string, tags: string[]) => void;
+
+  /* Library folders (persisted, global) — see utils/folders.ts. */
+  folders: Folder[];
+  /** Story id → folder id. Exclusive: a story is in one folder, or none. */
+  folderByStory: FolderAssignments;
+  addFolder: (name: string) => void;
+  renameFolder: (id: string, name: string) => void;
+  /** Remove a folder; its stories become unfiled, never deleted. */
+  removeFolder: (id: string) => void;
+  /** File a story, or unfile it with null. */
+  setStoryFolder: (storyId: string, folderId: string | null) => void;
+
   /** Stamp "last read" without claiming any reading time was spent. */
   touchStory: (storyId: string) => void;
 
@@ -588,6 +649,8 @@ interface AuraV2State {
   upsertEntities: (storyId: string, incoming: Omit<CodexEntity, 'id' | 'updatedAt'>[]) => void;
   /** Bump mention counters for already-known entities. */
   addMentions: (storyId: string, counts: Record<string, number>) => void;
+  /** Keep (or stop keeping) an entry through a Rebuild. */
+  setEntityLocked: (storyId: string, entityId: string, locked: boolean) => void;
   removeEntity: (storyId: string, entityId: string) => void;
   setScanProgress: (storyId: string, count: number) => void;
   /** Wipe and rebuild from scratch (rescans on next tick). */
@@ -625,6 +688,19 @@ interface AuraV2State {
   addPinVersion: (storyId: string, pinId: string, version: Omit<PinVersion, 'createdAt'>) => void;
   /** Switch which stored version the pin displays (and feeds to AI context). */
   setPinActiveVersion: (storyId: string, pinId: string, index: number) => void;
+  /** Add a page to a pin, turning it into a book if it was a single note. */
+  addPinPage: (storyId: string, pinId: string, page?: { title?: string; content?: string }) => void;
+  updatePinPage: (
+    storyId: string, pinId: string, index: number,
+    patch: Partial<Pick<import('../utils/pinBook').PinPage, 'title' | 'content'>>,
+  ) => void;
+  /** Hand-edit the page on show. See `applyManualEdit` for the version rule. */
+  editPinPage: (storyId: string, pinId: string, content: string) => void;
+  setPinActivePage: (storyId: string, pinId: string, index: number) => void;
+  removePinPage: (storyId: string, pinId: string, index: number) => void;
+  movePinPage: (storyId: string, pinId: string, index: number, direction: -1 | 1) => void;
+  /** Fold `sourceId`'s pages onto the end of `targetId`, then delete the source. */
+  mergePinPages: (storyId: string, targetId: string, sourceId: string) => void;
 
   /* Pin set actions */
   /** Snapshot the current docked + AI-context arrangement as a new named set (becomes active). */
@@ -646,6 +722,16 @@ interface AuraV2State {
   removeZone: (storyId: string, zoneId: string) => void;
 
   /* Zone task actions */
+  /**
+   * Saved context pockets — a zone with a job attached.
+   *
+   * Per story, like the zones they are made of: a pocket that reads "all of my
+   * messages in THIS chat" means nothing in another one.
+   */
+  pocketsByStory: Record<string, ContextPocket[]>;
+  addPocket: (storyId: string, pocket: Omit<ContextPocket, 'id' | 'createdAt' | 'updatedAt'>) => string;
+  updatePocket: (storyId: string, pocketId: string, patch: Partial<Omit<ContextPocket, 'id'>>) => void;
+  removePocket: (storyId: string, pocketId: string) => void;
   addTask: (storyId: string, task: Omit<ZoneTask, 'id' | 'createdAt' | 'updatedAt'>) => string;
   updateTask: (storyId: string, taskId: string, updates: Partial<Omit<ZoneTask, 'id'>>) => void;
   removeTask: (storyId: string, taskId: string) => void;
@@ -807,6 +893,9 @@ export const useAuraV2Store = create<AuraV2State>()(
       sfxMarksByStory: {},
       artByStory: {},
       visitorsByStory: {},
+      crossings: [],
+      crossingBoard: [],
+      crossingBoardOpen: false,
       throughlines: [],
       appearanceByStory: {},
       artSeedByStory: {},
@@ -819,6 +908,7 @@ export const useAuraV2Store = create<AuraV2State>()(
       activePinSetByStory: {},
       zonesByStory: {},
       tasksByStory: {},
+      pocketsByStory: {},
       chatThreadsByStory: {},
       activeThreadByStory: {},
       cowritePresets: [],
@@ -883,18 +973,25 @@ export const useAuraV2Store = create<AuraV2State>()(
             const idx = next.findIndex(e => e.id === hit.id);
             if (idx === -1) return;
             // Higher-trust sources refine what lower ones wrote, never the
-            // other way round: card (author) > ai > heuristic.
+            // other way round: lorebook > card (author) > ai > heuristic.
+            //
+            // A LOCKED entry is a further step: its text is the reader's or the
+            // author's and the scan may not rewrite it at all. It still gains
+            // aliases and mention counts, because those are observations about
+            // the story rather than claims about the entry.
             const upgrade = SOURCE_RANK[inc.source] >= SOURCE_RANK[hit.source];
-            const better = upgrade && inc.summary.length > 12;
+            const better = upgrade && !hit.locked && inc.summary.length > 12;
             next[idx] = {
               ...hit,
-              kind: upgrade ? inc.kind : hit.kind,
+              kind: upgrade && !hit.locked ? inc.kind : hit.kind,
               summary: better ? inc.summary : hit.summary,
+              // Sticky: once locked, only the reader unlocks it.
+              locked: hit.locked || inc.locked,
               aliases: [...new Set([...hit.aliases, ...inc.aliases, inc.name].filter(
                 a => normName(a) !== normName(hit.name),
               ))].slice(0, 6),
               mentions: hit.mentions + Math.max(1, inc.mentions),
-              source: upgrade ? inc.source : hit.source,
+              source: upgrade && !hit.locked ? inc.source : hit.source,
               updatedAt: now,
             };
           } else if (next.length < MAX_ENTITIES_PER_STORY) {
@@ -923,6 +1020,19 @@ export const useAuraV2Store = create<AuraV2State>()(
         });
       },
 
+      setEntityLocked: (storyId, entityId, locked) => {
+        const list = get().codexByStory[storyId];
+        if (!list) return;
+        set({
+          codexByStory: {
+            ...get().codexByStory,
+            [storyId]: list.map(e =>
+              (e.id === entityId ? { ...e, locked, updatedAt: Date.now() } : e)),
+          },
+        });
+        void flushV2();
+      },
+
       removeEntity: (storyId, entityId) => {
         const list = get().codexByStory[storyId];
         if (!list) return;
@@ -937,13 +1047,38 @@ export const useAuraV2Store = create<AuraV2State>()(
       setScanProgress: (storyId, count) =>
         set({ scanProgress: { ...get().scanProgress, [storyId]: count } }),
 
+      /**
+       * Wipe what the scan produced and let it start again.
+       *
+       * Authored entries stay. An imported lorebook is not a guess the extractor
+       * made and cannot be re-derived by reading harder, so a "Rebuild" that
+       * took it out was destroying the one part of the codex the reader could
+       * not get back — the card's own is re-seeded on the next tick, but a
+       * lorebook imported from a file is simply gone.
+       */
       clearCodex: (storyId) => {
         const codex = { ...get().codexByStory };
         const scan = { ...get().scanProgress };
-        delete codex[storyId];
+        const kept = (codex[storyId] ?? []).filter(e => e.locked || e.source === 'lorebook');
+        if (kept.length) codex[storyId] = kept;
+        else delete codex[storyId];
         delete scan[storyId];
         set({ codexByStory: codex, scanProgress: scan, codexFocusId: null });
+        void flushV2();
       },
+
+      folders: [],
+      folderByStory: {},
+      addFolder: (name) => set({ folders: addFolderTo(get().folders, name) }),
+      renameFolder: (id, name) => set({ folders: renameFolderIn(get().folders, id, name) }),
+      removeFolder: (id) => {
+        // Both halves together. A folder removed while assignments still point
+        // at it leaves its stories in no view at all — see utils/folders.ts.
+        const next = removeFolderFrom(get().folders, get().folderByStory, id);
+        set({ folders: next.folders, folderByStory: next.assignments });
+      },
+      setStoryFolder: (storyId, folderId) =>
+        set({ folderByStory: assignFolder(get().folderByStory, storyId, folderId) }),
 
       setStoryTags: (storyId, tags) => {
         // Trimmed, de-duped, case-insensitively unique, order preserved — the
@@ -1007,6 +1142,7 @@ export const useAuraV2Store = create<AuraV2State>()(
           overridesByStory: pruneStories({ ...get().overridesByStory, [storyId]: pruned }, touched),
           lensOnByStory: { ...get().lensOnByStory, [storyId]: true },
         });
+        void flushV2();
       },
       removeOverride: (storyId, messageId, kind) => {
         const existing = get().overridesByStory[storyId];
@@ -1017,6 +1153,7 @@ export const useAuraV2Store = create<AuraV2State>()(
         const all = { ...get().overridesByStory, [storyId]: next };
         if (next.length === 0) delete all[storyId];
         set({ overridesByStory: all });
+        void flushV2();
       },
       clearOverrides: (storyId) => {
         const all = { ...get().overridesByStory };
@@ -1035,6 +1172,7 @@ export const useAuraV2Store = create<AuraV2State>()(
           sheetsByStory: pruneStories({ ...get().sheetsByStory, [storyId]: list }, touched),
           currentSheetId: next.id,
         });
+        void flushV2();
       },
       updateSheet: (storyId, sheetId, updates) => {
         const list = get().sheetsByStory[storyId];
@@ -1057,6 +1195,7 @@ export const useAuraV2Store = create<AuraV2State>()(
           sheetsByStory: all,
           currentSheetId: get().currentSheetId === sheetId ? null : get().currentSheetId,
         });
+        void flushV2();
       },
       addSheetRow: (storyId, sheetId, row) => {
         const list = get().sheetsByStory[storyId];
@@ -1132,6 +1271,7 @@ export const useAuraV2Store = create<AuraV2State>()(
           };
         }
         set(patch);
+        void flushV2();
         return next.id;
       },
       updatePin: (storyId, pinId, updates) => {
@@ -1150,6 +1290,7 @@ export const useAuraV2Store = create<AuraV2State>()(
           };
         }
         set(patch);
+        void flushV2();
       },
       removePin: (storyId, pinId) => {
         const list = get().pinsByStory[storyId];
@@ -1171,18 +1312,30 @@ export const useAuraV2Store = create<AuraV2State>()(
           };
         }
         set(patch);
+        void flushV2();
       },
 
+      /*
+       * A version is a new draft of the page you are ON.
+       *
+       * Once pins gained pages this had to choose, and the choice is the whole
+       * point of the feature: rewriting entry eleven of a journal must not
+       * produce "version 11" of entry one. So the history belongs to the page,
+       * and `pinBook.patchPage` keeps the pin's own `content`/`versions` fields
+       * mirroring it for everything that still reads a pin as one note.
+       */
       addPinVersion: (storyId, pinId, version) => {
         const list = get().pinsByStory[storyId];
         if (!list) return;
         const now = Date.now();
         const nextList = list.map(p => {
           if (p.id !== pinId) return p;
+          const at = activePageIndex(p);
+          const page = activePage(p);
           // First edit: capture what's currently shown as the 'original'.
-          const base: PinVersion[] = p.versions?.length
-            ? p.versions
-            : [{ content: p.content, source: 'original', createdAt: p.createdAt }];
+          const base: PinVersion[] = page.versions?.length
+            ? page.versions
+            : [{ content: page.content, source: 'original', createdAt: page.createdAt }];
           const added: PinVersion = {
             ...version,
             content: version.content.slice(0, MAX_PIN_CONTENT),
@@ -1190,21 +1343,157 @@ export const useAuraV2Store = create<AuraV2State>()(
           };
           const all = [...base, added];
           // Trim to the cap but always keep the original (index 0).
-          const versions = all.length > MAX_PIN_VERSIONS
-            ? [all[0], ...all.slice(all.length - (MAX_PIN_VERSIONS - 1))]
+          const versions = all.length > MAX_PAGE_VERSIONS
+            ? [all[0], ...all.slice(all.length - (MAX_PAGE_VERSIONS - 1))]
             : all;
-          return { ...p, versions, activeVersion: versions.length - 1, content: added.content };
+          return patchPage(p, at, {
+            versions, activeVersion: versions.length - 1, content: added.content,
+          });
         });
         set({ pinsByStory: { ...get().pinsByStory, [storyId]: nextList } });
+        void flushV2();
       },
       setPinActiveVersion: (storyId, pinId, index) => {
         const list = get().pinsByStory[storyId];
         if (!list) return;
-        const nextList = list.map(p =>
-          (p.id === pinId && p.versions && p.versions[index]
-            ? { ...p, activeVersion: index, content: p.versions[index].content }
-            : p));
+        const nextList = list.map(p => {
+          if (p.id !== pinId) return p;
+          const page = activePage(p);
+          if (!page.versions || !page.versions[index]) return p;
+          return patchPage(p, activePageIndex(p), {
+            activeVersion: index, content: page.versions[index].content,
+          });
+        });
         set({ pinsByStory: { ...get().pinsByStory, [storyId]: nextList } });
+        void flushV2();
+      },
+
+      /* --- Pages ---------------------------------------------------------
+       *
+       * All five go through `utils/pinBook`, which owns the one invariant that
+       * makes pages invisible to everything that has not heard of them: the
+       * pin's `content` always mirrors the page on show.
+       */
+      addPinPage: (storyId, pinId, page) => {
+        const list = get().pinsByStory[storyId];
+        if (!list) return;
+        const now = Date.now();
+        set({
+          pinsByStory: {
+            ...get().pinsByStory,
+            [storyId]: list.map(p => (p.id === pinId
+              ? addBookPage(p, {
+                id: newId(),
+                title: page?.title,
+                content: (page?.content ?? '').slice(0, MAX_PIN_CONTENT),
+                createdAt: now,
+              })
+              : p)),
+          },
+        });
+        void flushV2();
+      },
+      updatePinPage: (storyId, pinId, index, patch) => {
+        const list = get().pinsByStory[storyId];
+        if (!list) return;
+        set({
+          pinsByStory: {
+            ...get().pinsByStory,
+            [storyId]: list.map(p => (p.id === pinId
+              ? patchPage(p, index, patch.content === undefined
+                ? patch
+                : { ...patch, content: patch.content.slice(0, MAX_PIN_CONTENT) })
+              : p)),
+          },
+        });
+        void flushV2();
+      },
+      /**
+       * The reader typing into a pin.
+       *
+       * Not `updatePinPage` with a content patch, which writes over whatever is
+       * there: the FIRST hand edit has to preserve the text it replaces, or a
+       * pin the assistant wrote is gone the moment somebody fixes a typo in it.
+       * `applyManualEdit` owns that rule and the one that follows from it —
+       * every edit after the first folds into the same working version rather
+       * than filling the history with keystrokes.
+       */
+      editPinPage: (storyId, pinId, content) => {
+        const list = get().pinsByStory[storyId];
+        if (!list) return;
+        const capped = content.slice(0, MAX_PIN_CONTENT);
+        const next = list.map(p => (p.id === pinId ? editActivePage(p, capped) : p));
+        // Reference-equal when the edit changed nothing — no write, no version.
+        if (next.every((p, i) => p === list[i])) return;
+        set({ pinsByStory: { ...get().pinsByStory, [storyId]: next } });
+        void flushV2();
+      },
+
+      setPinActivePage: (storyId, pinId, index) => {
+        const list = get().pinsByStory[storyId];
+        if (!list) return;
+        set({
+          pinsByStory: {
+            ...get().pinsByStory,
+            [storyId]: list.map(p => (p.id === pinId ? turnTo(p, index) : p)),
+          },
+        });
+        void flushV2();
+      },
+      removePinPage: (storyId, pinId, index) => {
+        const list = get().pinsByStory[storyId];
+        if (!list) return;
+        set({
+          pinsByStory: {
+            ...get().pinsByStory,
+            [storyId]: list.map(p => (p.id === pinId ? removePage(p, index) : p)),
+          },
+        });
+        void flushV2();
+      },
+      movePinPage: (storyId, pinId, index, direction) => {
+        const list = get().pinsByStory[storyId];
+        if (!list) return;
+        set({
+          pinsByStory: {
+            ...get().pinsByStory,
+            [storyId]: list.map(p => (p.id === pinId ? movePage(p, index, direction) : p)),
+          },
+        });
+        void flushV2();
+      },
+      /**
+       * Fold one pin into another as extra pages, and delete the one that moved.
+       *
+       * The destructive half is here rather than in `pinBook` because it is a
+       * decision about the reader's dock, not about the shape of a book — and
+       * because a pure merge that also deleted its argument could not be tested
+       * without a store.
+       */
+      mergePinPages: (storyId, targetId, sourceId) => {
+        const list = get().pinsByStory[storyId];
+        const source = list?.find(p => p.id === sourceId);
+        if (!list || !source || targetId === sourceId) return;
+        const merged = list
+          .map(p => (p.id === targetId ? mergeInto(p, source, newId) : p))
+          .filter(p => p.id !== sourceId);
+        const sets = get().pinSetsByStory[storyId];
+        set({
+          pinsByStory: { ...get().pinsByStory, [storyId]: merged },
+          // The pin it became a page of is the one that stands in for it now,
+          // so a set that listed the source is not quietly left short.
+          ...(sets ? {
+            pinSetsByStory: {
+              ...get().pinSetsByStory,
+              [storyId]: sets.map(set => ({
+                ...set,
+                docked: set.docked.filter(id => id !== sourceId),
+                inContext: set.inContext.filter(id => id !== sourceId),
+              })),
+            },
+          } : {}),
+        });
+        void flushV2();
       },
 
       createPinSet: (storyId, name) => {
@@ -1224,6 +1513,7 @@ export const useAuraV2Store = create<AuraV2State>()(
           pinSetsByStory: { ...get().pinSetsByStory, [storyId]: [...sets, next] },
           activePinSetByStory: { ...get().activePinSetByStory, [storyId]: next.id },
         });
+        void flushV2();
         return next.id;
       },
       applyPinSet: (storyId, setId) => {
@@ -1244,6 +1534,7 @@ export const useAuraV2Store = create<AuraV2State>()(
           };
         }
         set(patch);
+        void flushV2();
       },
       renamePinSet: (storyId, setId, name) => {
         const sets = get().pinSetsByStory[storyId];
@@ -1254,6 +1545,7 @@ export const useAuraV2Store = create<AuraV2State>()(
             [storyId]: sets.map(s => (s.id === setId ? { ...s, name: name.trim() || s.name, updatedAt: Date.now() } : s)),
           },
         });
+        void flushV2();
       },
       duplicatePinSet: (storyId, setId) => {
         const sets = get().pinSetsByStory[storyId] ?? [];
@@ -1270,6 +1562,7 @@ export const useAuraV2Store = create<AuraV2State>()(
           updatedAt: now,
         };
         set({ pinSetsByStory: { ...get().pinSetsByStory, [storyId]: [...sets, copy] } });
+        void flushV2();
         return copy.id;
       },
       removePinSet: (storyId, setId) => {
@@ -1281,17 +1574,30 @@ export const useAuraV2Store = create<AuraV2State>()(
         const active = { ...get().activePinSetByStory };
         if (active[storyId] === setId) delete active[storyId];
         set({ pinSetsByStory: setsMap, activePinSetByStory: active });
+        void flushV2();
       },
       setActivePinSet: (storyId, setId) => {
         const active = { ...get().activePinSetByStory };
         if (setId) active[storyId] = setId;
         else delete active[storyId];
         set({ activePinSetByStory: active });
+        void flushV2();
       },
 
       setZoneBuilderOpen: (zoneBuilderOpen) =>
         set({ zoneBuilderOpen, ...(zoneBuilderOpen ? {} : { editingZoneId: null }) }),
       openZoneBuilder: (editingZoneId) => set({ editingZoneId, zoneBuilderOpen: true }),
+      /*
+       * Zones write through, like every other thing the reader makes by hand.
+       *
+       * They did not, and the symptom was "my context zones are gone after a
+       * restart". Building a zone is minutes of deliberate work, and the 400ms
+       * debounce is only ever safe for state the app produces on its own: an
+       * IndexedDB write cannot hold up a window close, so a zone saved and
+       * then closed on was a zone that had never been written. `addTask` below
+       * has carried this comment since it was written; zones were the fifth
+       * feature in this file to learn it the hard way.
+       */
       addZone: (storyId, zone) => {
         const now = Date.now();
         const next: ContextZone = { ...zone, id: newId(), createdAt: now, updatedAt: now };
@@ -1300,6 +1606,7 @@ export const useAuraV2Store = create<AuraV2State>()(
         set({
           zonesByStory: pruneStories({ ...get().zonesByStory, [storyId]: list }, touched),
         });
+        void flushV2();
         return next.id;
       },
       updateZone: (storyId, zoneId, updates) => {
@@ -1312,6 +1619,7 @@ export const useAuraV2Store = create<AuraV2State>()(
               z.id === zoneId ? { ...z, ...updates, updatedAt: Date.now() } : z),
           },
         });
+        void flushV2();
       },
       removeZone: (storyId, zoneId) => {
         const list = get().zonesByStory[storyId];
@@ -1320,6 +1628,48 @@ export const useAuraV2Store = create<AuraV2State>()(
         const all = { ...get().zonesByStory, [storyId]: next };
         if (next.length === 0) delete all[storyId];
         set({ zonesByStory: all });
+        void flushV2();
+      },
+
+      addPocket: (storyId, pocket) => {
+        const now = Date.now();
+        const next: ContextPocket = { ...pocket, id: newId(), createdAt: now, updatedAt: now };
+        const list = [...(get().pocketsByStory[storyId] ?? []), next].slice(-MAX_POCKETS_PER_STORY);
+        const touched = [storyId, ...Object.keys(get().pocketsByStory).filter(k => k !== storyId)];
+        set({ pocketsByStory: pruneStories({ ...get().pocketsByStory, [storyId]: list }, touched) });
+        // Deliberate work, so it writes through rather than waiting on the
+        // debounce — the same lesson zones learned the hard way.
+        void flushV2();
+        return next.id;
+      },
+      updatePocket: (storyId, pocketId, patch) => {
+        const list = get().pocketsByStory[storyId];
+        if (!list) return;
+        set({
+          pocketsByStory: {
+            ...get().pocketsByStory,
+            [storyId]: list.map(p =>
+              (p.id === pocketId ? { ...p, ...patch, updatedAt: Date.now() } : p)),
+          },
+        });
+        void flushV2();
+      },
+      removePocket: (storyId, pocketId) => {
+        const list = get().pocketsByStory[storyId];
+        if (!list) return;
+        const next = list.filter(p => p.id !== pocketId);
+        const all = { ...get().pocketsByStory, [storyId]: next };
+        if (!next.length) delete all[storyId];
+        /*
+         * A step naming a deleted pocket is left alone.
+         *
+         * `planProblems` reports it by position and the panel shows it, which
+         * tells the reader something happened; silently deleting the step would
+         * shorten their plan with no trace, and re-making the pocket would not
+         * bring it back.
+         */
+        set({ pocketsByStory: all });
+        void flushV2();
       },
 
       addTask: (storyId, task) => {
@@ -1534,6 +1884,7 @@ export const useAuraV2Store = create<AuraV2State>()(
         const now = Date.now();
         const next: CowritePreset = { ...preset, builtIn: false, id: newId(), createdAt: now, updatedAt: now };
         set({ cowritePresets: [...get().cowritePresets, next] });
+        void flushV2();
         return next.id;
       },
       updateCowritePreset: (id, updates) => {
@@ -1541,9 +1892,11 @@ export const useAuraV2Store = create<AuraV2State>()(
           cowritePresets: get().cowritePresets.map(p =>
             (p.id === id && !p.builtIn ? { ...p, ...updates, updatedAt: Date.now() } : p)),
         });
+        void flushV2();
       },
       removeCowritePreset: (id) => {
         set({ cowritePresets: get().cowritePresets.filter(p => p.id !== id) });
+        void flushV2();
       },
 
       setDirectorEnabled: (storyId, on) => {
@@ -1775,6 +2128,24 @@ export const useAuraV2Store = create<AuraV2State>()(
       // IndexedDB write cannot hold up a page unload. A visitor costs a model
       // call to make and a careful read to correct — losing one to a reload a
       // third of a second later is not a tradeoff anybody would accept.
+      // Crossings go through the pure helpers so the duplicate rule (a link
+      // drawn backwards is the same link) lives in one tested place rather than
+      // being re-derived here.
+      addCrossing: (c) => {
+        set({ crossings: addCrossingTo(get().crossings, c) });
+        void flushV2();
+      },
+      updateCrossing: (id, patch) => {
+        set({ crossings: updateCrossingIn(get().crossings, id, patch) });
+        void flushV2();
+      },
+      removeCrossing: (id) => {
+        set({ crossings: removeCrossingFrom(get().crossings, id) });
+        void flushV2();
+      },
+      setCrossingBoard: (crossingBoard) => set({ crossingBoard }),
+      setCrossingBoardOpen: (crossingBoardOpen) => set({ crossingBoardOpen }),
+
       addThroughline: (t) => {
         set({ throughlines: [...get().throughlines, t] });
         void flushV2();
@@ -1985,6 +2356,7 @@ export const useAuraV2Store = create<AuraV2State>()(
         set({
           annotationsByStory: pruneStories({ ...get().annotationsByStory, [storyId]: list }, touched),
         });
+        void flushV2();
       },
       updateAnnotation: (storyId, annotationId, updates) => {
         const list = get().annotationsByStory[storyId];
@@ -2004,6 +2376,7 @@ export const useAuraV2Store = create<AuraV2State>()(
         const all = { ...get().annotationsByStory, [storyId]: next };
         if (next.length === 0) delete all[storyId];
         set({ annotationsByStory: all });
+        void flushV2();
       },
 
       selectGraphNode: (data) => {
@@ -2037,6 +2410,11 @@ let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let saving: Promise<void> = Promise.resolve();
 let hydrated = false;
 
+/** Consecutive failed writes. Reset by any success. */
+let consecutiveFailures = 0;
+/** How many in a row before the reader is told. See the catch in writeNow. */
+const FAILURES_BEFORE_ALARM = 3;
+
 const writeNow = (): Promise<void> => {
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
   if (!hydrated) return saving;
@@ -2050,12 +2428,31 @@ const writeNow = (): Promise<void> => {
   lastSaved = next;
   saving = saving
     .then(() => applyOps(ops))
+    .then(() => { consecutiveFailures = 0; })
     .catch(e => {
       // Roll the baseline back so these records are retried on the next write
       // instead of being silently lost — the failure mode the old localStorage
       // layer had, and the reason for this whole change.
       lastSaved = previous;
       console.error('v2 store: save failed, will retry', e);
+
+      /**
+       * Tell the reader, but only once the retries have stopped helping.
+       *
+       * A single failed write is usually nothing — a transaction that lost a
+       * race, a tab suspended mid-save — and the retry above fixes it before
+       * anyone could have read a warning about it. Alarming on that would
+       * train readers to dismiss this message, which is precisely the message
+       * they must not learn to dismiss.
+       *
+       * Three in a row is different: that is quota, or eviction, or a broken
+       * database, and it will not fix itself. At that point the reader is
+       * annotating a story that is no longer being saved and needs to know
+       * now, while there is still time to export a backup.
+       */
+      if (++consecutiveFailures === FAILURES_BEFORE_ALARM) {
+        alertSaveFailed('your notes, pins and edits');
+      }
     });
   return saving;
 };

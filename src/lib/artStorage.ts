@@ -71,6 +71,17 @@ export const deleteArt = async (id: string): Promise<void> => {
 };
 
 /** Every image for a story, via the index — never a full-table read. */
+
+/**
+ * Every image in the store, for a backup.
+ *
+ * The only full-table read in this file, and deliberately not used anywhere
+ * else: art is normally reached through the `storyId` index precisely so the
+ * app never walks every megabyte it holds. A vault has to, because a vault that
+ * skipped an image would be a backup that quietly loses one.
+ */
+export const getAllArt = async (): Promise<StoredArt[]> =>
+  request<StoredArt[]>((await store('readonly')).getAll());
 export const artForStory = async (storyId: string): Promise<StoredArt[]> => {
   const os = await store('readonly');
   const rows: StoredArt[] = await request(os.index('storyId').getAll(storyId));

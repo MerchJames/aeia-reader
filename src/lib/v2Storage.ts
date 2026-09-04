@@ -11,6 +11,7 @@
  * backdrops) so there's one pattern to learn.
  */
 
+import { alertLoadFailed, alertSaveFailed } from '../utils/alerts';
 import {
   DiffOp, SliceBag, V2Record, assembleSlices, explodeSlices,
 } from '../utils/v2Persist';
@@ -48,7 +49,14 @@ const request = <T>(req: IDBRequest<T>): Promise<T> =>
 const tx = async (mode: IDBTransactionMode) =>
   (await openDB()).transaction(STORE, mode).objectStore(STORE);
 
-const getAllRecords = async (): Promise<V2Record[]> =>
+/**
+ * Every record, for a backup.
+ *
+ * Exported as well as used internally by `loadV2`: a vault stores these
+ * records verbatim and puts them back the same way, so nothing this app failed
+ * to model can be lost in translation on the way through.
+ */
+export const getAllV2Records = async (): Promise<V2Record[]> =>
   request<V2Record[]>((await tx('readonly')).getAll());
 
 /** Apply a batch of writes/deletes in ONE transaction, so a crash can't tear it. */
@@ -96,9 +104,14 @@ export interface LoadResult {
 export const loadV2 = async (): Promise<LoadResult> => {
   let records: V2Record[] = [];
   try {
-    records = await getAllRecords();
+    records = await getAllV2Records();
   } catch (e) {
     console.error('v2 store: could not read IndexedDB', e);
+    // Not just a log. Returning an empty bag from here shows the reader an
+    // empty app, which is indistinguishable from every note they ever made
+    // having been deleted. They need the actual reason, and they need to be
+    // told NOT to import over it before reloading.
+    alertLoadFailed();
   }
   if (records.length) return { state: assembleSlices(records), migrated: false };
 
@@ -111,6 +124,7 @@ export const loadV2 = async (): Promise<LoadResult> => {
   } catch (e) {
     // The reader still gets their data this session even if the write failed.
     console.error('v2 store: migration write failed, running from the old blob', e);
+    alertSaveFailed('your notes and edits');
   }
   return { state: assembleSlices(exploded), migrated: true };
 };

@@ -117,12 +117,16 @@ export const useStreamer = () => {
       );
       const key = [
         msg.id, content, s.hideMetadata, s.autoFormat, s.styleQuotes, s.substituteNames,
-        s.paragraphSpacing, s.dialogueOwnLine, s.smartTypography, s.oocHandling,
+        s.paragraphSpacing, s.dialogueOwnLine, s.smartTypography, s.oocHandling, s.fontColorMode,
         JSON.stringify(s.autoFormatRules),
       ].join('|');
       if (cachedFullText === null || key !== cachedKey) {
         cachedFullText = processText(content, {
           hideMetadata: s.hideMetadata,
+          // The streaming text is the SAME string the page renders once the
+          // passage settles, so it has to carry the colour runs too — without
+          // this a coloured passage recolours itself the moment it finishes.
+          fontColorMode: s.fontColorMode,
           repairFormatting: false,
           oocHandling: s.oocHandling,
           autoFormat: s.autoFormat,

@@ -25,6 +25,13 @@
 @theme inline {
   --color-app-bg: var(--app-bg);
   --color-surface: var(--app-surface);
+  /* Alias. Half the app writes `bg-app-surface`, matching `bg-app-bg`,
+     `bg-app-text` and the raw `--app-surface` variable it sets in App.tsx — and
+     because Tailwind silently drops a utility whose token does not exist, all
+     twenty of those call sites rendered with NO background at all. A panel meant
+     to cover the chat showed the messages straight through it. It never threw,
+     never warned, and looked like a z-index bug. Both spellings resolve now. */
+  --color-app-surface: var(--app-surface);
   --color-app-text: var(--app-text);
   --color-muted: var(--app-muted);
   --color-accent: var(--app-accent);

@@ -2,14 +2,17 @@ import React, { lazy, Suspense, useEffect } from 'react';
 import App from './App';
 import { CodexSidebar } from './components/CodexSidebar';
 import { PinDock } from './components/PinDock';
-import { SheetsSidebar } from './components/SheetsSidebar';
+import { PinsSidebar } from './components/SheetsSidebar';
 import { RecapCard } from './components/RecapCard';
 import { useCodexExtractor } from './hooks/useCodexExtractor';
 import { useAppStore } from './store';
 import { useAuraV2Store } from './stores/useAuraV2Store';
+import { onLibraryNews } from './utils/stBridge';
 
 // React Flow (and its stylesheet) only load when the multiverse is opened —
 // the default reading experience ships none of its weight.
+const CrossingBoard = lazy(() =>
+  import('./components/CrossingBoard').then(m => ({ default: m.CrossingBoard })));
 const MultiverseExplorer = lazy(() =>
   import('./components/MultiverseExplorer').then(m => ({ default: m.MultiverseExplorer })));
 
@@ -73,13 +76,28 @@ export default function AppV2() {
   useReadingClock();
 
   const multiverseOpen = useAuraV2Store(s => s.multiverseOpen);
+  const crossingBoardOpen = useAuraV2Store(s => s.crossingBoardOpen);
   const screen = useAppStore(s => s.screen);
+
+  /**
+   * Another tab changed the library — almost always the sync frame inside
+   * SillyTavern, which shares this origin's IndexedDB but not this tab's
+   * memory. Without this, a chat synced over there lands correctly and stays
+   * invisible here until the reader thinks to refresh, which reads as the sync
+   * having done nothing at all.
+   *
+   * Only the LIBRARY is re-read. Reloading the open story from under someone
+   * mid-sentence would be a cure worse than the complaint; the story they are
+   * reading is refreshed the next time they open it.
+   */
+  useEffect(() => onLibraryNews(() => { void useAppStore.getState().initLibrary(); }), []);
 
   // Leaving the reader closes the overlays with it.
   useEffect(() => {
     if (screen !== 'reader') {
       const v2 = useAuraV2Store.getState();
       if (v2.multiverseOpen) v2.setMultiverseOpen(false);
+      if (v2.crossingBoardOpen) v2.setCrossingBoardOpen(false);
       if (v2.codexOpen) v2.setCodexOpen(false);
       if (v2.sheetsOpen) v2.setSheetsOpen(false);
     }
@@ -91,12 +109,20 @@ export default function AppV2() {
       {screen === 'reader' && (
         <>
           <CodexSidebar />
-          <SheetsSidebar />
+          <PinsSidebar />
           <PinDock />
           <RecapCard />
           {multiverseOpen && (
             <Suspense fallback={null}>
               <MultiverseExplorer />
+            </Suspense>
+          )}
+          {/* Lazy for the same reason as the Multiverse: it loads every column's
+            * whole transcript, and a reader who never opens it should never pay
+            * for the code that would. */}
+          {crossingBoardOpen && (
+            <Suspense fallback={null}>
+              <CrossingBoard />
             </Suspense>
           )}
         </>
