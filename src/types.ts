@@ -75,7 +75,24 @@ export interface ChainStarSettings {
 
 export interface Chain {
   id: string;
+  /**
+   * What this chain SHOWS. Usually the story's own messages; a blended chain
+   * shows one woven passage in place of the turn and its reply.
+   */
   messages: Message[];
+  /**
+   * The story's real messages, present only when `messages` is a substitute.
+   *
+   * This exists because `buildStorySnapshot` writes `chains.flatMap(c =>
+   * c.messages)` back over `story.messages` when a story closes. Substituting a
+   * blend into `messages` without this would not merely display a blend — it
+   * would OVERWRITE the reader's actual chat log with it, permanently, the
+   * moment they navigated away. Anything that converts a chain position into a
+   * position in the story, or writes the story back, must read this instead.
+   *
+   * The same hazard the `activeTimeline` guard beside that snapshot exists for.
+   */
+  sourceMessages?: Message[];
   starred: boolean;
   starSettings?: ChainStarSettings;
 }
@@ -172,6 +189,24 @@ export interface StoryMeta {
    */
   stChatId?: string;
   stSyncedAt?: number;
+  /**
+   * The what-ifs attached to this story — their NAMES, not their messages.
+   *
+   * `metaOf` strips `timelines` because a branch carries its whole divergent
+   * tail and the library reads every meta on launch. But the library still has
+   * to know a story HAS branches, or it cannot offer them: an id and a name
+   * each is a few dozen bytes and keeps that answerable without loading
+   * anything.
+   */
+  branches?: { id: string; name: string }[];
+  /**
+   * Timeline currently being read; null/undefined = the trunk.
+   *
+   * On the META rather than on `Story`, because `metaOf` never stripped it and
+   * the library is where it is now read — a card that offers the what-ifs
+   * should say which one you are on.
+   */
+  activeTimeline?: string | null;
 }
 
 export interface Story extends StoryMeta {
@@ -183,8 +218,6 @@ export interface Story extends StoryMeta {
   card?: CardInfo;
   /** Attached branches (imported branch files), forked off the trunk. */
   timelines?: StoryTimeline[];
-  /** Timeline currently being read; null/undefined = the trunk. */
-  activeTimeline?: string | null;
 }
 
 export type Screen = 'library' | 'reader';
@@ -920,13 +953,13 @@ export interface AppConfig {
    * Aeia standing in as SillyTavern's model endpoint.
    *
    * Separate from `stSyncEnabled` and deliberately so — they are opposite
-   * shapes. The sync is a thing the reader opens, uses, and closes; this is a
-   * thing that has to be up for a whole evening of writing, because
-   * SillyTavern calls it every time they press send. One switch for both would
-   * mean closing the sync panel killed the endpoint mid-story.
+   * shapes. The sync is a thing the reader opens, uses, and closes; this has to
+   * be up for a whole evening of writing, because SillyTavern calls it every
+   * time they press send. One switch for both would mean closing the sync panel
+   * killed the endpoint mid-story.
    *
-   * Desktop only: SillyTavern's SERVER makes this call, so there is no CORS
-   * arrangement that would let a browser tab answer it. A page cannot listen.
+   * Desktop only: SillyTavern's SERVER makes this call, so no CORS arrangement
+   * would let a browser tab answer it. A page cannot listen.
    */
   proxyEnabled: boolean;
   /** The backend Aeia passes the story to. Falls back to the assistant's. */
@@ -936,10 +969,6 @@ export interface AppConfig {
   proxyModel: string;
   /**
    * Which version is the message, and which is the swipe.
-   *
-   * `processed` — nothing appears until the pass has run, and the result is the
-   * message. `original` — the reply streams in exactly as fast as it does
-   * today, and the processed version arrives as swipe 2.
    *
    * A real trade rather than a preference: post-processing needs the whole
    * reply, and a token that has been sent cannot be taken back.
@@ -1016,6 +1045,15 @@ export interface AppConfig {
   messagePause: number;
   /** In paginated layout, stop streaming at the end of each page. */
   pauseAtPageEnd: boolean;
+  /**
+   * How long the finished page stays on screen before it turns, in ms.
+   *
+   * Its own setting because a page turn is not a message break. Crossing a page
+   * in paginated layout CLEARS the page — so the last word of the last message
+   * on it had `messagePause` (400ms) between arriving and being wiped, which is
+   * long enough to see something happen and not long enough to read it.
+   */
+  pageTurnPause: number;
   ttsEnabled: boolean;
   ttsVoiceURI: string;
   ttsRate: number;
@@ -1067,8 +1105,23 @@ export interface AppConfig {
    * they say is canon. See `utils/liveReaction.ts`.
    */
   liveReaction: boolean;
-  /** Who is watching with you — a cast name, or a visitor's. Empty = the lead. */
+  /**
+    * Who is watching with you — a cast name, or a visitor's. Empty = the lead.
+    *
+    * Kept as the single-companion fast path. `liveReactors` is the cast; this
+    * is what a reader who never opens that list is watching with, and it is
+    * what a stored config from before the room existed still holds.
+    */
   liveReactor: string;
+  /**
+   * Everyone watching, when it is more than one. Max 5.
+   *
+   * Empty means "just `liveReactor`" — so nothing about a single companion
+   * changes, including the prompt they are scouted with.
+   */
+  liveReactors: string[];
+  /** Let them hear and answer each other within a passage. */
+  liveCrossTalk: boolean;
   /** How much of the passage they can see when they speak: only what you have
    *  uncovered (`upTo`, the frame) or the whole thing (`whole`, knowing). */
   liveReactionVisibility: 'upTo' | 'whole';
@@ -1077,6 +1130,41 @@ export interface AppConfig {
   liveReactionFreeze: boolean;
   /** Reading over your shoulder, or a voice on a call. */
   liveReactionFrame: 'room' | 'phone';
+  /**
+   * How long their line stays up after the reader moves off the passage, in ms.
+   *
+   * Moving on used to wipe it mid-word: the scout for the next passage clears
+   * the bubble the instant the message changes, so a line that arrived late in
+   * a passage could be on screen for a blink. A reaction the reader never
+   * finished reading is worse than no reaction.
+   */
+  liveReactionLinger: number;
+  /**
+   * How much they say.
+   *
+   * The prompt asks for "one or two short lines" and says a single word is a
+   * fine reaction — which is right for a gasp and thin when the reader wants a
+   * companion with opinions. This picks that instruction.
+   */
+  liveReactionLength: 'brief' | 'normal' | 'chatty' | 'dynamic';
+  /**
+   * Token ceiling for a `dynamic` reaction's prompt, above which it compacts.
+   *
+   * Only that rung: the others send a small fixed prompt. Dynamic adds the
+   * reader's pace, the cross-talk and a longer memory, times the size of the
+   * cast — so it is the one that grows without anyone choosing to grow it.
+   */
+  liveReactionContext: number;
+  /**
+   * The cowriter: the same companion reading as a WRITER.
+   *
+   * Separate from `liveReaction` rather than a mode of it, because the two are
+   * opposites — a reader must not know the ending and an editor must, and a
+   * reader speaks mid-sentence where an editor must not. See `utils/cowriter`.
+   */
+  cowriter: boolean;
+  /** Who is helping write. Empty = the story's lead. */
+  cowriterWho: string;
   /** Play generated audio-library cues in the Scene Director (opt-in). */
   audioCuesEnabled: boolean;
   /** Offer to live-generate a scene bed when the library has no match (opt-in;
@@ -1181,6 +1269,49 @@ export interface AppConfig {
    * Off by default, like every AI feature here.
    */
   aiTourGuide: boolean;
+  /**
+   * Guided tours the reader has finished, by id.
+   *
+   * Kept so the Tour can show what is left rather than presenting the same
+   * seven cards for ever. A record of what was DONE, not a flag for hiding
+   * things — a finished tour is still offered, just marked, because the most
+   * common reason to open one is having forgotten it.
+   */
+  toursSeen: string[];
+  /**
+   * The guided tour running right now, or null.
+   *
+   * In the store rather than in a component because a tour outlives the thing
+   * that started it: it is launched from the Tour dialog, which closes so the
+   * tour can run over the live app, and it moves between the library and the
+   * reader as it goes. Deliberately NOT persisted — a half-finished tour
+   * reappearing on next launch, over a screen the reader opened for some
+   * other reason, is a hijacking rather than a convenience.
+   */
+  guidedTour: {
+    tourId: string;
+    at: number;
+    /**
+     * This tour opened the sample story to have something to point at.
+     *
+     * Recorded so that leaving the tour can put the reader back where they
+     * were. Without it the sample simply stays open afterwards, and since it is
+     * never saved and never listed, the reader is left in a story that does not
+     * exist in their library with no obvious way out of it.
+     */
+    sample: boolean;
+  } | null;
+  /**
+   * Blended passages to show, by chain id — see `chatterBlend.blendMap`.
+   *
+   * Mirrored out of the v2 store rather than read from it, because the app
+   * store must never import the v2 one (the dependency runs the other way).
+   * `useBlendedChains` pushes it, and `buildChains` is the only reader.
+   *
+   * Not persisted: it is derived from `lensChainsByStory` and
+   * `activeLensChainByStory`, which are.
+   */
+  blendedChains: Record<string, Message[]>;
   /**
    * Where the assistant panel sits, once the reader has moved it.
    *
@@ -1408,6 +1539,7 @@ export interface AppState extends AppConfig {
   setRevealMode: (revealMode: RevealMode) => void;
   setMessagePause: (messagePause: number) => void;
   setPauseAtPageEnd: (pauseAtPageEnd: boolean) => void;
+  setPageTurnPause: (pageTurnPause: number) => void;
   setTtsEnabled: (ttsEnabled: boolean) => void;
   setTtsVoiceURI: (ttsVoiceURI: string) => void;
   setTtsRate: (ttsRate: number) => void;
@@ -1429,6 +1561,13 @@ export interface AppState extends AppConfig {
   setImagePreset: (imagePreset: string) => void;
   setImageNegativeExtra: (imageNegativeExtra: string) => void;
   setLiveReaction: (liveReaction: boolean) => void;
+  setLiveReactionLinger: (liveReactionLinger: number) => void;
+  setLiveReactors: (liveReactors: string[]) => void;
+  setLiveCrossTalk: (liveCrossTalk: boolean) => void;
+  setLiveReactionLength: (liveReactionLength: 'brief' | 'normal' | 'chatty' | 'dynamic') => void;
+  setLiveReactionContext: (liveReactionContext: number) => void;
+  setCowriter: (cowriter: boolean) => void;
+  setCowriterWho: (cowriterWho: string) => void;
   setLiveReactor: (liveReactor: string) => void;
   setLiveReactionVisibility: (v: 'upTo' | 'whole') => void;
   setLiveReactionFreeze: (on: boolean) => void;
@@ -1507,6 +1646,16 @@ export interface AppState extends AppConfig {
   setAiModel: (model: string) => void;
   setAiAgentMode: (on: boolean) => void;
   setAiTourGuide: (on: boolean) => void;
+  markTourSeen: (id: string) => void;
+  /** Begin a tour. `withSample` opens the sample story to run it against. */
+  startGuidedTour: (tourId: string, withSample?: boolean) => void;
+  stepGuidedTour: (at: number) => void;
+  /** End it. `finished` records it as done; leaving early does not. */
+  endGuidedTour: (finished?: boolean) => void;
+  /** Show these blends, rebuilding the open story's chains around them. */
+  applyBlends: (blends: Record<string, Message[]>) => void;
+  /** Open the built-in sample story, in memory. Never saved, never listed. */
+  openSampleStory: () => void;
   setAiDock: (rect: DockRect | null) => void;
   setAiOpen: (open: boolean) => void;
   /** Request a Lens edit for a message (opens the AI panel in edit mode); null clears it. */

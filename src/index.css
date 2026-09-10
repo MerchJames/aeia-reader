@@ -4584,3 +4584,19 @@ img.stage-em-anger { filter: drop-shadow(0 0 18px rgba(255, 60, 40, 0.45)); }
 @media (max-width: 640px) {
   .script-stills img { height: 4.5rem; max-width: 46%; }
 }
+
+/*
+ * Ink on a solid accent.
+ *
+ * Sixty places in the app paint `bg-accent text-white`. That is legible on a
+ * deep accent and not on a light one — an audit measured 2.54:1 on the library's
+ * Import button, where 4.5:1 is the bar, and the lighter accents (Gold, Emerald,
+ * Teal, and several themes' own) are worse than that rather than better.
+ *
+ * Rather than edit sixty call sites and hope the sixty-first remembers, this
+ * intercepts the pairing: two classes out-specify Tailwind's own single-class
+ * `.text-white`, so anything sitting on the accent gets ink chosen for that
+ * accent. `--app-accent-ink` is computed in `App.tsx` by `readableInk`, which
+ * measures the contrast rather than guessing at a threshold.
+ */
+.bg-accent.text-white { color: var(--app-accent-ink, #fff); }

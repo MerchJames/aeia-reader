@@ -12,18 +12,30 @@ import { OverviewMode } from './components/OverviewMode';
 import { HighlightsMode } from './components/HighlightsMode';
 import { BranchesMode } from './components/BranchesMode';
 import { AutoFormatModal } from './components/AutoFormatModal';
-import { RefineModal } from './components/RefineModal';
 import { SyncPanel } from './components/SyncPanel';
+import { CowriterHost } from './components/CowriterHost';
+import { PeekHost } from './components/PeekHost';
+import { EditorViewHost } from './components/EditorViewHost';
+import { ProxyHost } from './components/ProxyHost';
 import { ProxyPanel } from './components/ProxyPanel';
 import { BackupPanel } from './components/BackupPanel';
 import { AlertHost } from './components/AlertHost';
+import { CompletionPanel } from './components/CompletionPanel';
+import { TourHost } from './components/TourHost';
 import { SmartExportModal } from './components/SmartExportModal';
 import { useStBridge } from './hooks/useStBridge';
 import { useExeBridge } from './hooks/useExeBridge';
+import { useBlendedChains } from './hooks/useBlendedChains';
 import { bridgeToken, isDesktop } from './utils/exeBridge';
 
 // AI panel pulls in KaTeX — load it only when opened.
 const AIChat = lazy(() => import('./components/AIChat').then(m => ({ default: m.AIChat })));
+/* Lazy for one reason: it is the only thing in the app that uses `compromise`,
+ * and `compromise` is 351 kB — a third of everything the reader downloads
+ * before the library appears, for a workbench most of them never open. Every
+ * sibling modal here was already lazy; this one was imported at the top and so
+ * was its NLP. */
+const RefineModal = lazy(() => import('./components/RefineModal').then(m => ({ default: m.RefineModal })));
 
 /**
  * The three shape views, split out of the main bundle.
@@ -51,7 +63,8 @@ import { useAppStore } from './store';
 import { customFamilyFor, useFontStore } from './stores/useFontStore';
 import { useSpriteStore } from './stores/useSpriteStore';
 import { useBackdropStore } from './stores/useBackdropStore';
-import { accentHex, resolveTheme } from './themes';
+import { accentHex, readableInk, resolveTheme } from './themes';
+import { watchPointer } from './utils/uiContext';
 import { cn } from './utils/cn';
 
 const FONT_CLASS: Record<string, string> = {
@@ -89,6 +102,7 @@ export default function App() {
   const expressiveText = useAppStore(s => s.expressiveText);
   const expressiveIntensity = useAppStore(s => s.expressiveIntensity);
   const initLibrary = useAppStore(s => s.initLibrary);
+  const aiTourGuide = useAppStore(s => s.aiTourGuide);
   const aiOpen = useAppStore(s => s.aiOpen);
   const aiEmbedded = useAppStore(s => s.aiEmbedded);
   const stSyncEnabled = useAppStore(s => s.stSyncEnabled);
@@ -101,6 +115,7 @@ export default function App() {
   const [showSync, setShowSync] = useState(false);
   const [showProxy, setShowProxy] = useState(false);
   const [showBackup, setShowBackup] = useState(false);
+  const [showCompletions, setShowCompletions] = useState(false);
   const [showExport, setShowExport] = useState(false);
 
   /**
@@ -128,6 +143,8 @@ export default function App() {
    * can open this window, so the reader is always the one who started it.
    */
   const exeBridge = useExeBridge(showSync && stSyncEnabled);
+  // Keeps `chains` in step with the reader's blends — see the hook.
+  useBlendedChains();
 
   /**
    * The library asked for a story's sync panel.
@@ -136,6 +153,19 @@ export default function App() {
    * story to actually be open before showing the panel — the panel reads the
    * open story, and showing it a beat early would show it the previous one.
    */
+  /*
+   * Let the guide know what the reader is pointing at.
+   *
+   * Only while the guide is switched on, and only ever recorded locally — the
+   * value is read when a tool asks and never sent otherwise. That is the whole
+   * difference between "what does this button do?" being answerable and the app
+   * shipping somebody's cursor to a model all evening. See `utils/uiContext`.
+   */
+  useEffect(() => {
+    if (!aiTourGuide) return;
+    return watchPointer();
+  }, [aiTourGuide]);
+
   const syncRequestId = useAppStore(s => s.syncRequestId);
   const openStoryId = useAppStore(s => s.currentStory?.id);
   useEffect(() => {
@@ -161,7 +191,11 @@ export default function App() {
     root.style.setProperty('--app-surface', themeDef.vars.surface);
     root.style.setProperty('--app-text', themeDef.vars.text);
     root.style.setProperty('--app-muted', themeDef.vars.muted);
-    root.style.setProperty('--app-accent', accentHex(accentColor) || themeDef.vars.accent);
+    const accent = accentHex(accentColor) || themeDef.vars.accent;
+    root.style.setProperty('--app-accent', accent);
+    // What can be read ON the accent. Every solid accent surface uses this
+    // rather than a hard-coded white — see `readableInk`.
+    root.style.setProperty('--app-accent-ink', readableInk(accent));
     root.style.setProperty('--app-border', themeDef.vars.border);
     root.style.setProperty('--bubble-ai', themeDef.vars.bubbleAi);
     root.style.setProperty('--bubble-user', themeDef.vars.bubbleUser);
@@ -240,6 +274,7 @@ export default function App() {
         onOpenProxy={() => setShowProxy(true)}
         onOpenSmartExport={() => setShowExport(true)}
         onOpenBackup={() => setShowBackup(true)}
+        onOpenCompletions={() => setShowCompletions(true)}
       />
       {/* The reading magnifier. At the ROOT, not inside a view: it is a
         * viewport-fixed scrim positioned from the words' own coordinates, so
@@ -248,9 +283,24 @@ export default function App() {
       <ReadingSpotlight />
       {/* How much the AI is doing, anywhere in the app — see utils/aiActivity. */}
       <AiActivityMeter />
+      {/* The cowriter's note. At the root beside the reader's companions, and on
+        * the other side of the page — see components/CowriterHost. */}
+      <CowriterHost />
+      {/* Reading the small print. At the root because it deliberately sits
+        * OUTSIDE the settings drawer — see components/PeekHost. */}
+      <PeekHost />
+      {/* The cowriter's editor view, and the mark that opens it in the views
+        * that have no selection popover — see components/EditorViewHost. */}
+      <EditorViewHost />
       {showAutoFormat && <AutoFormatModal onClose={() => setShowAutoFormat(false)} />}
-      {showRefine && <RefineModal onClose={() => setShowRefine(false)} />}
+      {showRefine && (
+        <Suspense fallback={null}><RefineModal onClose={() => setShowRefine(false)} /></Suspense>
+      )}
       {showExport && <SmartExportModal onClose={() => setShowExport(false)} />}
+      {/* The SillyTavern endpoint itself — no UI, and deliberately OUTSIDE the
+        * dialog below. The reader turns it on and closes the dialog to go and
+        * write; the requests have to keep being answered. See ProxyHost. */}
+      <ProxyHost />
       {showProxy && <ProxyPanel onClose={() => setShowProxy(false)} />}
       {showSync && (
         <SyncPanel
@@ -292,9 +342,14 @@ export default function App() {
         </Suspense>
       )}
       {showBackup && <BackupPanel onClose={() => setShowBackup(false)} />}
+      {showCompletions && <CompletionPanel onClose={() => setShowCompletions(false)} />}
       {/* The app's only notification surface. At the ROOT so a storage failure
         * raised from lib/ during startup has somewhere to land — see
         * utils/alerts for why console.error was not enough. */}
+      {/* Guided tours, at the root: one crosses the library, the reader, a
+        * view switch and a panel before it is done, and anything mounted
+        * inside a screen would unmount as it worked. */}
+      <TourHost />
       <AlertHost />
       <SceneSoundscape />
     </div>

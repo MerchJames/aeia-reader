@@ -308,9 +308,9 @@ export const useStBridge = (): StBridge | null => {
          * port can still do everything the desktop proxy does to a prompt. Same
          * `applyPlan`, same settings, same tests.
          *
-         * Synchronous and fast by design: SillyTavern is holding its
-         * generation open waiting for this, so nothing here makes a model call.
-         * Weaving material in is string work.
+         * Synchronous and fast by design: SillyTavern is holding its generation
+         * open waiting for this, so nothing here makes a model call. Weaving
+         * material in is string work.
          */
         const { id, messages } = msg.prompt;
         try {

@@ -22,6 +22,8 @@
  */
 
 import { useAppStore } from '../store';
+import { pointingAt } from '../utils/uiContext';
+import { needsSample, tourBlocker, tourById } from '../utils/tours';
 import { GUIDE_SETTINGS } from '../utils/agentTools';
 import { VIEW_ORDER, viewAllowed } from '../utils/viewBar';
 import type { UiMode, ViewMode } from '../types';
@@ -273,6 +275,13 @@ export const buildToolContext = (storyId: string, sink?: ProposalSink): ToolCont
           ? { index: entry.index, name: entry.msg.name, excerpt: entry.msg.content.slice(0, 200) }
           : null,
         aiConnected: !!(app.aiBaseUrl && app.aiModel),
+        /*
+         * What they are pointing at, when they are pointing at something.
+         *
+         * This is what makes "what does this do?" answerable. Read at the
+         * moment the tool is called — never streamed — see `utils/uiContext`.
+         */
+        hovering: pointingAt(),
       };
     },
 
@@ -324,6 +333,29 @@ export const buildToolContext = (storyId: string, sink?: ProposalSink): ToolCont
       }
 
       return { ok: true, did: done, now: useAppStore.getState().viewMode };
+    },
+
+    startTour: (id) => {
+      const app = useAppStore.getState();
+      const tour = tourById(id);
+      // The same courtesy the picker does: a tour about reading, asked for from
+      // an empty library, opens the sample rather than dimming a screen with
+      // nothing on it.
+      const sample = !!tour && needsSample(tour, {
+        hasStory: !!app.currentStory,
+        aiReady: !!app.aiBaseUrl && !!app.aiModel,
+      });
+      app.startGuidedTour(id, sample);
+    },
+
+    tourBlocked: (id) => {
+      const tour = tourById(id);
+      if (!tour) return `No tour called ${JSON.stringify(id)}.`;
+      const app = useAppStore.getState();
+      return tourBlocker(tour, {
+        hasStory: !!app.currentStory,
+        aiReady: !!app.aiBaseUrl && !!app.aiModel,
+      });
     },
 
     setSetting: (key, value) => {

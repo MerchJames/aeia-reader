@@ -6,6 +6,11 @@ import {
   addFolder as addFolderTo, assignFolder, removeFolder as removeFolderFrom,
   renameFolder as renameFolderIn, type Folder, type FolderAssignments,
 } from '../utils/folders';
+import {
+  addLensChain as addLensChainTo, removeLensChain as removeLensChainFrom,
+  type LensChain,
+} from '../utils/chatterBlend';
+import type { CcPreset, LensCompletion } from '../utils/ccPreset';
 import { SliceBag, diffSlices, misdeclaredSlices, pickPersisted } from '../utils/v2Persist';
 import { Annotation, Chain, ChatThread, ChatTurn, ContextZone, CowritePreset, Message, MessageOverride, Pin, PinSet, PinVersion, SandboxActive, SandboxScope, SandboxTreatment, SceneArt, SceneCue, SceneDescriptor, SceneEmphasis, ScenePerformCue, Sheet, StyleConfig } from '../types';
 import { TasteEntry, recordTaste } from '../utils/tasteBlock';
@@ -631,6 +636,36 @@ interface AuraV2State {
   markRecapSeen: (storyId: string) => void;
   setStoryTags: (storyId: string, tags: string[]) => void;
 
+  /*
+   * Blended passages, and which one each chain is showing.
+   *
+   * Per story, because they are made of its messages. The active map is keyed
+   * by CHAIN id rather than being a flag on the blend, so a chain with three
+   * blends still shows exactly one — see utils/chatterBlend.ts.
+   */
+  lensChainsByStory: Record<string, LensChain[]>;
+  activeLensChainByStory: Record<string, Record<string, string>>;
+  addLensChain: (storyId: string, lens: LensChain) => void;
+  removeLensChain: (storyId: string, id: string) => void;
+  /** Show a blend for its chain, or pass null to go back to the original. */
+  setActiveLensChain: (storyId: string, chainId: string, lensId: string | null) => void;
+
+  /*
+   * Imported chat completion presets, and the assemblies built from them.
+   *
+   * Global rather than per-story on purpose: a preset is a way of prompting,
+   * which belongs to the reader and not to any one chat — the same reason
+   * `cowritePresets` and `throughlines` are global. A Lens Completion holds
+   * REFERENCES into these, so deleting a preset is felt by everything built on
+   * it, and `resolvePicks` reports that rather than hiding it.
+   */
+  ccPresets: CcPreset[];
+  lensCompletions: LensCompletion[];
+  addCcPreset: (preset: CcPreset) => void;
+  removeCcPreset: (id: string) => void;
+  saveLensCompletion: (completion: LensCompletion) => void;
+  removeLensCompletion: (id: string) => void;
+
   /* Library folders (persisted, global) — see utils/folders.ts. */
   folders: Folder[];
   /** Story id → folder id. Exclusive: a story is in one folder, or none. */
@@ -1066,6 +1101,65 @@ export const useAuraV2Store = create<AuraV2State>()(
         set({ codexByStory: codex, scanProgress: scan, codexFocusId: null });
         void flushV2();
       },
+
+      lensChainsByStory: {},
+      activeLensChainByStory: {},
+      addLensChain: (storyId, lens) => set(state => ({
+        lensChainsByStory: {
+          ...state.lensChainsByStory,
+          [storyId]: addLensChainTo(state.lensChainsByStory[storyId], lens),
+        },
+        // Selected on arrival: it was made because the reader asked for it and
+        // approved the diff, so it is what they want to be looking at. One
+        // click puts the original back.
+        activeLensChainByStory: {
+          ...state.activeLensChainByStory,
+          [storyId]: { ...state.activeLensChainByStory[storyId], [lens.chainId]: lens.id },
+        },
+      })),
+      removeLensChain: (storyId, id) => set(state => {
+        const active = { ...(state.activeLensChainByStory[storyId] ?? {}) };
+        // Leaving a selection pointing at a deleted blend would be harmless on
+        // its own — `resolveChain` falls back — but it would silently re-select
+        // any future blend that happened to be given the same id.
+        for (const [chainId, lensId] of Object.entries(active)) {
+          if (lensId === id) delete active[chainId];
+        }
+        return {
+          lensChainsByStory: {
+            ...state.lensChainsByStory,
+            [storyId]: removeLensChainFrom(state.lensChainsByStory[storyId], id),
+          },
+          activeLensChainByStory: { ...state.activeLensChainByStory, [storyId]: active },
+        };
+      }),
+      setActiveLensChain: (storyId, chainId, lensId) => set(state => {
+        const active = { ...(state.activeLensChainByStory[storyId] ?? {}) };
+        if (lensId) active[chainId] = lensId;
+        else delete active[chainId];
+        return { activeLensChainByStory: { ...state.activeLensChainByStory, [storyId]: active } };
+      }),
+
+      ccPresets: [],
+      lensCompletions: [],
+      addCcPreset: (preset) => set(state => ({
+        // Replaced by name rather than appended: re-importing a preset whose
+        // author has updated it is the ordinary case, and two entries both
+        // called "Lucid Loom" differing invisibly is the worst outcome of it.
+        ccPresets: [...state.ccPresets.filter(p => p.name !== preset.name), preset],
+      })),
+      removeCcPreset: (id) => set(state => ({
+        ccPresets: state.ccPresets.filter(p => p.id !== id),
+      })),
+      saveLensCompletion: (completion) => set(state => ({
+        lensCompletions: [
+          ...state.lensCompletions.filter(c => c.id !== completion.id),
+          completion,
+        ],
+      })),
+      removeLensCompletion: (id) => set(state => ({
+        lensCompletions: state.lensCompletions.filter(c => c.id !== id),
+      })),
 
       folders: [],
       folderByStory: {},

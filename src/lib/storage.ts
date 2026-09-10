@@ -19,8 +19,13 @@ let dbPromise: Promise<IDBDatabase> | null = null;
 
 /** Everything a `Story` carries that the library list has no use for. */
 export const metaOf = (story: Story): StoryMeta => {
-  const { messages: _m, highlights: _h, stars: _s, timelines: _t, card: _c, ...meta } = story;
-  return meta;
+  const { messages: _m, highlights: _h, stars: _s, timelines, card: _c, ...meta } = story;
+  // The branches' names travel; their messages do not. The library needs to
+  // know a story has what-ifs in order to offer them, and that answer costs a
+  // few dozen bytes rather than the whole divergent tail.
+  return timelines?.length
+    ? { ...meta, branches: timelines.map(t => ({ id: t.id, name: t.name })) }
+    : meta;
 };
 
 const openDB = (): Promise<IDBDatabase> => {

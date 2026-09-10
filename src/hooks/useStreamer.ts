@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { useAppStore } from '../store';
+import { turnsPage, useAppStore } from '../store';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { processText } from '../utils/textProcessor';
 import { resolveContent } from '../utils/lens';
@@ -155,6 +155,20 @@ export const useStreamer = () => {
       // so what's left to wait is the floor MINUS the time that already took.
       const words = (useAppStore.getState().streamedText.match(/\S+/g) ?? []).length;
       const readFloor = dwellMs(words, speedNow()) - (performance.now() - revealStart);
+      /*
+       * A page turn is not a message break.
+       *
+       * Advancing across a page in paginated layout CLEARS the page — the
+       * finished message is not scrolled past, it is wiped — so the last word
+       * of the last message on a page had `messagePause` between arriving and
+       * disappearing. At its 400ms default that reads as the reader being cut
+       * off mid-sentence, and it is worst exactly where it hurts most: the last
+       * line of a page is usually the one you most want to finish.
+       *
+       * `readFloor` does not cover it, because a long passage has already spent
+       * its dwell on the typing and comes out negative.
+       */
+      const turning = turnsPage(s.chains, s.currentChainIndex, s.currentMessageIndex, s.layoutMode);
       pauseTimer = setTimeout(() => {
         const st = useAppStore.getState();
         if (!st.isStreaming || st.streamingMessage?.id !== messageId) return;
@@ -168,7 +182,10 @@ export const useStreamer = () => {
         // the voice finishes, then the wait begins.
         if (st.pressToAdvance || st.viewHold) { st.setAwaitingInput(true); return; }
         st.advanceMessage();
-      }, Math.max(0, s.messagePause, readFloor));
+      // `|| 0` because this setting is newer than some stored configs: an
+      // absent value in a `Math.max` is NaN, and `setTimeout(NaN)` fires at
+      // once — the exact behaviour this exists to prevent.
+      }, Math.max(0, s.messagePause, readFloor, turning ? (s.pageTurnPause || 0) : 0));
     };
 
     const tick = (now: number) => {

@@ -1,11 +1,13 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import {
-  AppConfig, AppState, Chain, ChainStarSettings, Message, Story, StoryFormat, StoryTimeline, UiMode,
+  AppConfig, AppState, Chain, ChainStarSettings, LayoutMode, Message, Story, StoryFormat,
+  StoryTimeline, UiMode,
 } from './types';
 import { ParsedCard, parseCompanionCard, parseFile } from './utils/parser';
 import { deleteStory, getAllStoryMetas, getStory, putStory } from './lib/storage';
 import { parseCut } from './utils/cut';
+import { MAX_WATCHERS } from './utils/liveReaction';
 import { openCut } from './utils/openCut';
 import {
   MIN_SHARED_PREFIX, groupBranchFamilies, timelineMessages, toTimeline,
@@ -16,6 +18,8 @@ import {
 } from './utils/viewBar';
 import { MARKUP_DEFAULTS, sanitizeMarkupPresets } from './utils/markupStyles';
 import { alertEvictable, alertSaveFailed } from './utils/alerts';
+import { sameBlends } from './utils/chatterBlend';
+import { buildSampleStory, isSampleStory } from './utils/sampleStory';
 import { askForPersistence } from './utils/storageHealth';
 import { reconcileSteps } from './utils/replyPipeline';
 
@@ -23,10 +27,23 @@ import { reconcileSteps } from './utils/replyPipeline';
 /* Helpers                                                             */
 /* ------------------------------------------------------------------ */
 
+/** A chain's real messages — the blend's originals when one is being shown. */
+export const chainSource = (chain: Chain | undefined): Message[] =>
+  chain?.sourceMessages ?? chain?.messages ?? [];
+
 const buildChains = (
   messages: Message[],
   format: StoryFormat,
   stars?: Record<string, ChainStarSettings>,
+  /**
+   * Blends to show in place of a chain's own messages, by chain id.
+   *
+   * Applied HERE rather than at render time so that one array is the truth for
+   * everything downstream — the reveal, the position arithmetic, the exporters.
+   * Resolving it per-component instead would have the reader stepping through
+   * two messages while one was on screen.
+   */
+  blends?: Record<string, Message[]>,
 ): Chain[] => {
   const chains: Chain[] = [];
   let current: Chain | null = null;
@@ -52,7 +69,14 @@ const buildChains = (
     }
   });
   if (current) chains.push(current);
-  return chains;
+  if (!blends) return chains;
+  return chains.map(chain => {
+    const blend = blends[chain.id];
+    // Never a blank one: a blend with nothing in it must fall through to the
+    // real passage, the same rule every other layer in this app follows.
+    if (!blend?.length) return chain;
+    return { ...chain, messages: blend, sourceMessages: chain.messages };
+  });
 };
 
 const collectStars = (chains: Chain[]): Record<string, ChainStarSettings> => {
@@ -92,6 +116,23 @@ const visibleThrough = (
   }
   out.push(...(chains[ci]?.messages.slice(0, mi + 1) ?? []));
   return shown(out);
+};
+
+/**
+ * Will the next advance turn the page?
+ *
+ * Paginated layout clears the page when the story crosses into a new chain —
+ * `advanceMessage` sets `visibleMessages: []` — so the last message on a page
+ * is revealed and then wiped. The reader needs a beat there that a mid-page
+ * message break does not, and the streamer cannot ask for one without knowing
+ * in advance. Hence this: pure, so it can be tested without a store.
+ */
+export const turnsPage = (
+  chains: Chain[], ci: number, mi: number, layoutMode: LayoutMode,
+): boolean => {
+  if (layoutMode !== 'paginated') return false;
+  const next = nextPosition(chains, ci, mi);
+  return !!next && next.ci !== ci;
 };
 
 const nextPosition = (chains: Chain[], ci: number, mi: number) => {
@@ -171,11 +212,12 @@ const CONFIG_KEYS: (keyof AppConfig)[] = [
   'markupPresets', 'characterColorsEnabled', 'characterColors', 'characterChannelColors',
   'contentWidth', 'oocHandling', 'phoneDialogueOnly', 'themeEffects', 'livingBackground',
   'readingMode', 'visibleViews',
-  'revealMode', 'messagePause', 'pauseAtPageEnd', 'ttsEnabled', 'ttsVoiceURI', 'ttsRate',
-  'ttsPitch', 'ttsFollowSpeed', 'ttsMultiVoice', 'ttsDialogueOnly', 'aiBaseUrl', 'aiApiKey', 'aiModel', 'aiAdvanced', 'aiAgentMode', 'aiTourGuide', 'aiDock',
+  'revealMode', 'messagePause', 'pauseAtPageEnd', 'pageTurnPause', 'ttsEnabled', 'ttsVoiceURI', 'ttsRate',
+  'ttsPitch', 'ttsFollowSpeed', 'ttsMultiVoice', 'ttsDialogueOnly', 'aiBaseUrl', 'aiApiKey', 'aiModel', 'aiAdvanced', 'aiAgentMode', 'aiTourGuide', 'toursSeen', 'aiDock',
   'ttsEngine', 'kokoroBaseUrl', 'kokoroApiKey', 'kokoroVoice', 'kokoroUserVoice', 'ttsVoiceByCharacter',
   'liveReaction', 'liveReactor', 'liveReactionVisibility', 'liveReactionFreeze',
-  'liveReactionFrame',
+  'liveReactionFrame', 'liveReactionLinger', 'liveReactionLength',
+  'liveReactors', 'liveCrossTalk', 'liveReactionContext', 'cowriter', 'cowriterWho',
   'audioBaseUrl', 'audioCuesEnabled', 'audioLiveGen', 'sceneMusic', 'musicVolume', 'sfxPermissiveness',
   'imageBaseUrl', 'imageApiKey', 'imageAdapter', 'imageModel', 'comfyWorkflow', 'comfyMapping',
   'imagePreset', 'imageNegativeExtra',
@@ -204,11 +246,15 @@ export const useAppStore = create<AppState>()(
         if (!currentStory) return null;
         // While a timeline (attached branch) is being read, the chains show
         // the overlay — NEVER write that back over the trunk's messages.
+        // `chainSource`, not `.messages`: a blended chain shows one woven
+        // passage in place of two, and writing THAT back would replace the
+        // reader's real messages with it for good. Same class of mistake the
+        // timeline guard above prevents.
         const messages = currentStory.activeTimeline
           ? currentStory.messages
-          : chains.flatMap(c => c.messages);
+          : chains.flatMap(c => chainSource(c));
         let readCount = 0;
-        for (let c = 0; c < currentChainIndex; c++) readCount += chains[c]?.messages.length ?? 0;
+        for (let c = 0; c < currentChainIndex; c++) readCount += chainSource(chains[c]).length;
         readCount += currentMessageIndex + (get().streamingMessage ? 0 : 1);
         return {
           ...currentStory,
@@ -238,6 +284,14 @@ export const useAppStore = create<AppState>()(
               : m,
           ),
         });
+        // The sample story is never written down.
+        //
+        // The guard is HERE and not at the call sites because there are twenty
+        // of them — every pause, every setting change, every close — and each
+        // one would otherwise deposit the sample in the reader's library as if
+        // they had imported it. One place to be right is the only version of
+        // this that stays right.
+        if (isSampleStory(snapshot.id)) return;
         void putStory(snapshot).catch(e => {
           console.error('Failed to save story', e);
           alertSaveFailed('your reading progress');
@@ -319,6 +373,7 @@ export const useAppStore = create<AppState>()(
         revealMode: 'character',
         messagePause: 400,
         pauseAtPageEnd: false,
+        pageTurnPause: 1600,
         ttsEnabled: false,
         ttsVoiceURI: '',
         ttsRate: 1,
@@ -331,9 +386,16 @@ export const useAppStore = create<AppState>()(
         audioBaseUrl: 'http://localhost:8899',
         liveReaction: false,
         liveReactor: '',
+        liveReactors: [],
+        liveCrossTalk: true,
         liveReactionVisibility: 'upTo',
         liveReactionFreeze: false,
         liveReactionFrame: 'room',
+        liveReactionLinger: 4000,
+        liveReactionLength: 'normal',
+        liveReactionContext: 16_000,
+        cowriter: false,
+        cowriterWho: '',
         reactionHold: false,
         audioCuesEnabled: false,
         audioLiveGen: false,
@@ -378,6 +440,9 @@ export const useAppStore = create<AppState>()(
         livingBackground: false,
         aiAgentMode: false,
         aiTourGuide: false,
+        toursSeen: [],
+        guidedTour: null,
+        blendedChains: {},
         aiDock: null,
         aiBaseUrl: '',
         aiApiKey: '',
@@ -665,11 +730,12 @@ export const useAppStore = create<AppState>()(
             t => t.id === (timelineId ?? cs.activeTimeline));
           const story: Story = { ...cs, activeTimeline: timelineId };
           const msgs = timelineMessages(story);
-          const chains = buildChains(msgs, story.format, story.stars);
+          const chains = buildChains(msgs, story.format, story.stars, get().blendedChains);
           const target = Math.min(landmark?.forkIndex ?? 0, Math.max(0, msgs.length - 1));
           let ci = 0, mi = 0, seen = 0;
           outer: for (let c = 0; c < chains.length; c++) {
-            for (let m = 0; m < chains[c].messages.length; m++) {
+            // Real messages: `target` is an index into the story, not the page.
+            for (let m = 0; m < chainSource(chains[c]).length; m++) {
               if (seen === target) { ci = c; mi = m; break outer; }
               seen++;
             }
@@ -711,18 +777,22 @@ export const useAppStore = create<AppState>()(
           if (!cs || cs.activeTimeline || !messages.length) return;
 
           const chains = get().chains;
+          // Counted in REAL messages both times, so the reader's place survives
+          // a pull whether or not a passage is showing a blend.
           let seen = 0;
           for (let c = 0; c < get().currentChainIndex && c < chains.length; c++) {
-            seen += chains[c].messages.length;
+            seen += chainSource(chains[c]).length;
           }
           const absolute = seen + get().currentMessageIndex;
 
           const story: Story = { ...cs, messages };
-          const next = buildChains(timelineMessages(story), story.format, story.stars);
+          const next = buildChains(
+            timelineMessages(story), story.format, story.stars, get().blendedChains,
+          );
 
           let ci = 0, mi = 0, count = 0;
           outer: for (let c = 0; c < next.length; c++) {
-            for (let m = 0; m < next[c].messages.length; m++) {
+            for (let m = 0; m < chainSource(next[c]).length; m++) {
               ci = c; mi = m;
               if (count === absolute) break outer;
               count++;
@@ -818,9 +888,34 @@ export const useAppStore = create<AppState>()(
           const story = await getStory(id);
           if (!story) return;
 
+          /*
+           * Backfill the branch names onto the library entry.
+           *
+           * `metaOf` only started carrying them recently, so every story
+           * imported before that has a meta that says nothing about its
+           * what-ifs — and the library cannot offer what it cannot see. Doing it
+           * here costs nothing: the full story is already loaded, which is the
+           * one expensive part. A story shows its branch mark the first time it
+           * is opened after the upgrade, rather than after a migration that
+           * would have to read every story on disk to answer the same question.
+           */
+          const branches = story.timelines?.length
+            ? story.timelines.map(t => ({ id: t.id, name: t.name }))
+            : undefined;
+          if (branches) {
+            const known = get().library.find(m => m.id === id)?.branches ?? [];
+            if (known.length !== branches.length) {
+              set({
+                library: get().library.map(m => (m.id === id ? { ...m, branches } : m)),
+              });
+            }
+          }
+
           const { autoStream, layoutMode, viewMode } = get();
           // Read through the story's active timeline (attached branch), if any.
-          const chains = buildChains(timelineMessages(story), story.format, story.stars);
+          const chains = buildChains(
+            timelineMessages(story), story.format, story.stars, get().blendedChains,
+          );
           const proseFormat = story.format === 'kobold' || story.format === 'document';
           const readingView = isReadingView(viewMode)
             ? viewMode
@@ -875,6 +970,40 @@ export const useAppStore = create<AppState>()(
               isStreaming: false,
             });
           }
+        },
+
+        /*
+         * Open the sample, in memory, without going anywhere near storage.
+         *
+         * It is the real reading pipeline — the same chains, the same reveal,
+         * the same Lens — because a mock screen would teach the reader where a
+         * mock screen's buttons are. What it is not is a library entry: nothing
+         * here calls `putStory`, and `persistNow` refuses to write it.
+         *
+         * Never auto-plays. This is opened underneath a tour that is about to
+         * explain the playback controls, and text streaming past while somebody
+         * reads a card about how to start it is the opposite of the point.
+         */
+        openSampleStory: () => {
+          const story = buildSampleStory();
+          const chains = buildChains(story.messages, story.format, story.stars, {});
+          const ci = get().layoutMode === 'continuous' ? chains.length - 1 : 0;
+          const mi = (chains[ci]?.messages.length ?? 1) - 1;
+          set({
+            currentStory: story,
+            chains,
+            blendedChains: {},
+            screen: 'reader',
+            viewMode: isReadingView(get().viewMode) ? get().viewMode : 'storybook',
+            searchQuery: '',
+            streamedText: '',
+            reverseStream: false,
+            visibleMessages: visibleThrough(chains, ci, mi, get().layoutMode),
+            streamingMessage: null,
+            currentChainIndex: ci,
+            currentMessageIndex: mi,
+            isStreaming: false,
+          });
         },
 
         closeStory: () => {
@@ -1200,9 +1329,12 @@ export const useAppStore = create<AppState>()(
         // leaves the intent alone and surfaces as "… · modified".
         setReadingMode: (readingMode) => set({ ...configForMode(readingMode), readingMode }),
 
-        // The bar is the reader's from the first pin: `visibleViews` starts null
-        // (follow the preset) and any edit resolves it to an explicit list that
-        // the preset never overwrites again.
+        // The bar is the reader's from the first pin: `visibleViews` starts
+        // null (follow the preset) and any edit resolves it to an explicit list
+        // that nothing here ever rewrites. The preset still FILTERS that list
+        // on the way to the screen (`resolveVisibleViews`), so a pin a
+        // workspace has no use for is hidden while that workspace is on and
+        // comes back untouched under All.
         toggleVisibleView: (view) => {
           const { visibleViews, uiMode, viewMode } = get();
           set({ visibleViews: toggleView(resolveVisibleViews(visibleViews, uiMode, viewMode), view) });
@@ -1280,6 +1412,7 @@ export const useAppStore = create<AppState>()(
         setRevealMode: (revealMode) => set({ revealMode }),
         setMessagePause: (messagePause) => set({ messagePause }),
         setPauseAtPageEnd: (pauseAtPageEnd) => set({ pauseAtPageEnd }),
+        setPageTurnPause: (pageTurnPause) => set({ pageTurnPause }),
         setTtsEnabled: (ttsEnabled) => set({ ttsEnabled }),
         setTtsVoiceURI: (ttsVoiceURI) => set({ ttsVoiceURI }),
         setTtsRate: (ttsRate) => set({ ttsRate }),
@@ -1305,9 +1438,18 @@ export const useAppStore = create<AppState>()(
         setImageNegativeExtra: (imageNegativeExtra) => set({ imageNegativeExtra }),
         setLiveReaction: (liveReaction) => set({ liveReaction }),
         setLiveReactor: (liveReactor) => set({ liveReactor }),
+        // Capped here rather than at the call sites: the cost of this feature is
+        // one model call per moment, and the moment budget grows with the cast.
+        setLiveReactors: (liveReactors) => set({ liveReactors: liveReactors.slice(0, MAX_WATCHERS) }),
+        setLiveCrossTalk: (liveCrossTalk) => set({ liveCrossTalk }),
         setLiveReactionVisibility: (liveReactionVisibility) => set({ liveReactionVisibility }),
         setLiveReactionFreeze: (liveReactionFreeze) => set({ liveReactionFreeze }),
         setLiveReactionFrame: (liveReactionFrame) => set({ liveReactionFrame }),
+        setLiveReactionLinger: (liveReactionLinger) => set({ liveReactionLinger }),
+        setLiveReactionLength: (liveReactionLength) => set({ liveReactionLength }),
+        setLiveReactionContext: (liveReactionContext) => set({ liveReactionContext }),
+        setCowriter: (cowriter) => set({ cowriter }),
+        setCowriterWho: (cowriterWho) => set({ cowriterWho }),
         setReactionHold: (reactionHold) => set({ reactionHold }),
         setAudioCuesEnabled: (audioCuesEnabled) => set({ audioCuesEnabled }),
         setAudioLiveGen: (audioLiveGen) => set({ audioLiveGen }),
@@ -1433,6 +1575,82 @@ export const useAppStore = create<AppState>()(
         setAiModel: (aiModel) => set({ aiModel }),
         setAiAgentMode: (aiAgentMode) => set({ aiAgentMode }),
         setAiTourGuide: (aiTourGuide) => set({ aiTourGuide }),
+        markTourSeen: (id) => set(state => (
+          state.toursSeen.includes(id) ? state : { toursSeen: [...state.toursSeen, id] }
+        )),
+        startGuidedTour: (tourId, withSample) => {
+          // The sample opens BEFORE the tour, not during it: the first stop
+          // switches a view and measures an element, and doing that against a
+          // library screen one render away from being a reader puts the
+          // spotlight on nothing.
+          if (withSample) get().openSampleStory();
+          set({ guidedTour: { tourId, at: 0, sample: !!withSample } });
+        },
+        stepGuidedTour: (at) => set(state => (
+          state.guidedTour ? { guidedTour: { ...state.guidedTour, at } } : state
+        )),
+        endGuidedTour: (finished) => {
+          const state = get();
+          const tour = state.guidedTour;
+          // Only a tour actually finished is recorded. Leaving one at the second
+          // stop and finding it marked done is how a reader loses the thing they
+          // meant to come back to.
+          const seen = finished && tour?.tourId && !state.toursSeen.includes(tour.tourId)
+            ? [...state.toursSeen, tour.tourId]
+            : state.toursSeen;
+          set({ guidedTour: null, toursSeen: seen });
+
+          /*
+           * Put the reader back where they were.
+           *
+           * A tour that opened the sample and then simply stopped left them
+           * standing in a story that is not in their library, cannot be saved,
+           * and has no obvious exit — the app looked like it had lost their
+           * place. Leaving one is not different from finishing it here: either
+           * way they are done with the sample.
+           *
+           * Guarded on the story still BEING the sample, so a reader who
+           * wandered off into their own library mid-tour is not yanked out of
+           * whatever they opened instead.
+           */
+          if (tour?.sample && isSampleStory(get().currentStory?.id)) get().closeStory();
+        },
+
+        /*
+         * Take a new set of blends and rebuild the open story's chains.
+         *
+         * Rebuilt rather than patched in place because a blend changes how many
+         * messages a chain has, and `currentMessageIndex` is an index into
+         * them. `landing` then re-seats the reader on a real passage — without
+         * it, switching a two-message chain to a one-message blend while
+         * standing on the second leaves the position pointing past the end.
+         *
+         * A no-op when nothing changed. This is driven by a subscription that
+         * fires on every v2 write, and rebuilding the chains of a 400-message
+         * story on each one would be felt.
+         */
+        applyBlends: (blends) => {
+          const { currentStory, blendedChains, chains } = get();
+          if (sameBlends(blends, blendedChains)) return;
+          if (!currentStory) { set({ blendedChains: blends }); return; }
+
+          const next = buildChains(
+            timelineMessages(currentStory), currentStory.format, currentStory.stars, blends,
+          );
+          const ci = Math.min(get().currentChainIndex, Math.max(0, next.length - 1));
+          const mi = Math.min(
+            get().currentMessageIndex, Math.max(0, (next[ci]?.messages.length ?? 1) - 1),
+          );
+          const at = landing(next, ci, mi) ?? { ci: 0, mi: 0 };
+          set({
+            blendedChains: blends,
+            chains: next,
+            currentChainIndex: at.ci,
+            currentMessageIndex: at.mi,
+            visibleMessages: visibleThrough(next, at.ci, at.mi, get().layoutMode),
+          });
+        },
+
         setAiDock: (aiDock) => set({ aiDock }),
         setAiOpen: (aiOpen) => set({ aiOpen }),
         setLensEditTarget: (lensEditTarget) => set({ lensEditTarget, ...(lensEditTarget ? { aiOpen: true } : {}) }),
@@ -1546,7 +1764,7 @@ export const useAppStore = create<AppState>()(
     },
     {
       name: 'aura-reader-settings',
-      version: 3,
+      version: 4,
       migrate: (persisted: unknown, version: number) => {
         const state = persisted as Record<string, unknown> | undefined;
         if (!state) return state as never;
@@ -1601,6 +1819,19 @@ export const useAppStore = create<AppState>()(
           ]);
           delete state.proxyTidy;
           delete state.proxyCheck;
+        }
+        /*
+         * v3 → v4: one companion became a room.
+         *
+         * `liveReactors` is the cast and `liveReactor` is still the single
+         * pick, so a stored config needs nothing — but seeding the list from
+         * the old value means a reader who had chosen someone sees them already
+         * ticked when they open the new picker, instead of an empty list and
+         * the impression their choice was lost.
+         */
+        if (version < 4 && !Array.isArray(state.liveReactors)) {
+          const one = typeof state.liveReactor === 'string' ? state.liveReactor.trim() : '';
+          state.liveReactors = one ? [one] : [];
         }
         return state as never;
       },

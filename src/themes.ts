@@ -18,6 +18,40 @@ export const ACCENTS: { id: AccentColor; label: string; hex: string }[] = [
 export const accentHex = (accent: AccentColor): string =>
   ACCENTS.find(a => a.id === accent)?.hex ?? '';
 
+/**
+ * Black or white — whichever can actually be read on this accent.
+ *
+ * Every solid accent surface in the app was `bg-accent text-white`, which is
+ * fine on Crimson and unreadable on Emerald. An audit measured 2.54:1 on the
+ * library's Import button against the default dark theme's blue; 4.5:1 is the
+ * bar for body-sized text, and a light accent like Gold or Teal is further from
+ * it than that, not closer.
+ *
+ * There is no CSS for this — `color-contrast()` is not shipped anywhere we run
+ * — so it is computed once when the accent is applied and handed to the
+ * stylesheet as `--app-accent-ink`.
+ *
+ * Relative luminance per WCAG 2.1, then the standard trick: compare the
+ * contrast this colour makes with white against the contrast it makes with
+ * black, and take the winner. That is exact rather than a guessed threshold,
+ * and it costs one extra multiply.
+ */
+export const readableInk = (color: string): '#ffffff' | '#111111' => {
+  const hex = color.trim().replace(/^#/, '');
+  const full = hex.length === 3 ? hex.split('').map(c => c + c).join('') : hex;
+  if (!/^[0-9a-f]{6}$/i.test(full)) return '#ffffff';  // not a hex we can read
+
+  const channel = (v: number) => {
+    const c = v / 255;
+    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  };
+  const [r, g, b] = [0, 2, 4].map(i => channel(parseInt(full.slice(i, i + 2), 16)));
+  const L = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+
+  // Contrast against white is (1.05)/(L+0.05); against black, (L+0.05)/0.05.
+  return 1.05 / (L + 0.05) >= (L + 0.05) / 0.05 ? '#ffffff' : '#111111';
+};
+
 export interface ThemeVars {
   bg: string;
   surface: string;
