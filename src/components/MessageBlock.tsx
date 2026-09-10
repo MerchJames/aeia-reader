@@ -1235,6 +1235,7 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
       <div
         key={msg.id}
         data-msg-id={msg.id}
+        data-tour="message-block"
         ref={isStreamingMsg ? activeRef : undefined}
         data-reveal-edge={revealEdge ? '' : undefined}
         onClick={() => onMessageClick(msg.id)}
@@ -1367,7 +1368,18 @@ export const MessageBlock = React.memo((props: MessageBlockProps) => {
           isMsgZoomed && 'ring-2 ring-yellow-500/50 shadow-xl',
         )}
       >
-        <div className="reader-bubble-name text-xs font-bold mb-2 opacity-70 uppercase tracking-wider flex items-center gap-2">
+        {/* No dimming on the user's bubble.
+          *
+          * The label is 12px, so it needs 4.5:1 like any body text. On the AI
+          * bubble it is app-text over the page and has room to spare, which is
+          * where the 70% came from. On the user's it is light text over a
+          * saturated fill that clears the bar by very little at FULL strength —
+          * 70% put it at roughly 3:1 and even 90% did not get back over.
+          * Bold, uppercase and small already read as a label without it. */}
+        <div className={cn(
+          'reader-bubble-name text-xs font-bold mb-2 uppercase tracking-wider flex items-center gap-2',
+          !isUser && 'opacity-70',
+        )}>
           {msg.name}
           <HiddenMark hidden={msg.hidden} />
           {(noteCount > 0 || hasOverride || onPinContent || onLensEdit || onSceneImage) && !isStreamingMsg && (

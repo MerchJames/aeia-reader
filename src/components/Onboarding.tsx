@@ -3,6 +3,7 @@ import { ArrowLeft, ArrowRight, Check, Compass, Play, Sparkles, Square, X } from
 import { ONBOARDING_STEPS, OnboardingDemo, isAiStep } from '../utils/onboarding';
 import { VIEW_HINT, VIEW_LABEL } from '../utils/viewBar';
 import { useAppStore } from '../store';
+import { TourPicker } from './TourPicker';
 import { ACCENTS, THEMES } from '../themes';
 import { READING_MODES, modeDef } from '../utils/readingModes';
 import { composeScene, heuristicPacket } from '../utils/stylePacket';
@@ -730,6 +731,7 @@ export const Onboarding = ({ onClose }: Props) => {
   const setAiOpen = useAppStore(s => s.setAiOpen);
   const aiReady = useAppStore(s => !!s.aiBaseUrl && !!s.aiModel);
   const [step, setStep] = useState(0);
+  const [showTours, setShowTours] = useState(false);
   const [hovered, setHovered] = useState<ViewMode | null>(null);
   // Hover INTENT, not raw hover. Entering shows at once, but leaving — or
   // sliding across to another tile — waits, so the preview does not strobe as
@@ -750,12 +752,15 @@ export const Onboarding = ({ onClose }: Props) => {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
+      // Not while the tour picker is up: the arrows would walk the steps
+      // hidden behind it, so leaving the picker would land somewhere else.
+      if (showTours) return;
       if (e.key === 'ArrowRight') setStep(s => Math.min(ONBOARDING_STEPS.length - 1, s + 1));
       if (e.key === 'ArrowLeft') setStep(s => Math.max(0, s - 1));
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [onClose, showTours]);
 
   return (
     <div
@@ -771,15 +776,33 @@ export const Onboarding = ({ onClose }: Props) => {
           <div className="min-w-0">
             <div className="flex items-center gap-2 text-[11px] uppercase tracking-wider text-app-text/35">
               <Sparkles size={12} className="text-accent" />
-              Step {step + 1} of {ONBOARDING_STEPS.length}
-              {isAiStep(current) && (
+              {showTours ? 'Guided tours' : `Step ${step + 1} of ${ONBOARDING_STEPS.length}`}
+              {!showTours && isAiStep(current) && (
                 <span className="rounded-full border border-app-text/20 px-1.5 py-0.5 normal-case tracking-normal">
                   optional
                 </span>
               )}
             </div>
-            <h2 className="text-xl font-serif font-bold text-app-text mt-1.5">{current.title}</h2>
+            <h2 className="text-xl font-serif font-bold text-app-text mt-1.5">
+              {showTours ? 'Which part shall I show you?' : current.title}
+            </h2>
           </div>
+          {/* Up here, not in the footer.
+            *
+            * It lived down there with Back, Ask instead, Skip and Next, and on
+            * a modal this wide that row simply ran out of room — the last two
+            * buttons went past the edge and stopped existing. This is also the
+            * more findable place for it: someone who wants to be shown around
+            * is looking at the top of the dialog, not at the navigation. */}
+          <button
+            onClick={() => setShowTours(v => !v)}
+            data-testid="onboarding-tours"
+            title={showTours ? 'Back to the tour' : 'Be walked through a part of the app on the live screen'}
+            className="flex items-center justify-center gap-1.5 px-2.5 min-h-10 -mt-1 rounded-lg text-[13px] text-accent border border-accent/40 hover:bg-accent/10 shrink-0"
+          >
+            {showTours ? <ArrowLeft size={14} /> : <Compass size={14} />}
+            <span className="hidden sm:inline">{showTours ? 'Back' : 'Show me'}</span>
+          </button>
           <button
             onClick={onClose}
             aria-label="Close the tour"
@@ -791,6 +814,16 @@ export const Onboarding = ({ onClose }: Props) => {
         </div>
 
         <div className="px-6 pb-5 space-y-4 flex-1 min-h-0 overflow-y-auto">
+          {/* The tours, reachable from anywhere in here.
+            *
+            * They were on the last step only, which meant thirteen Nexts stood
+            * between someone who wanted to be shown around and the thing that
+            * shows them around. Somebody looking for a walkthrough is looking
+            * for it NOW, not after the tour they are already skipping. */}
+          {showTours ? (
+            <TourPicker onStarted={onClose} />
+          ) : (
+          <>
           <p className="text-sm text-app-text/70 leading-relaxed">{current.body}</p>
 
           {/* Showing beats describing — every step that can carries a concrete
@@ -808,7 +841,10 @@ export const Onboarding = ({ onClose }: Props) => {
             </ul>
           )}
 
-          {current.views && (
+          </>
+          )}
+
+          {current.views && !showTours && (
             <div className="space-y-2">
               <div className="grid grid-cols-2 gap-1.5">
                 {current.views.map(view => (
@@ -877,16 +913,24 @@ export const Onboarding = ({ onClose }: Props) => {
           )}
         </div>
 
-        {/* The dot strip is thirteen targets wide and, next to Back/Skip/Next,
+        {/* The dot strip is seventeen targets wide and, next to Back/Skip/Next,
           * does not fit a phone. It used to force this row past the modal's
           * width, which pushed the whole dialog off BOTH screen edges — so on a
           * narrow screen it becomes a plain counter and the buttons keep the
-          * room. */}
-        <div className="flex items-center gap-2 px-4 sm:px-6 py-3 sm:py-4 border-t border-app-text/10 shrink-0">
+          * room.
+          *
+          * `flex-wrap` is the belt to that brace, and it was added the hard
+          * way: one more button in here (Show me) pushed Skip and Next past the
+          * modal's `overflow-hidden`, where they were not clipped in a way
+          * anybody could see — they were simply gone, and the tour could not be
+          * advanced or left. Wrapping cannot silently swallow a control; a row
+          * that runs out of width can. */}
+        {!showTours && (
+        <div className="flex flex-wrap items-center gap-2 px-4 sm:px-6 py-3 sm:py-4 border-t border-app-text/10 shrink-0">
           <span className="sm:hidden mr-auto text-xs tabular-nums text-app-text/40">
             {step + 1} / {ONBOARDING_STEPS.length}
           </span>
-          <div className="hidden sm:flex gap-1.5 mr-auto" aria-hidden>
+          <div className="hidden sm:flex flex-wrap gap-1.5 mr-auto min-w-0" aria-hidden>
             {ONBOARDING_STEPS.map((s, i) => (
               <button
                 key={s.id}
@@ -902,7 +946,7 @@ export const Onboarding = ({ onClose }: Props) => {
             ))}
           </div>
 
-          {step > 0 && (
+          {step > 0 && !showTours && (
             <button
               onClick={() => setStep(s => s - 1)}
               aria-label="Back"
@@ -922,7 +966,7 @@ export const Onboarding = ({ onClose }: Props) => {
             * Only offered when an endpoint is connected. Turning on an AI
             * feature for someone with no AI is a promise that fails on the
             * next click. */}
-          {aiReady && (
+          {aiReady && !showTours && (
             <button
               onClick={() => {
                 setAiTourGuide(true);
@@ -936,7 +980,7 @@ export const Onboarding = ({ onClose }: Props) => {
               <Compass size={15} /> <span className="hidden sm:inline">Ask instead</span>
             </button>
           )}
-          {!last && (
+          {!last && !showTours && (
             <button
               onClick={onClose}
               data-testid="onboarding-skip"
@@ -945,14 +989,17 @@ export const Onboarding = ({ onClose }: Props) => {
               Skip
             </button>
           )}
-          <button
-            onClick={() => (last ? onClose() : setStep(s => s + 1))}
-            data-testid="onboarding-next"
-            className="flex items-center justify-center gap-1.5 px-4 min-h-10 rounded-lg bg-accent text-white text-sm font-medium hover:opacity-90 shrink-0"
-          >
-            {last ? <><Check size={15} /> Start reading</> : <>Next <ArrowRight size={15} /></>}
-          </button>
+          {!showTours && (
+            <button
+              onClick={() => (last ? onClose() : setStep(s => s + 1))}
+              data-testid="onboarding-next"
+              className="flex items-center justify-center gap-1.5 px-4 min-h-10 rounded-lg bg-accent text-white text-sm font-medium hover:opacity-90 shrink-0"
+            >
+              {last ? <><Check size={15} /> Start reading</> : <>Next <ArrowRight size={15} /></>}
+            </button>
+          )}
         </div>
+        )}
       </div>
     </div>
   );

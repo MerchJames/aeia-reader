@@ -1,5 +1,5 @@
 import React, { useLayoutEffect, useRef, useState } from 'react';
-import { Bot, Clapperboard, MessageSquare, Pin, Type, Wand2, X, Volume2 } from 'lucide-react';
+import { Bot, Clapperboard, MessageSquare, Pin, Type, Wand2, X, Volume2 , Pencil } from 'lucide-react';
 import { HIGHLIGHT_COLORS, SceneEmphasis, ScenePerformKind } from '../types';
 
 /**
@@ -52,6 +52,8 @@ interface SelectionPopoverProps {
   onPin: () => void;
   /** Send the span to the Lens as the focus of a revision (AI configured). */
   onRewrite?: () => void;
+  /** Ask the cowriter what they would do with these words (cowriter on). */
+  onEditorView?: () => void;
   /** Attach a reader-authored SFX to the selected span (audio service on). */
   onSfx?: (prompt: string, slow: boolean) => void;
   /** Direct how the selected span performs as it streams; null clears it. */
@@ -74,7 +76,7 @@ interface SelectionPopoverProps {
 }
 
 export const SelectionPopover = ({
-  sel, noteDraft, setNoteDraft, onClose, onHighlight, onNote, onAskAi, onPin, onRewrite, onSfx,
+  sel, noteDraft, setNoteDraft, onClose, onHighlight, onNote, onAskAi, onPin, onRewrite, onEditorView, onSfx,
   onPerform, performKind, onEmphasis, emphasis, prefer = 'above',
 }: SelectionPopoverProps) => {
   const [sfxOpen, setSfxOpen] = useState(false);
@@ -184,6 +186,22 @@ export const SelectionPopover = ({
           title="Open the Lens on this passage, focused on these words"
         >
           <Wand2 size={13} /> Rewrite this part
+        </button>
+      )}
+      {/* The other half of a revision: not "change this for me" but "what would
+        * YOU do with this?" — a change to look at before deciding, which is a
+        * different question and belongs beside the one that just does it. */}
+      {onEditorView && (
+        <button
+          onClick={onEditorView}
+          disabled={!sel.messageId}
+          data-testid="sel-editor-view"
+          className="col-span-2 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg
+            border border-amber-500/40 bg-amber-500/10 text-amber-400 text-xs
+            hover:bg-amber-500/20 disabled:opacity-40"
+          title="What would your cowriter do with these words?"
+        >
+          <Pencil size={13} /> Editor’s view
         </button>
       )}
     </div>

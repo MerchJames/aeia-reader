@@ -89,7 +89,8 @@ export const BookView = () => {
     substituteNames: store.substituteNames,
     characterName: store.currentStory?.characterName,
     userName: store.currentStory?.userName,
-    // The book styles dialogue itself (.book-say) — skip the *quote* pass.
+    // The book styles dialogue itself (.mk-speech, via the markup context
+    // below) — skip the *quote* pass.
     styleQuotes: false,
   }), [
     store.oocHandling, store.autoFormat, store.autoFormatRules, store.paragraphSpacing,
@@ -462,6 +463,17 @@ export const BookView = () => {
             </div>
             <div
               className="book-page-body"
+              /*
+               * Where the newest words are, for the reading magnifier.
+               *
+               * Book was the one view that marked nothing, so the magnifier
+               * found no edge here and stayed dark — the whole feature was
+               * simply missing in the view most likely to be read with it.
+               * The live tail always lands on the last page, so that is the
+               * page holding the reveal edge; `ReadingSpotlight` measures the
+               * last glyph inside whatever carries this.
+               */
+              data-reveal-edge={store.isStreaming && i === pages.length - 1 ? '' : undefined}
               style={{ fontSize: `${store.fontSize}px` }}
               onClick={onPageClick}
               dangerouslySetInnerHTML={{ __html: renderBody(p, i) }}

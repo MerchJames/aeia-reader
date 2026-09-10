@@ -33,9 +33,32 @@ import { cn } from '../utils/cn';
  * silently returns NO rects: the end boundary of a block sits after its last
  * child, not inside any text. That measured zero for every reader.
  */
+/**
+ * Text that is not the story.
+ *
+ * A passage with alternates carries a swipe row UNDER it — `‹ 2/2 › WHAT-IFS`
+ * — and a caret, and pin buttons. All of them are text nodes, all of them come
+ * after the prose, and the reveal edge is "the last text node", so on any
+ * passage that had a what-if the light left the words and sat on the controls
+ * instead. On a passage with no alternates there is no such row and it worked
+ * perfectly, which is why this read as the magnifier being unreliable rather
+ * than as a rule with a hole in it.
+ *
+ * Anything interactive, anything the reader cannot read as prose. Checked by
+ * walking up from the text node, because these controls nest.
+ */
+const CHROME = 'button, a, [role="button"], input, select, textarea, [data-chrome]';
+
+const isChrome = (node: Node): boolean => {
+  const el = node.parentElement;
+  return !!el?.closest(CHROME);
+};
+
 export const revealEdgeRect = (row: HTMLElement): DOMRect | undefined => {
   const prose = (row.querySelector('.markdown-body') as HTMLElement | null) ?? row;
-  const walker = document.createTreeWalker(prose, NodeFilter.SHOW_TEXT);
+  const walker = document.createTreeWalker(prose, NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) => (isChrome(n) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+  });
   let last: Text | null = null;
   for (let n = walker.nextNode(); n; n = walker.nextNode()) {
     if ((n.textContent ?? '').trim()) last = n as Text;

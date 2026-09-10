@@ -73,7 +73,7 @@ const TimelineSection = () => {
   );
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-3" data-tour="branches-view">
       <div>
         <h3 className="text-sm font-bold uppercase tracking-wider text-muted flex items-center gap-2">
           <GitFork size={14} /> Timelines

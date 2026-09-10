@@ -59,6 +59,7 @@ export const LibraryToolbar = ({
             placeholder="Search your library…"
             aria-label="Search your library"
             data-testid="library-search"
+            data-tour="library-search"
             className="w-full pl-9 pr-9 min-h-11 text-sm bg-app-text/5 border border-transparent rounded-xl focus:outline-none focus:border-accent/50 transition-colors"
           />
           {query && (

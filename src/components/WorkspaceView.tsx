@@ -210,7 +210,7 @@ export const WorkspaceView = () => {
   const missing = PANELS.filter(p => !hasPanel(layout, p.id));
 
   return (
-    <div className="flex-1 min-h-0 flex flex-col" data-testid="workspace-view">
+    <div className="flex-1 min-h-0 flex flex-col" data-testid="workspace-view" data-tour="workspace-view">
       {/* ── The bar ────────────────────────────────────────────────────── */}
       <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-app-border/60 shrink-0">
         <button
@@ -519,6 +519,9 @@ const PanelFrame = ({
       dragging && 'opacity-40',
     )}
     data-testid={`workspace-panel-${panel}`}
+    // Only the panels a tour points at get an anchor, so the attribute stays a
+    // deliberate mark rather than something on every panel that ever existed.
+    data-tour={panel === 'sets' ? 'pin-sets' : panel === 'sheets' ? 'sheets-panel' : undefined}
   >
     <div
       draggable={!locked}

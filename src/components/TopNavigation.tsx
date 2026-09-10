@@ -288,7 +288,7 @@ export const TopNavigation = () => {
    */
   const allTools: {
     id: ToolId; label: string; hint: string; icon: React.ReactNode;
-    active?: boolean; warm?: boolean; onClick: () => void;
+    active?: boolean; warm?: boolean; onClick: () => void; /** Guided-tour anchor, rendered on both the bar button and the menu row. */ tour?: string;
   }[] = [
     {
       id: 'multiverse', label: 'Multiverse', hint: 'Multiverse — story map & timelines (M)',
@@ -301,6 +301,7 @@ export const TopNavigation = () => {
     {
       id: 'codex', label: 'Codex', hint: "Codex — everything you've met so far (C)",
       icon: <BookMarked size={18} />, active: codexOpen, onClick: () => setCodexOpen(!codexOpen),
+      tour: 'codex-button',
     },
     {
       // The store flag is still `sheetsOpen`: it is transient UI state, not
@@ -344,6 +345,7 @@ export const TopNavigation = () => {
       {tools.map(t => (
         <button
           key={t.id}
+          data-tour={t.tour}
           onClick={() => { t.onClick(); setToolsOpen(false); }}
           className={cn(
             'w-full flex items-center gap-3 px-3 min-h-11 rounded-lg text-sm text-left transition-colors',
@@ -429,7 +431,10 @@ export const TopNavigation = () => {
         * inside it is invisible — which is exactly what happened when the
         * overflow button lived in here. It stays outside, pinned to the end,
         * where it is also always reachable without scrolling. */}
-      <div className="flex min-w-0 flex-1 overflow-x-auto no-scrollbar">{viewButtons}</div>
+      <div
+        className="flex min-w-0 flex-1 overflow-x-auto no-scrollbar"
+        data-tour="view-bar"
+      >{viewButtons}</div>
       <div className="relative shrink-0">
         <button
           onClick={() => setViewMenuOpen(!viewMenuOpen)}
@@ -578,6 +583,7 @@ export const TopNavigation = () => {
                 aria-label={`Workspace preset: ${activeMode.label}. Click to switch.`}
                 aria-expanded={false}
                 data-testid="ui-mode-chip"
+                data-tour="ui-mode"
                 className={cn(
                   'flex items-center gap-1.5 px-2.5 rounded-lg text-xs font-medium bg-app-text/5 hover:bg-app-text/10 transition-colors',
                   touchSized ? 'min-h-10' : 'py-1.5',
@@ -644,6 +650,7 @@ export const TopNavigation = () => {
         {!compactTools && tools.map(t => (
           <button
             key={t.id}
+            data-tour={t.tour}
             onClick={t.onClick}
             title={t.hint}
             // The hint, not the short label: an icon-only button's accessible
@@ -665,6 +672,7 @@ export const TopNavigation = () => {
           <div className="relative" ref={managerRef}>
             <button
               onClick={() => setLensManagerOpen(!lensManagerOpen)}
+              data-tour="lens-toggle"
               title={`Lens — ${lensOn ? 'edits visible' : 'edits hidden'} (${overrides.length})`}
               className={cn(
                 'rounded-lg transition-colors',

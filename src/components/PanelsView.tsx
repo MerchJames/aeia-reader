@@ -383,6 +383,8 @@ export const PanelsView = () => {
                         `is-${state}`,
                       )}
                       data-kind={panel.kind}
+                      // The passage this panel was drawn from — see ScriptView.
+                      data-msg={panel.messageId}
                       data-art={panel.art ? 'true' : 'false'}
                       data-state={state}
                       /* The panel being drawn is where the words are arriving,

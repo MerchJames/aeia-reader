@@ -9,7 +9,7 @@
  * unanswerable from this side of the wire.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle, Check, ChevronDown, ChevronRight, ChevronUp, Link2, ListPlus, Server, X,
 } from 'lucide-react';
@@ -22,7 +22,7 @@ import {
   STEP_INFO, describeSteps, modelCost, moveStep, reconcileSteps, toggleStep,
 } from '../utils/replyPipeline';
 import { MaterialPicker } from './MaterialPicker';
-import { useProxy, type ProxyEntry } from '../hooks/useProxy';
+import { proxyLink, subscribeProxyLink } from '../utils/proxyLink';
 import { cn } from '../utils/cn';
 
 /**
@@ -60,13 +60,6 @@ const Row = ({ label, children }: { label: string; children: React.ReactElement 
     <div className="min-w-0">{children}</div>
   </div>
 );
-
-const HOLDER = 'proxy';
-
-const call = async <T,>(cmd: string, args?: Record<string, unknown>): Promise<T> => {
-  const { invoke } = await import('@tauri-apps/api/core');
-  return invoke<T>(cmd, args);
-};
 
 const Copy = ({ label, value, secret }: { label: string; value: string; secret?: boolean }) => {
   const [shown, setShown] = useState(!secret);
@@ -149,50 +142,22 @@ export const ProxyPanel = ({ onClose }: { onClose: () => void }) => {
       .filter(Boolean).join(' · ');
   const replySummary = describeSteps(reply);
 
-  const [port, setPort] = useState<number | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [log, setLog] = useState<ProxyEntry[]>([]);
-  const token = useRef(isDesktop() ? bridgeToken() : '');
-
-  // Newest first, and bounded: this is a health readout, not a history.
-  useProxy(enabled, entry => setLog(prev => [entry, ...prev].slice(0, 12)));
-
   /*
-   * The listener's lifetime is this switch, not this screen.
+   * This screen watches the endpoint; it does not own it.
    *
-   * `bridge_start` is named-holder based, so the sync panel opening and closing
-   * cannot take the endpoint down under a story in progress — and closing this
-   * screen does not either. Only turning it off does.
+   * The switch below writes one persisted setting and `ProxyHost` — mounted at
+   * the root — does the rest: opening the socket, draining the requests,
+   * closing it again. That is not a tidy-up. It is the difference between an
+   * endpoint that works while the reader writes and one that only works while
+   * they are looking at this dialog, which is what it used to be.
    */
-  useEffect(() => {
-    if (!isDesktop()) return;
-    let gone = false;
-    void (async () => {
-      try {
-        if (enabled) {
-          const opened = await call<number>('bridge_start', { token: token.current, holder: HOLDER });
-          if (!gone) { setPort(opened); setError(null); }
-        } else {
-          await call('bridge_stop', { holder: HOLDER });
-          if (!gone) setPort(null);
-        }
-      } catch (e: any) {
-        if (!gone) setError(String(e?.message ?? e));
-      }
-    })();
-    return () => { gone = true; };
-  }, [enabled]);
+  const [{ port, error, log }, setLink] = useState(proxyLink);
+  useEffect(() => subscribeProxyLink(setLink), []);
 
-  // The socket can close itself under us — the app quitting, a port conflict —
-  // and a screen that kept claiming an address would send the reader hunting
-  // through SillyTavern for a fault that is here.
-  useEffect(() => {
-    if (!enabled || !isDesktop()) return;
-    const id = window.setInterval(() => {
-      void call<number | null>('bridge_status').then(open => setPort(open ?? null)).catch(() => {});
-    }, 4000);
-    return () => window.clearInterval(id);
-  }, [enabled]);
+  // Read once for display. The same value `ProxyHost` starts the listener with
+  // — `bridgeToken()` mints it once and keeps it — so what the reader copies
+  // into SillyTavern is what the socket will accept.
+  const apiToken = useMemo(() => (isDesktop() ? bridgeToken() : ''), []);
 
   const address = port ? `http://127.0.0.1:${port}/v1` : null;
 
@@ -267,7 +232,7 @@ export const ProxyPanel = ({ onClose }: { onClose: () => void }) => {
                     In SillyTavern: API → Chat Completion → <b>Custom (OpenAI-compatible)</b>.
                   </p>
                   <Copy label="Endpoint" value={address ?? 'starting…'} />
-                  <Copy label="API key" value={token.current} secret />
+                  <Copy label="API key" value={apiToken} secret />
                   <p className="text-[11px] text-app-muted leading-relaxed">
                     For two swipes, set <b>Number of responses</b> to 2 in SillyTavern. With it at 1
                     a second version is not a swipe there — it would be added to the end of the

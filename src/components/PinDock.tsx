@@ -275,6 +275,7 @@ const PinCard = ({
       ref={cardRef}
       style={style}
       hidden={hidden}
+      data-tour="pin-dock"
       className={cn(
         'rounded-xl border border-app-border bg-surface/95 shadow-lg overflow-hidden',
         !locked && 'cursor-move',

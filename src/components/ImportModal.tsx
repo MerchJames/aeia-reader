@@ -158,6 +158,10 @@ export const ImportModal = ({
         <button
           onClick={() => onImport(cards.map(c => c.file))}
           disabled={importing}
+          // Named, because its LABEL is not stable: it reads "Import", "Import
+          // with 2 cards", or "Importing…" depending on state, and a test that
+          // matched the text would break the first time somebody added a card.
+          data-testid="import-confirm"
           className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-accent text-white font-bold text-sm hover:opacity-90 disabled:opacity-50 transition-opacity"
         >
           {importing ? <Loader2 size={15} className="animate-spin" /> : <Upload size={15} />}

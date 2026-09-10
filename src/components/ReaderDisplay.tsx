@@ -21,6 +21,7 @@ import { SceneSpine } from './SceneSpine';
 import { motion, AnimatePresence } from 'motion/react';
 import { MessageBlock } from './MessageBlock';
 import { SelectionPopover } from './SelectionPopover';
+import { openEditorView } from '../utils/editorTarget';
 import { AnnotationThread } from './AnnotationThread';
 import { AskCharacter } from './AskCharacter';
 import { LiveReactor } from './LiveReactor';
@@ -690,6 +691,14 @@ export const ReaderDisplay = () => {
         onRewrite={store.aiBaseUrl && store.aiModel ? () => {
           if (!selPopover.messageId) return;
           store.sendToRewrite(selPopover.messageId, selPopover.text);
+          window.getSelection()?.removeAllRanges();
+          setSelPopover(null);
+        } : undefined}
+        // Only when there IS a cowriter: this asks a specific person what they
+        // would do, and without one there is nobody to ask.
+        onEditorView={store.cowriter && store.aiBaseUrl && store.aiModel ? () => {
+          if (!selPopover.messageId) return;
+          openEditorView({ span: selPopover.text, messageId: selPopover.messageId });
           window.getSelection()?.removeAllRanges();
           setSelPopover(null);
         } : undefined}

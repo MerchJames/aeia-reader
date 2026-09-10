@@ -313,6 +313,12 @@ export const ScriptView = () => {
                         live && store.isStreaming && 'script-live',
                       )}
                       data-kind={line.kind}
+                      // Which passage these words came from. The view already
+                      // knew — `jumpToMessage` uses it below — but never said so
+                      // in the DOM, so anything working from a SELECTION (the
+                      // cowriter's editor view, and highlights after it) had no
+                      // way to tell what had been selected.
+                      data-msg={line.messageId}
                       data-reveal-edge={live ? '' : undefined}
                       onClick={() => store.jumpToMessage(line.messageId)}
                       title="Go to this passage"

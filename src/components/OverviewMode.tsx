@@ -4,16 +4,116 @@ import { cn } from '../utils/cn';
 import { DndContext, closestCenter, KeyboardSensor, MouseSensor, TouchSensor, useSensor, useSensors } from '@dnd-kit/core';
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { GripVertical, PlayCircle, Settings, Star } from 'lucide-react';
+import { Blend, GripVertical, PlayCircle, Settings, Star } from 'lucide-react';
 import { Chain } from '../types';
+import { useAuraV2Store } from '../stores/useAuraV2Store';
+import { blendProblem, chainsFor, isStale } from '../utils/chatterBlend';
+import { useChatterBlend } from '../hooks/useChatterBlend';
+import { BlendModal } from './BlendModal';
 
 interface SortableChainItemProps {
   chain: Chain;
   index: number;
 }
 
+/**
+ * Which version of this passage is showing, and the button that makes another.
+ *
+ * The Overview is the right home for this because it is already the list of
+ * passages — a switcher anywhere else would be a second place to think about
+ * the shape of the story.
+ *
+ * "Original" is always first and always present. A reader who has made three
+ * blends must be able to get back to what they actually wrote without deleting
+ * anything, and it must be the obvious click rather than a menu item.
+ */
+const ChainVersions = ({ chain }: { chain: Chain }) => {
+  const storyId = useAppStore(s => s.currentStory?.id);
+  const aiReady = useAppStore(s => !!s.aiBaseUrl && !!s.aiModel);
+  const lensChains = useAuraV2Store(s => (storyId ? s.lensChainsByStory[storyId] : undefined));
+  const activeByChain = useAuraV2Store(s => (storyId ? s.activeLensChainByStory[storyId] : undefined));
+  const setActiveLensChain = useAuraV2Store(s => s.setActiveLensChain);
+  const removeLensChain = useAuraV2Store(s => s.removeLensChain);
+  const { run, blend, reset } = useChatterBlend();
+  const [open, setOpen] = React.useState(false);
+
+  const versions = chainsFor(lensChains, chain.id);
+  const activeId = activeByChain?.[chain.id];
+  const problem = blendProblem(chain);
+
+  const start = () => { setOpen(true); void blend(chain); };
+  const close = () => { setOpen(false); reset(); };
+
+  return (
+    <>
+      <div className="flex items-center flex-wrap gap-1.5 mt-2">
+        {versions.length > 0 && (
+          <>
+            <button
+              onClick={() => storyId && setActiveLensChain(storyId, chain.id, null)}
+              className={cn(
+                'text-[10px] px-1.5 py-0.5 rounded border transition-colors',
+                !activeId ? 'border-accent bg-accent/10 text-accent' : 'border-app-border opacity-60 hover:opacity-100',
+              )}
+            >
+              Original
+            </button>
+            {versions.map(v => {
+              const stale = isStale(v, chain);
+              return (
+                <span key={v.id} className="flex items-center">
+                  <button
+                    onClick={() => storyId && setActiveLensChain(storyId, chain.id, v.id)}
+                    title={stale
+                      // Not deleted, and not silently swapped out: the reader
+                      // may still want it, and throwing away work they asked
+                      // for is not this feature's decision to make.
+                      ? 'This passage has changed since this version was made.'
+                      : undefined}
+                    className={cn(
+                      'text-[10px] px-1.5 py-0.5 rounded-l border transition-colors',
+                      activeId === v.id
+                        ? 'border-accent bg-accent/10 text-accent'
+                        : 'border-app-border opacity-60 hover:opacity-100',
+                      stale && 'italic',
+                    )}
+                  >
+                    {v.label}{stale ? ' ·' : ''}
+                  </button>
+                  <button
+                    onClick={() => storyId && removeLensChain(storyId, v.id)}
+                    aria-label={`Delete ${v.label}`}
+                    className="text-[10px] px-1 py-0.5 rounded-r border border-l-0 border-app-border opacity-40 hover:opacity-100 hover:text-red-500"
+                  >
+                    ×
+                  </button>
+                </span>
+              );
+            })}
+          </>
+        )}
+        <button
+          onClick={start}
+          disabled={!!problem || !aiReady}
+          data-tour="blend-button"
+          data-testid="blend-button"
+          title={problem ?? (aiReady ? 'Weave this turn and its reply into one passage' : 'Connect an endpoint first')}
+          className="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border border-app-border opacity-60 hover:opacity-100 disabled:opacity-25 disabled:hover:opacity-25"
+        >
+          <Blend size={10} /> Blend
+        </button>
+      </div>
+
+      {open && <BlendModal chain={chain} run={run} onRetry={() => void blend(chain)} onClose={close} />}
+    </>
+  );
+};
+
 const SortableChainItem = ({ chain, index }: SortableChainItemProps) => {
   const store = useAppStore();
+  const storyId = useAppStore(s => s.currentStory?.id);
+  const lensChains = useAuraV2Store(s => (storyId ? s.lensChainsByStory[storyId] : undefined));
+  const activeByChain = useAuraV2Store(s => (storyId ? s.activeLensChainByStory[storyId] : undefined));
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: chain.id });
   const [showSettings, setShowSettings] = React.useState(false);
 
@@ -23,6 +123,14 @@ const SortableChainItem = ({ chain, index }: SortableChainItemProps) => {
     zIndex: isDragging ? 10 : 1,
   };
 
+  /*
+   * `chain.messages` is already the selected version.
+   *
+   * The substitution happens in `buildChains`, so the Overview, the reader, the
+   * reveal and the exporters are all looking at one array. This used to resolve
+   * it per-component and only here, which meant the switcher changed the
+   * preview and the story you actually read was untouched.
+   */
   const previewText = chain.messages.length > 0
     ? chain.messages[0].content.slice(0, 120)
     : 'Empty chain';
@@ -81,6 +189,8 @@ const SortableChainItem = ({ chain, index }: SortableChainItemProps) => {
           </div>
 
           <p className="text-sm opacity-80 italic truncate">{previewText}…</p>
+
+          <ChainVersions chain={chain} />
 
           {showSettings && chain.starred && (
             <div className="mt-4 p-3 rounded-lg bg-app-text/5 text-sm">
@@ -149,7 +259,10 @@ export const OverviewMode = () => {
   };
 
   return (
-    <div className="flex-1 min-h-0 overflow-y-auto pb-40 px-4 pt-8 max-w-4xl mx-auto w-full">
+    <div
+      className="flex-1 min-h-0 overflow-y-auto pb-40 px-4 pt-8 max-w-4xl mx-auto w-full"
+      data-tour="overview-list"
+    >
       <h2 className="text-2xl font-serif font-bold mb-2">Story Overview</h2>
       <p className="text-muted mb-8 text-sm">
         Drag to reorder chains. Star segments to give them custom animation and playback speed.

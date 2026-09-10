@@ -64,6 +64,7 @@ export const PlaybackControls = () => {
   return (
     <div
       data-testid="playback-bar"
+      data-tour="playback"
       className="fixed bottom-safe left-1/2 -translate-x-1/2 z-40 flex flex-col items-center gap-2 p-3 rounded-2xl shadow-xl border border-app-border bg-surface/90 backdrop-blur-md w-[min(420px,90vw)]"
     >
       <button
@@ -154,6 +155,7 @@ export const PlaybackControls = () => {
         )}
         <span className="ml-auto font-medium">Speed</span>
         <input
+          aria-label="Reveal speed"
           type="range"
           min="1"
           max="100"

@@ -82,7 +82,7 @@ export const FolderRail = ({
   );
 
   return (
-    <div className="flex flex-wrap items-center gap-1.5">
+    <div className="flex flex-wrap items-center gap-1.5" data-tour="folder-rail">
       <Chip id={ALL_FOLDERS} label="All" count={total} />
       {/* Unfiled only appears when something is actually unfiled. Before the
         * first folder exists everything is unfiled, and a chip saying so would

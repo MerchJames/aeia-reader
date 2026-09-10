@@ -466,9 +466,12 @@ export const SyncPanel = ({ onClose, bridge, desktop, embedded }: SyncPanelProps
     .filter(({ row }) => showQuiet || !QUIET.includes(row.status));
 
   return (
-    <div className={embedded
-      ? 'min-h-dvh'
-      : 'fixed inset-0 z-[80] flex items-center justify-center bg-black/60 p-4'}>
+    <div
+      data-tour="sync-panel"
+      className={embedded
+        ? 'min-h-dvh'
+        : 'fixed inset-0 z-[80] flex items-center justify-center bg-black/60 p-4'}
+    >
       <div className={embedded
         ? 'w-full min-h-dvh flex flex-col bg-app-surface'
         : 'w-full max-w-3xl max-h-[88vh] flex flex-col rounded-xl border border-app-border bg-app-surface shadow-2xl'}>

@@ -104,7 +104,10 @@ export const AlertHost = () => {
             </div>
             <button
               onClick={() => setAlerts(prev => dropAlert(prev, alert.id))}
-              className="shrink-0 self-start p-1 -m-1 rounded text-app-muted hover:text-app-text"
+              /* 40x40 of hit area around a 13px glyph, pulled back out with
+                 negative margin so it still sits tight in the corner. This is
+                 the only way to clear an alert, and it was 21x21. */
+              className="shrink-0 self-start -m-1.5 min-h-10 min-w-10 flex items-center justify-center rounded text-app-muted hover:text-app-text"
               aria-label="Dismiss"
             >
               <X size={13} />

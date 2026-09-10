@@ -186,7 +186,10 @@ export const BackupPanel = ({ onClose }: BackupPanelProps) => {
   const safe = storage?.durability === 'persisted';
 
   return (
-    <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/60 p-4">
+    <div
+      className="fixed inset-0 z-[90] flex items-center justify-center bg-black/60 p-4"
+      data-tour="backup-panel"
+    >
       <div className="w-full max-w-2xl max-h-[88vh] flex flex-col rounded-xl border border-app-border
                       bg-app-surface shadow-2xl">
 

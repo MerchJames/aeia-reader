@@ -1,6 +1,6 @@
 import React, { useMemo, useRef, useState } from 'react';
 import {
-  BookOpen, Check, FileJson, FileText, Image, MessageSquare, RefreshCw, Settings,
+  BookOpen, Check, FileJson, FileText, GitBranch, Image, MessageSquare, RefreshCw, Settings,
   Sparkles, Tag, Trash2, Upload, X,
 } from 'lucide-react';
 import { useAppStore } from '../store';
@@ -64,6 +64,21 @@ const coverGradient = (id: string) => {
 
 const StoryCard = ({ story, suggestions }: { story: StoryMeta; suggestions: string[] }) => {
   const openStory = useAppStore(s => s.openStory);
+  const setActiveTimeline = useAppStore(s => s.setActiveTimeline);
+  const [branchMenu, setBranchMenu] = useState<string | null>(null);
+
+  /**
+   * Open a story straight onto one of its what-ifs.
+   *
+   * Two steps and they must be in this order: the story has to be loaded before
+   * a timeline can be chosen, because `setActiveTimeline` works on the story
+   * that is open. Choosing the main timeline is `null`, which is also what a
+   * story with no branch has — so "Main timeline" costs nothing special.
+   */
+  const openTimeline = async (id: string, timelineId: string | null) => {
+    await openStory(id);
+    setActiveTimeline(timelineId);
+  };
   const deleteStoryById = useAppStore(s => s.deleteStoryById);
   const renameStory = useAppStore(s => s.renameStory);
   const stSyncEnabled = useAppStore(s => s.stSyncEnabled);
@@ -84,6 +99,8 @@ const StoryCard = ({ story, suggestions }: { story: StoryMeta; suggestions: stri
     const next = draftTitle.trim();
     if (next && next !== story.title) void renameStory(story.id, next);
   };
+  // Named because the timeline mark has to know whether sync took its slot.
+  const syncShown = stSyncEnabled && story.format === 'sillytavern';
   const pct = story.progressPct ?? 0;
   const tags = tagsFor(story, userTags);
   const since = sinceLabel(lastReadAt);
@@ -99,11 +116,12 @@ const StoryCard = ({ story, suggestions }: { story: StoryMeta; suggestions: stri
     <div
       onClick={() => void openStory(story.id)}
       data-testid="story-card"
-      className="group relative rounded-2xl border border-app-border bg-surface shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition-all cursor-pointer overflow-hidden"
+      data-tour="library-card"
+      className="group relative rounded-2xl border border-app-border bg-surface shadow-sm hover:shadow-lg hover:-translate-y-0.5 transition-all cursor-pointer"
     >
       <div className="flex items-stretch gap-0">
         <div className={cn(
-          'w-24 shrink-0 flex items-center justify-center overflow-hidden',
+          'w-24 shrink-0 flex items-center justify-center overflow-hidden rounded-l-2xl',
           !story.avatar && `bg-gradient-to-br ${coverGradient(story.id)}`,
         )}>
           {story.avatar ? (
@@ -300,7 +318,7 @@ const StoryCard = ({ story, suggestions }: { story: StoryMeta; suggestions: stri
         * clutter the gate exists to avoid. It opens the story first — the
         * panel aligns against the open one — which is why it is a request
         * rather than a direct call. */}
-      {stSyncEnabled && story.format === 'sillytavern' && (
+      {syncShown && (
         <button
           onClick={(e) => { e.stopPropagation(); requestStSync(story.id); }}
           title={story.stChatId
@@ -312,6 +330,57 @@ const StoryCard = ({ story, suggestions }: { story: StoryMeta; suggestions: stri
         >
           <RefreshCw size={15} />
         </button>
+      )}
+      {/*
+        * The what-ifs, up with the other per-story actions.
+        *
+        * Beside sync — or in sync's place when there is nothing to sync, so the
+        * row does not gap. Unlike its neighbours this is visible without
+        * hovering: it is information about the story, and a reader scanning the
+        * library for the chat that has three endings should be able to see it.
+        */}
+      {!!story.branches?.length && (
+        <div
+          className={cn('absolute top-2.5', syncShown ? 'right-[4.75rem]' : 'right-11')}
+          onClick={e => e.stopPropagation()}
+        >
+          <button
+            onClick={() => setBranchMenu(m => (m === story.id ? null : story.id))}
+            title={`${story.branches.length + 1} timelines — choose which to read`}
+            aria-label="Choose a timeline"
+            aria-expanded={branchMenu === story.id}
+            data-testid={`story-branches-${story.id}`}
+            className={cn(`flex items-center gap-1 px-1.5 min-h-7 rounded-md text-[11px]
+              font-medium transition-colors`,
+            branchMenu === story.id
+              ? 'text-accent bg-accent/10'
+              : 'text-muted hover:text-accent hover:bg-accent/10')}
+          >
+            <GitBranch size={13} /> {story.branches.length + 1}
+          </button>
+          {branchMenu === story.id && (
+            // Anchored to its RIGHT edge so it opens inward, over the card,
+            // rather than off the side of the library.
+            <div
+              className="absolute right-0 top-full mt-1 z-40 w-56 rounded-lg border
+                border-app-border bg-surface shadow-2xl p-1"
+              data-testid="branch-menu"
+            >
+              {[{ id: null, name: 'Main timeline' }, ...story.branches].map(t => (
+                <button
+                  key={t.id ?? '§main'}
+                  onClick={() => { setBranchMenu(null); void openTimeline(story.id, t.id); }}
+                  className={cn(`w-full text-left px-2 min-h-9 rounded text-xs truncate
+                    hover:bg-app-text/5`,
+                  (story.activeTimeline ?? null) === t.id && 'text-accent')}
+                >
+                  {t.name}
+                  {(story.activeTimeline ?? null) === t.id && ' ·'}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       )}
       <button
         onClick={(e) => {
@@ -479,6 +548,7 @@ export const Library = () => {
           <button
             onClick={() => fileInputRef.current?.click()}
             disabled={importing}
+            data-tour="library-import"
             className="flex items-center justify-center gap-2 px-4 min-h-11 flex-1 sm:flex-none rounded-lg bg-accent text-white text-sm font-medium hover:opacity-90 disabled:opacity-50 transition-opacity shadow-sm"
           >
             <Upload size={16} />

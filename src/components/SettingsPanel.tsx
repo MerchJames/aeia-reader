@@ -2,15 +2,19 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlignLeft, Brain, ChevronDown, Clapperboard, Download, EyeOff, FileText, Focus, ImageIcon, LayoutTemplate, Loader2, MessageSquareQuote,
   Headphones, MessageCircle, Music2, Palette, PauseCircle, Play, PlayCircle, Quote, RefreshCw, Save, Server, Sparkles, Square, Terminal, Trash2, Type,
-  Pause, Plus, Popcorn, Share2, UserRound, Volume2, Wand2, X, Zap, ZoomIn, Database, Compass,
-} from 'lucide-react';
+  MessagesSquare, Pause, Pencil, Plus, Popcorn, ScanText, Share2, UserRound, Volume2, Wand2, X, Zap, ZoomIn, Database, Compass, FileJson } from 'lucide-react';
 import { castOf } from '../utils/askCharacter';
 import { MAGNIFIER_STYLES } from '../utils/readingFocus';
 import { ColorableChannel, MagnifierStyle, MarkupPreset, STREAM_EFFECTS, StoredChannel } from '../types';
 import {
   CHARACTER_COLOR_NONE, MARKUP_CHANNELS, MARKUP_COLORS, isDefaultMarkup, sanitizeMarkupPresets,
 } from '../utils/markupStyles';
+import { MAX_WATCHERS } from '../utils/liveReaction';
+import { readingCast } from '../utils/askCharacter';
+import { peekState, setPeekActive, subscribePeek } from '../utils/peek';
 import { InviteSheet } from './InviteSheet';
+import { TourPicker } from './TourPicker';
+import { TOURS } from '../utils/tours';
 import { useAppStore } from '../store';
 import { useAuraV2Store } from '../stores/useAuraV2Store';
 import { useSceneDirectorStore } from '../stores/useSceneDirectorStore';
@@ -383,7 +387,7 @@ const BackdropSection = () => {
   const fileRef = useRef<HTMLInputElement>(null);
 
   return (
-    <Section title="Stage backdrops">
+    <Section title="Stage backdrops" tour="settings-backdrops">
       <div className="flex items-center gap-2 text-xs">
         <input
           type="text"
@@ -538,15 +542,26 @@ const BuildStamp = () => {
       }}
       title="Copy this line — it says exactly which build you are running"
       data-testid="build-stamp"
-      className="text-[10px] text-muted/70 hover:text-muted text-left pt-3"
+      className="text-[10px] text-muted/70 hover:text-muted text-left pt-3 min-h-10 flex items-end"
     >
       {copied ? 'copied' : line}
     </button>
   );
 };
 
-const Section = ({ title, children }: { title: string; children: React.ReactNode }) => (
-  <div>
+const Section = ({ title, children, tour }: {
+  title: string;
+  children: React.ReactNode;
+  /**
+   * A guided-tour anchor for this whole section.
+   *
+   * Explicit rather than a props spread: `data-tour` passed to a component
+   * that does not forward it is dropped in silence, and JSX exempts
+   * hyphenated attributes from type checking, so nothing anywhere says so.
+   */
+  tour?: string;
+}) => (
+  <div data-tour={tour}>
     <label className="text-xs font-bold uppercase tracking-wider text-muted mb-2 block">
       {title}
     </label>
@@ -589,7 +604,9 @@ const FoldedSection = ({
         onClick={() => setOpen(o => !o)}
         aria-expanded={open}
         data-testid={`section-${title.toLowerCase().replace(/\s+/g, '-')}`}
-        className="w-full flex items-center gap-1.5 mb-2 text-left group"
+        // min-h-10 to match `Advanced` below: this is a real control — the only
+        // way into the section — and a 16px-tall one is not tappable.
+        className="w-full flex items-center gap-1.5 mb-1 min-h-10 text-left group"
       >
         <span className="text-xs font-bold uppercase tracking-wider text-muted group-hover:text-app-text transition-colors">
           {title}
@@ -640,7 +657,7 @@ const ReadingModeSection = () => {
   const matches = modeMatches(store, mode);
   const diff = modeDiff(store, mode);
   return (
-    <Section title="Reading mode">
+    <Section title="Reading mode" tour="reading-mode">
       <div className="grid grid-cols-2 gap-2">
         {READING_MODE_DEFS.map(def => (
           <button
@@ -870,7 +887,7 @@ const CharacterColorSection = () => {
   }, [story]);
 
   return (
-    <Section title="Character Colors">
+    <Section title="Character Colors" tour="settings-colors">
       <Toggle
         icon={<Palette size={16} />}
         label="Color by character"
@@ -916,6 +933,9 @@ const SelectRow = ({
   <div className="flex gap-2 items-center text-sm">
     <span className="w-24 shrink-0">{label}</span>
     <select
+      // The visible text beside a control is not attached to it. Without this a
+      // screen reader announces the row as "combo box" and nothing else.
+      aria-label={label}
       value={value}
       onChange={(e) => onChange(e.target.value)}
       data-testid={testId}
@@ -980,6 +1000,7 @@ const KokoroSettings = () => {
     <div className="flex gap-2 items-center text-sm">
       <span className="w-24 shrink-0 truncate" title={label}>{label}</span>
       <select
+        aria-label={label}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         className="flex-1 bg-app-text/5 border border-app-border rounded-md px-2 min-h-10 outline-none min-w-0"
@@ -1096,6 +1117,7 @@ const AmbientSettings = () => {
       <div className="flex gap-2 items-center text-sm">
         <span className="w-24 shrink-0">Volume</span>
         <input
+          aria-label="Volume"
           type="range" min="0" max="1" step="0.05"
           value={store.ambientVolume}
           onChange={(e) => store.setAmbientVolume(Number(e.target.value))}
@@ -1106,6 +1128,7 @@ const AmbientSettings = () => {
       <div className="flex gap-2 items-center text-sm">
         <span className="w-24 shrink-0 truncate" title={themeLabel}>{themeLabel}</span>
         <select
+          aria-label={themeLabel}
           value={selectValue}
           onChange={(e) => onSelect(e.target.value)}
           className="flex-1 bg-app-text/5 border border-app-border rounded-md px-2 min-h-10 outline-none min-w-0"
@@ -1238,6 +1261,42 @@ const LiveReactionControls = () => {
   const setFreeze = useAppStore(s => s.setLiveReactionFreeze);
   const frame = useAppStore(s => s.liveReactionFrame);
   const setFrame = useAppStore(s => s.setLiveReactionFrame);
+  const reactors = useAppStore(s => s.liveReactors);
+  const setReactors = useAppStore(s => s.setLiveReactors);
+  const crossTalk = useAppStore(s => s.liveCrossTalk);
+  const removeVisitor = useAuraV2Store(s => s.removeVisitor);
+  const ctx = useAppStore(s => s.liveReactionContext);
+  const cowriter = useAppStore(s => s.cowriter);
+  const setCowriter = useAppStore(s => s.setCowriter);
+  const cowriterWho = useAppStore(s => s.cowriterWho);
+  const setCowriterWho = useAppStore(s => s.setCowriterWho);
+  const setCtx = useAppStore(s => s.setLiveReactionContext);
+  const setCrossTalk = useAppStore(s => s.setLiveCrossTalk);
+  /*
+   * The room, resolved.
+   *
+   * `liveReactors` empty means "whoever `liveReactor` is" — the single-companion
+   * path, which is what a reader who never opens this list has. Resolving it
+   * here means the checkboxes show that person ticked rather than an empty list
+   * that looks like nobody is watching.
+   */
+  const cast = useMemo(() => (
+    reactors.length ? reactors : [reactor || story?.characterName || ''].filter(Boolean)
+  ), [reactors, reactor, story?.characterName]);
+
+  const toggleWatcher = (name: string) => {
+    const has = cast.includes(name);
+    const next = has ? cast.filter(n => n !== name) : [...cast, name];
+    setReactors(next);
+    // `liveReactor` stays the single pick, so turning the room back down to one
+    // person leaves that person watching rather than falling back to the lead.
+    setReactor(next.length === 1 ? next[0] : (next[0] ?? ''));
+  };
+
+  const linger = useAppStore(s => s.liveReactionLinger);
+  const setLinger = useAppStore(s => s.setLiveReactionLinger);
+  const length = useAppStore(s => s.liveReactionLength);
+  const setLength = useAppStore(s => s.setLiveReactionLength);
   const visitors = useAuraV2Store(s => (storyId ? s.visitorsByStory[storyId] : undefined));
   const [inviting, setInviting] = useState(false);
 
@@ -1254,6 +1313,35 @@ const LiveReactionControls = () => {
   return (
     <>
       <Toggle
+        icon={<Pencil size={16} />}
+        label="Write with someone (AI)"
+        hint="The same character, reading it as a writer. One note per passage, after it finishes — what is working, what is slack, what the story just walked past."
+        value={cowriter}
+        onChange={setCowriter}
+        testId="cowriter-toggle"
+      />
+      {cowriter && (
+        <div className="flex flex-col gap-1.5 px-2 pb-1">
+          <label className="text-[11px] text-muted">Who is helping</label>
+          <select
+            aria-label="Who is helping write"
+            className={field}
+            value={cowriterWho}
+            onChange={(e) => setCowriterWho(e.target.value)}
+            data-testid="cowriter-who"
+          >
+            <option value="">{story?.characterName || 'The character'}</option>
+            {who.map(n => <option key={n} value={n}>{n}</option>)}
+          </select>
+          <span className="text-[11px] text-muted leading-snug">
+            They read the passage <b>whole</b>, including the end — the opposite of the
+            companion above, who must not know what is coming. Notes land after a passage,
+            never mid-sentence, and they see the pins you have put in context.
+          </span>
+        </div>
+      )}
+
+      <Toggle
         icon={<Popcorn size={16} />}
         label="Read with someone (AI)"
         hint="They watch it with you and react as it lands — one or two lines, in their voice. Nothing they say becomes part of the story."
@@ -1263,17 +1351,81 @@ const LiveReactionControls = () => {
       />
       {on && (
         <div className="flex flex-col gap-1.5 px-2 pb-1">
-          <label className="text-[11px] text-muted">Who is watching</label>
+          <label className="text-[11px] text-muted">
+            Who is watching
+            {cast.length > 1 && <span className="ml-1 opacity-60">· {cast.length} of {MAX_WATCHERS}</span>}
+          </label>
+          {/*
+            * A list, not a dropdown, once there is more than one.
+            *
+            * Ticking people is the whole interaction here — a multi-select
+            * `<select>` is the worst control in HTML and a dropdown cannot show
+            * you who is already in the room, which is the thing you need to see
+            * while you choose. The lead stays first because they are the
+            * default and most readers will never tick anything else.
+            */}
+          <div className="flex flex-col gap-1 max-h-44 overflow-y-auto rounded-md
+            border border-app-border p-1">
+            {[{ id: '', label: story?.characterName || 'The character' },
+              ...who.filter(n => n !== story?.characterName).map(n => ({ id: n, label: n }))]
+              .map(({ id, label }) => {
+                const name = id || story?.characterName || '';
+                const picked = cast.includes(name);
+                const full = cast.length >= MAX_WATCHERS && !picked;
+                /*
+                 * Only a GUEST can be shown the door.
+                 *
+                 * Everyone else on this list is in the story — they are read out
+                 * of the transcript, so "removing" one would mean it comes
+                 * straight back on the next render and the button would be a
+                 * lie. A visitor is different: the reader added them by hand, to
+                 * this story, and nothing else put them there.
+                 */
+                const guest = (visitors ?? []).find(v => v.name === name);
+                return (
+                  <div
+                    key={id || '§lead'}
+                    className={cn('group flex items-center gap-2 px-1.5 min-h-9 rounded text-xs',
+                      full ? 'opacity-40' : 'hover:bg-app-text/5')}
+                  >
+                    {/* The label wraps only the checkbox and the name, so the
+                      * remove button beside it is not part of the hit area that
+                      * toggles them. */}
+                    <label className={cn('flex items-center gap-2 flex-1 min-w-0',
+                      full ? '' : 'cursor-pointer')}>
+                      <input
+                        type="checkbox"
+                        checked={picked}
+                        disabled={full}
+                        onChange={() => toggleWatcher(name)}
+                        className="accent-[var(--app-accent)]"
+                        data-testid={`live-watcher-${id || 'lead'}`}
+                      />
+                      <span className="truncate">{label}</span>
+                    </label>
+                    {guest && storyId && (
+                      <button
+                        onClick={() => {
+                          // Out of the room as well as off the list: a name left
+                          // ticked here would still be watching, now with no
+                          // dossier behind it.
+                          if (cast.includes(name)) toggleWatcher(name);
+                          removeVisitor(storyId, guest.id);
+                        }}
+                        title={`Remove ${name}`}
+                        aria-label={`Remove ${name}`}
+                        data-testid={`live-remove-${name}`}
+                        className="shrink-0 grid place-items-center min-h-7 min-w-7 rounded
+                          text-app-text/40 hover:text-rose-400 hover:bg-rose-500/10"
+                      >
+                        <X size={12} />
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+          </div>
           <div className="flex items-center gap-1.5">
-            <select
-              className={field}
-              value={reactor}
-              onChange={(e) => setReactor(e.target.value)}
-              data-testid="live-reactor"
-            >
-              <option value="">{story?.characterName || 'The character'}</option>
-              {who.map(n => <option key={n} value={n}>{n}</option>)}
-            </select>
             {/* The same door as the interview's cast strip: the moment you are
               * choosing who watches with you is the moment you notice the person
               * you want is not on the list. */}
@@ -1291,8 +1443,25 @@ const LiveReactionControls = () => {
           {inviting && (
             <InviteSheet
               onClose={() => setInviting(false)}
-              onInvited={(name) => setReactor(name)}
+              onInvited={(name) => toggleWatcher(name)}
             />
+          )}
+
+          {cast.length > 1 && (
+            <>
+              <Toggle
+                icon={<MessagesSquare size={16} />}
+                label="They talk to each other"
+                hint="Someone who has just heard the person beside them gasp can answer it, argue with it, or ignore it and stay with the page."
+                value={crossTalk}
+                onChange={setCrossTalk}
+              />
+              <span className="text-[11px] text-muted leading-snug">
+                One casting call per passage decides who breaks in and where, so a room of
+                five costs about what one companion does — a few lines per passage between
+                them, not a few each.
+              </span>
+            </>
           )}
 
           <label className="text-[11px] text-muted mt-1">How much they can see</label>
@@ -1321,6 +1490,76 @@ const LiveReactionControls = () => {
             value={freeze}
             onChange={setFreeze}
           />
+
+          <label className="flex gap-2 items-center text-sm">
+            <span className="w-24 shrink-0">How much they say</span>
+            <select
+              aria-label="How much they say"
+              className={field}
+              value={length}
+              onChange={(e) => setLength(
+                e.target.value as 'brief' | 'normal' | 'chatty' | 'dynamic',
+              )}
+            >
+              <option value="brief">A noise at the screen</option>
+              <option value="normal">A thought</option>
+              <option value="chatty">Opinions</option>
+              <option value="dynamic">Dynamic (experimental)</option>
+            </select>
+          </label>
+
+          {length === 'dynamic' && (
+            <label className="flex gap-2 items-center text-sm">
+              <span className="w-24 shrink-0">Context limit</span>
+              <input
+                aria-label="Context limit"
+                type="range"
+                min={4000}
+                max={64000}
+                step={2000}
+                value={ctx}
+                onChange={(e) => setCtx(Number(e.target.value))}
+                className="flex-1 accent-[var(--app-accent)]"
+              />
+              <span className="font-mono w-12 text-right text-xs">{Math.round(ctx / 1000)}k</span>
+            </label>
+          )}
+          {length === 'dynamic' && (
+            <span className="text-[11px] text-muted leading-snug">
+              Past that, the prompt is compacted — their older lines first, then the
+              cross-talk, then the transcript. Who they are and the moment they are
+              reacting to are never given up.
+            </span>
+          )}
+          {length === 'dynamic' && (
+            <span className="text-[11px] text-muted leading-snug">
+              No fixed length — a word at one beat and a real thought at the next, which is
+              how someone beside you actually talks. They also see how you are READING:
+              going back, or over the same passage again, is something they can notice and
+              say so. Experimental, and the most expensive rung.
+            </span>
+          )}
+
+          <label className="flex gap-2 items-center text-sm">
+            <span className="w-24 shrink-0">Stays up for</span>
+            <input
+              aria-label="Stays up for"
+              type="range"
+              min={0}
+              max={20000}
+              step={1000}
+              value={linger}
+              onChange={(e) => setLinger(Number(e.target.value))}
+              className="flex-1 accent-[var(--app-accent)]"
+            />
+            <span className="font-mono w-10 text-right text-xs">
+              {linger === 0 ? 'off' : `${Math.round(linger / 1000)}s`}
+            </span>
+          </label>
+          <span className="text-[11px] text-muted leading-snug">
+            How long their line stays after you read past the passage they said it about.
+            At <b>off</b> it goes the moment you move on, which is how it used to behave.
+          </span>
           <span className="text-[11px] text-muted leading-snug">
             The AI first picks the moments <b>this</b> person would break in on — no
             two companions stop at the same words — then speaks when the reveal
@@ -1386,7 +1625,7 @@ const SceneDirectorSection = () => {
   const complete = coverage.total > 0 && coverage.directed >= coverage.total;
 
   return (
-    <Section title="Scene Director">
+    <Section title="Scene Director" tour="settings-director">
       <Toggle
         icon={<Clapperboard size={16} />}
         label="AI scene reading"
@@ -1526,15 +1765,33 @@ const SceneDirectorSection = () => {
 
 export const SettingsPanel = ({
   onOpenAutoFormat, onOpenRefine, onOpenSync, onOpenProxy, onOpenSmartExport, onOpenBackup,
+  onOpenCompletions,
 }: {
   onOpenAutoFormat: () => void;
   onOpenRefine: () => void;
   onOpenSync: () => void;
   onOpenProxy: () => void;
   onOpenSmartExport: () => void;
+  onOpenCompletions: () => void;
   onOpenBackup: () => void;
 }) => {
   const store = useAppStore();
+  /*
+   * Peek belongs to this screen.
+   *
+   * It is a way of reading what is written HERE, so leaving takes it with you —
+   * a reading panel left floating over the library after the settings closed
+   * would be a thing the reader has to work out how to get rid of.
+   */
+  const [peeking, setPeeking] = useState(peekState().active);
+  useEffect(() => subscribePeek(s => setPeeking(s.active)), []);
+  // Keyed on the OPEN flag, not on unmount: this panel is always mounted and
+  // returns null when closed, so a cleanup on unmount would never run and the
+  // reading panel would outlive the settings it belongs to.
+  useEffect(() => {
+    if (!store.settingsOpen) setPeekActive(false);
+  }, [store.settingsOpen]);
+
   // Same sanitiser the renderer runs, so the panel can never show a channel the
   // page is not actually drawing.
   const markupPresets = useMemo(() => sanitizeMarkupPresets(store.markupPresets), [store.markupPresets]);
@@ -1567,6 +1824,28 @@ export const SettingsPanel = ({
       <div className="absolute right-0 top-0 h-full w-full max-w-sm bg-surface text-app-text border-l border-app-border shadow-2xl flex flex-col">
         <div className="flex items-center justify-between px-5 py-4 border-b border-app-border">
           <h2 className="text-lg font-bold">Settings</h2>
+          {/*
+            * Read the small print.
+            *
+            * Everything explanatory in here is 11px muted grey by necessity —
+            * anything louder competes with the control it belongs to — so the
+            * longest and most useful text in the app is the least read. This
+            * turns on a mode: tap any paragraph and it is read to you, at your
+            * own reading speed, in a panel on the OTHER side of the screen so
+            * it never covers what it is explaining.
+            */}
+          <button
+            onClick={() => setPeekActive(!peeking)}
+            aria-label="Read the small print"
+            aria-pressed={peeking}
+            title="Read the small print — then tap any text"
+            data-testid="peek-toggle"
+            className={cn(`ml-auto mr-1 flex items-center justify-center min-h-11 min-w-11
+              rounded-full transition-colors`,
+            peeking ? 'text-accent bg-accent/15' : 'hover:bg-app-text/10 text-app-text/50')}
+          >
+            <ScanText size={16} />
+          </button>
           <button
             onClick={close}
             aria-label="Close settings"
@@ -1579,7 +1858,7 @@ export const SettingsPanel = ({
         <div className="flex-1 overflow-y-auto px-5 py-5 space-y-6">
           <ReadingModeSection />
 
-          <Section title="Appearance">
+          <Section title="Appearance" tour="settings-appearance">
             <SelectRow
               label="Theme"
               value={store.theme}
@@ -1716,6 +1995,7 @@ export const SettingsPanel = ({
                 </span>
               </div>
               <input
+                aria-label="Content width"
                 type="range"
                 min={0}
                 max={1800}
@@ -1749,7 +2029,7 @@ export const SettingsPanel = ({
             </Advanced>
           </Section>
 
-          <Section title="Reveal Animation">
+          <Section title="Reveal Animation" tour="settings-reveal">
             <div className="grid grid-cols-3 gap-2">
               {(['typewriter', 'smooth', 'magic', 'fade', 'blur', 'ink', 'glitch', 'rise', 'decrypt'] as const).map(style => (
                 <button
@@ -1854,7 +2134,7 @@ export const SettingsPanel = ({
 
           <SceneDirectorSection />
 
-          <Section title="Reading">
+          <Section title="Reading" tour="settings-reading">
             <Toggle
               icon={<Focus size={16} />}
               label="Autofocus Handsfree Mode"
@@ -1899,6 +2179,7 @@ export const SettingsPanel = ({
                 <div className="flex gap-2 items-center text-sm px-2 py-1">
                   <span className="w-20 shrink-0">Zoom</span>
                   <input
+                    aria-label="Zoom"
                     type="range" min="0.8" max="2.5" step="0.1"
                     value={store.autofocusZoom}
                     onChange={(e) => store.setAutofocusZoom(Number(e.target.value))}
@@ -1921,16 +2202,42 @@ export const SettingsPanel = ({
               onChange={(v) => store.setLayoutMode(v ? 'paginated' : 'continuous')}
             />
             {store.layoutMode === 'paginated' && (
-              <Toggle
-                icon={<PauseCircle size={16} />}
-                label="Stop at End of Page"
-                value={store.pauseAtPageEnd}
-                onChange={store.setPauseAtPageEnd}
-              />
+              <>
+                <Toggle
+                  icon={<PauseCircle size={16} />}
+                  label="Stop at End of Page"
+                  value={store.pauseAtPageEnd}
+                  onChange={store.setPauseAtPageEnd}
+                />
+                {/* Only when it does NOT stop: if the reader has to press on
+                  * anyway, how long the page lingers by itself is moot. */}
+                {!store.pauseAtPageEnd && (
+                  <label className="flex gap-2 items-center text-sm">
+                    <span className="w-24 shrink-0">Hold the page</span>
+                    <input
+                      aria-label="Hold the page"
+                      type="range"
+                      min={400}
+                      max={5000}
+                      step={200}
+                      value={store.pageTurnPause}
+                      onChange={(e) => store.setPageTurnPause(Number(e.target.value))}
+                      className="flex-1 accent-[var(--app-accent)]"
+                    />
+                    <span className="font-mono w-12 text-right">
+                      {(store.pageTurnPause / 1000).toFixed(1)}s
+                    </span>
+                  </label>
+                )}
+                <p className="text-[11px] text-muted leading-snug px-1">
+                  Turning a page clears it. This is how long the finished page stays up first,
+                  so the last line can be read rather than glimpsed.
+                </p>
+              </>
             )}
           </Section>
 
-          <Section title="Autoreader">
+          <Section title="Autoreader" tour="settings-autoreader">
             <div className="flex gap-2 items-center text-sm">
               <span className="w-24 shrink-0">Reveal</span>
               <div className="flex flex-1 bg-app-text/5 p-1 rounded-lg">
@@ -2044,6 +2351,7 @@ export const SettingsPanel = ({
                 <div className="flex gap-2 items-center text-sm">
                   <span className="w-24 shrink-0">Base rate</span>
                   <input
+                    aria-label="Base rate"
                     type="range" min="0.5" max="2" step="0.1"
                     value={store.ttsRate}
                     onChange={(e) => store.setTtsRate(Number(e.target.value))}
@@ -2055,6 +2363,7 @@ export const SettingsPanel = ({
                   <div className="flex gap-2 items-center text-sm">
                     <span className="w-24 shrink-0">Pitch</span>
                     <input
+                      aria-label="Pitch"
                       type="range" min="0" max="2" step="0.1"
                       value={store.ttsPitch}
                       onChange={(e) => store.setTtsPitch(Number(e.target.value))}
@@ -2162,7 +2471,7 @@ export const SettingsPanel = ({
             * scattered through Reading and Text Processing: each one is the
             * reader answering "show me what the machine wrote, or don't".
             */}
-          <Section title="From the chat file">
+          <Section title="From the chat file" tour="settings-chatfile">
             <Toggle
               icon={<Brain size={16} />}
               label="Show thinking"
@@ -2218,7 +2527,7 @@ export const SettingsPanel = ({
             )}
           </Section>
 
-          <Section title="Text Processing">
+          <Section title="Text Processing" tour="settings-text">
             <Toggle
               icon={<Sparkles size={16} />}
               label="Auto-Format"
@@ -2283,6 +2592,7 @@ export const SettingsPanel = ({
             />
             <button
               onClick={() => { close(); onOpenAutoFormat(); }}
+              data-tour="settings-format"
               className="flex items-center justify-between p-2 rounded-lg hover:bg-app-text/5 transition-colors text-sm text-accent bg-accent/10"
             >
               <div className="flex items-center gap-2">
@@ -2327,7 +2637,46 @@ export const SettingsPanel = ({
             * This is a different permission from the rest, and burying it as a
             * sub-toggle of "agent mode" would make a reader who wants help
             * finding a button hand over their pins to get it. */}
-          <Section title="AI Tour Guide">
+          <Section title="Chat completion presets" tour="settings-presets">
+            <button
+              onClick={() => { close(); onOpenCompletions(); }}
+              data-testid="open-completions"
+              className="flex items-center justify-between p-2 rounded-lg hover:bg-app-text/5 transition-colors text-sm text-accent bg-accent/10"
+            >
+              <div className="flex items-center gap-2">
+                <FileJson size={16} />
+                <div className="text-left">
+                  <span className="block">Presets &amp; Lens Completions</span>
+                  <span className="block text-[10px] opacity-70 font-normal">
+                    Import SillyTavern presets · build one out of parts of several
+                  </span>
+                </div>
+              </div>
+              <span>&rarr;</span>
+            </button>
+          </Section>
+
+          {/* Here as well as in the Tour dialog, and that is the point.
+            *
+            * The Tour is only reachable from the library, and four of these
+            * tours are about reading, the Lens and the workspace — the ones you
+            * can only take with a story open, and therefore the ones you could
+            * never reach, because opening a story put the only door behind you.
+            * Settings opens from both screens. */}
+          {/* Folded, and it is the tours themselves that ask for it: each one
+            * is a title, a blurb and a stop count, so open they are fourteen
+            * paragraph-sized rows in the middle of a settings panel — longer
+            * than any real setting here and read past by everyone who came for
+            * one. The header still says what is inside. */}
+          <FoldedSection
+            title="Guided tours"
+            hint={`${TOURS.length} walkthroughs of the live app — the library, reading, the Lens, the workspace, sync`}
+            startClosed
+          >
+            <TourPicker onStarted={close} />
+          </FoldedSection>
+
+          <Section title="AI Tour Guide" tour="settings-guide">
             <Toggle
               icon={<Compass size={16} />}
               label="Let the assistant show you around"
@@ -2342,7 +2691,7 @@ export const SettingsPanel = ({
             </p>
           </Section>
 
-          <Section title="SillyTavern">
+          <Section title="SillyTavern" tour="settings-sync">
             <Toggle
               icon={<RefreshCw size={16} />}
               label="Two-way sync"
@@ -2403,7 +2752,7 @@ export const SettingsPanel = ({
             </button>
           </Section>
 
-          <Section title="Dialogue Styling">
+          <Section title="Dialogue Styling" tour="settings-dialogue">
             <SelectRow
               label="Style"
               value={store.dialogueStyle}
@@ -2447,7 +2796,7 @@ export const SettingsPanel = ({
             </p>
           </Section>
 
-          <Section title="Other Markup">
+          <Section title="Other Markup" tour="settings-markup">
             <p className="px-1 -mt-1 text-[11px] opacity-60">
               What the rest of the AI’s punctuation means. Each ships with a
               default and is on already — change one only if you want to.
@@ -2485,7 +2834,7 @@ export const SettingsPanel = ({
             * for a backup. Those write one story, as prose, for reading
             * elsewhere: they restore nothing, and they carry none of the
             * notes, pins or Lens edits attached to it. */}
-          <Section title="Your library">
+          <Section title="Your library" tour="settings-library">
             <button
               onClick={() => { close(); onOpenBackup(); }}
               data-testid="open-backup"
@@ -2509,7 +2858,7 @@ export const SettingsPanel = ({
           </Section>
 
           {store.currentStory && (
-            <Section title="Profile Pictures">
+            <Section title="Profile Pictures" tour="settings-avatars">
               <AvatarUpload
                 label={store.currentStory.userName || 'You'}
                 value={store.currentStory.userAvatar}
@@ -2532,11 +2881,24 @@ export const SettingsPanel = ({
                 }
               />
               {(() => {
-                const names = Array.from(new Set(
-                  store.currentStory.messages
-                    .filter(m => m.role !== 'user')
-                    .map(m => m.name),
-                ));
+                /*
+                 * Everyone who speaks on the path being READ — the trunk, or
+                 * the branch that is open.
+                 *
+                 * Reading `messages` alone missed every speaker who only
+                 * appears in an attached branch, so a solo story that became a
+                 * group through a what-if showed those characters as separate
+                 * speakers in the reader and offered nowhere to give them a
+                 * face. Sweeping every branch instead over-corrected: the
+                 * trunk's settings listed a group chat's whole cast while the
+                 * reader was nowhere near them. `readingCast` follows the
+                 * reader, and keeps anyone who already has a picture so it
+                 * never becomes unreachable.
+                 */
+                const names = readingCast(
+                  store.currentStory,
+                  Object.keys(store.currentStory.characterAvatars ?? {}),
+                );
                 if (names.length <= 1) return null;
                 const fallback = store.currentStory.characterAvatar ?? store.currentStory.avatar;
                 return (
@@ -2598,7 +2960,7 @@ export const SettingsPanel = ({
             <ServicesSection />
           </FoldedSection>
 
-          <Section title="Saved Configurations">
+          <Section title="Saved Configurations" tour="settings-configs">
             <div className="flex gap-2">
               <input
                 type="text"
@@ -2640,7 +3002,7 @@ export const SettingsPanel = ({
           </Section>
 
           {store.currentStory && (
-            <Section title="Export">
+            <Section title="Export" tour="settings-export">
               {/* The way in, above the one-press exports.
                 *
                 * Those each take the WHOLE story, which is right for a backup
@@ -2651,6 +3013,7 @@ export const SettingsPanel = ({
               <button
                 onClick={() => { close(); onOpenSmartExport(); }}
                 data-testid="open-smart-export"
+                data-tour="export-button"
                 className="flex items-center justify-between p-2 rounded-lg hover:bg-app-text/5 transition-colors text-sm text-accent bg-accent/10"
               >
                 <div className="flex items-center gap-2">

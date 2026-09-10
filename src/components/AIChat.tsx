@@ -648,6 +648,16 @@ const GUIDE_BRIEF = [
   '- Look things up with guide.docs before you explain them. The manual is the',
   '  truth about this app; your memory is not. If it is not in there, say you',
   '  are not sure rather than inventing a menu.',
+  '- NEVER say a feature does not exist. You have not seen this app; the manual',
+  '  has. If someone names something you do not recognise, that is a reason to',
+  '  search, not a reason to doubt them. When the search genuinely finds',
+  '  nothing, say you could not find it and show them what the manual does',
+  '  cover — do not tell them it is not there.',
+  '- guide.where says where they are standing. It is not an index of the app and',
+  '  it is not an answer to "where is X" — search for X.',
+  '- If they want to be SHOWN rather than told, guide.tour walks them through it',
+  '  with the screen dimmed around each control in turn. Offer it; do not start',
+  '  one without being asked.',
   '- Prefer taking them there to telling them where it is. One app.goto beats a',
   '  paragraph of directions — but say what you are about to do first.',
   '- Call guide.where when they say "this", "here", or "the current one".',
@@ -1716,6 +1726,7 @@ export const AIChat = ({ embedded = false }: {
       )}
       style={dockable ? dockStyle(dock.rect) : undefined}
       data-testid="ai-panel"
+      data-tour="ai-connect"
     >
       {/* The header is the drag handle. `touch-none` stops the browser turning
         * a slow drag into a page scroll on a trackpad or a pen. */}
@@ -1887,6 +1898,7 @@ export const AIChat = ({ embedded = false }: {
                 value={store.aiModel}
                 onChange={(e) => { store.setAiModel(e.target.value); setTestResult(null); }}
                 data-testid="model-select"
+                data-tour="ai-model"
                 className="mt-1 w-full bg-app-text/5 border border-app-border rounded-md px-2 py-1.5 outline-none"
               >
                 <option value="" className="text-black bg-white">Choose a model…</option>
@@ -1918,6 +1930,7 @@ export const AIChat = ({ embedded = false }: {
           {/* The button that actually proves it works — see `testConnection`. */}
           <button
             onClick={testConnection}
+            data-tour="ai-test"
             disabled={!store.aiBaseUrl || !store.aiModel || testing || probing}
             data-testid="test-connection"
             title={!store.aiModel ? 'Choose or type a model first' : 'Send one tiny request and report what happens'}
@@ -2026,6 +2039,7 @@ export const AIChat = ({ embedded = false }: {
               onClick={() => store.setAiContextOpen(!store.aiContextOpen)}
               aria-expanded={store.aiContextOpen}
               data-testid="context-toggle"
+              data-tour="ai-context"
               className="w-full flex items-center justify-between gap-2 -my-0.5 py-0.5 rounded hover:bg-app-text/5 transition-colors"
             >
               <span className="flex items-center gap-1 min-w-0">

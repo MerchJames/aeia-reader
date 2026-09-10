@@ -36,7 +36,7 @@ export const HighlightsMode = () => {
   };
 
   return (
-    <div className="flex-1 min-h-0 overflow-y-auto p-8 pb-40">
+    <div className="flex-1 min-h-0 overflow-y-auto p-8 pb-40" data-tour="highlights-view">
       <div className="max-w-4xl mx-auto space-y-6">
         <div className="flex items-center justify-between border-b border-app-border pb-4 mb-8">
           <h2 className="text-2xl font-serif font-bold">Your Highlights</h2>

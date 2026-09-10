@@ -15,7 +15,13 @@
  */
 
 import { useRef, useState } from 'react';
-import { FileUp, Upload, X } from 'lucide-react';
+import { FileUp, Loader2, Upload, Wand2, X } from 'lucide-react';
+import { useAppStore } from '../store';
+import { askText } from '../utils/aiCall';
+import { candidateBases } from '../utils/aiClient';
+import {
+  buildDraftPrompt, ideaProblem, readDraft, type DraftShape,
+} from '../utils/formatDraft';
 import {
   describeFormat, formatProblem, parseFormat, renderFormatInstruction,
 } from '../utils/formatSpec';
@@ -39,6 +45,44 @@ export const FormatDrop = ({ onFormat, label = 'Use a form', className }: Format
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const [asking, setAsking] = useState(false);
+  const [idea, setIdea] = useState('');
+  const [shape, setShape] = useState<DraftShape>('auto');
+  const [drafting, setDrafting] = useState(false);
+  const [draftError, setDraftError] = useState<string | null>(null);
+  const [examples, setExamples] = useState<string[]>([]);
+  const aiReady = useAppStore(s => !!s.aiBaseUrl && !!s.aiModel);
+
+  const draft = async () => {
+    const problem = ideaProblem(idea);
+    if (problem) { setDraftError(problem); return; }
+    const app = useAppStore.getState();
+    setDrafting(true);
+    setDraftError(null);
+    setExamples([]);
+    try {
+      const reply = await askText(
+        { base: candidateBases(app.aiBaseUrl)[0], key: app.aiApiKey, model: app.aiModel },
+        [{ role: 'user', content: buildDraftPrompt(idea, shape) }],
+        // Cool: this is structure, not writing, and a warm model starts
+        // inventing fields nobody asked for — which is one of the two things
+        // the prompt spends its length forbidding.
+        { label: 'Drafting a form', params: { temperature: 0.2 }, budget: 900 },
+      );
+      const result = readDraft(reply);
+      if (result.rejected) { setDraftError(result.rejected); return; }
+      // Into the box, not straight into use. Everything after this is the
+      // path a pasted form already takes, including the parse and the refusal.
+      setText(result.text);
+      setExamples(result.examples);
+      setAsking(false);
+      setError(null);
+    } catch (e: any) {
+      setDraftError(String(e?.message ?? e));
+    } finally {
+      setDrafting(false);
+    }
+  };
 
   const spec = text.trim() ? parseFormat(text) : null;
   const problem = text.trim() ? formatProblem(text) : null;
@@ -138,6 +182,67 @@ export const FormatDrop = ({ onFormat, label = 'Use a form', className }: Format
           </p>
         )}
 
+        {/* Describing a form instead of writing one.
+          *
+          * Folded away until asked for: the box above is the feature, and this
+          * is the way out for somebody who has an idea rather than a file. It
+          * writes INTO that box rather than applying anything, so whatever comes
+          * back is editable, checkable, and refusable like any pasted form —
+          * which matters, because what comes back is going to be restated to a
+          * model on every pass of a long read. */}
+        {asking && (
+          <div className="space-y-1.5 rounded-lg border border-accent/30 bg-accent/[0.04] p-2">
+            <textarea
+              value={idea}
+              onChange={e => { setIdea(e.target.value); setDraftError(null); }}
+              rows={3}
+              placeholder="An anatomy chart: each limb, its condition, and any injuries — plus a line for overall state."
+              aria-label="What the document should contain"
+              data-testid="format-idea"
+              className="w-full text-[11px] rounded-md border border-app-border bg-transparent px-2 py-1.5 resize-y"
+            />
+            <div className="flex items-center gap-1.5">
+              <select
+                value={shape}
+                onChange={e => setShape(e.target.value as DraftShape)}
+                aria-label="Shape"
+                className="text-[11px] rounded-md border border-app-border bg-transparent px-1.5 py-1"
+              >
+                <option value="auto">Any shape</option>
+                <option value="json">JSON</option>
+                <option value="markdown">Headings</option>
+                <option value="outline">Outline</option>
+              </select>
+              <div className="flex-1" />
+              <button
+                onClick={() => { setAsking(false); setDraftError(null); }}
+                className="text-[11px] px-2 py-1 rounded-md border border-app-border hover:bg-app-text/5"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={draft}
+                disabled={drafting || !!ideaProblem(idea)}
+                data-testid="format-draft"
+                className="flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-md bg-accent text-white disabled:opacity-40"
+              >
+                {drafting ? <Loader2 size={11} className="animate-spin" /> : <Wand2 size={11} />}
+                {drafting ? 'Writing…' : 'Write it'}
+              </button>
+            </div>
+            {draftError && <p className="text-[11px] text-amber-500">{draftError}</p>}
+            {!draftError && examples.length > 0 && (
+              <p className="text-[11px] text-amber-500">
+                {/* Advisory, not a refusal — see `exampleValues`. A form is
+                    restated on every pass, so example content quietly steers
+                    twenty of them. */}
+                Some placeholders read like content rather than instructions ({examples.join(', ')}).
+                Edit them above if they were not meant as examples.
+              </p>
+            )}
+          </div>
+        )}
+
         <div className="flex items-center gap-2">
           <button
             onClick={() => fileRef.current?.click()}
@@ -145,6 +250,16 @@ export const FormatDrop = ({ onFormat, label = 'Use a form', className }: Format
           >
             <Upload size={11} /> Choose a file
           </button>
+          {aiReady && !asking && (
+            <button
+              onClick={() => setAsking(true)}
+              data-testid="format-assist"
+              title="Describe what you want and have it written as a form"
+              className="flex items-center gap-1 text-[11px] px-2 py-1 rounded-md border border-accent/40 text-accent hover:bg-accent/10"
+            >
+              <Wand2 size={11} /> Help me write one
+            </button>
+          )}
           <div className="flex-1" />
           <button
             onClick={apply}
