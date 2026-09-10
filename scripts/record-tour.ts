@@ -79,11 +79,22 @@ const CLIPS: { id: string; title: string; ms: number; act?: (page: Page) => Prom
   { id: 'kinetic', title: 'The Director bends the reveal', ms: 8000 },
   { id: 'autofocus', title: 'Autofocus follows the words', ms: 8000 },
   {
-    id: 'views', title: 'Nine ways to read the same log', ms: 14000,
+    // Driven off the step's OWN list rather than a copy of it. The copy went
+    // stale the moment Script, Panels, Atlas, RPG and Workspace were added: the
+    // clip went on showing nine views of an app that had fourteen, which is the
+    // one thing a demo must never do.
+    id: 'views', title: 'Fourteen ways to read the same story', ms: 20000,
     act: async (page) => {
-      for (const v of ['storybook', 'chat', 'book', 'stage', 'vn', 'sandbox', 'overview', 'highlights', 'branches']) {
+      const step = (await import('../src/utils/onboarding')).ONBOARDING_STEPS
+        .find(s => s.id === 'views');
+      for (const v of step?.views ?? []) {
         await page.getByTestId(`tour-view-${v}`).hover();
-        await page.waitForTimeout(1150);
+        await page.waitForTimeout(1000);
+      }
+      // The workspace chips underneath — the other half of that step.
+      for (const m of ['read', 'cowrite', 'scenes', 'all']) {
+        const chip = page.getByTestId(`tour-uimode-${m}`);
+        if (await chip.count()) { await chip.hover(); await page.waitForTimeout(700); }
       }
     },
   },
@@ -107,7 +118,15 @@ const CLIPS: { id: string; title: string; ms: number; act?: (page: Page) => Prom
   },
   { id: 'branches', title: 'Every road not taken', ms: 5000 },
   { id: 'markup', title: 'Highlights, notes and pins', ms: 5000 },
+  // Two full cycles of the demo, which re-runs on a 5.2s beat: one reaction
+  // read alone is a screenshot, two is the thing the feature actually does.
+  { id: 'company', title: 'Someone reads it with you', ms: 11500 },
 ];
+
+/** Tall enough that the longest step (fourteen views plus its preview) fits
+ *  without the modal scrolling internally — a clip of a cut-off panel is a bug
+ *  report, not a demo. */
+const VIEWPORT = { width: 1280, height: 1040 };
 
 const only = process.argv[2];
 const wanted = only ? CLIPS.filter(c => c.id === only) : CLIPS;
@@ -128,7 +147,30 @@ const goToStep = async (page: Page, id: string) => {
   throw new Error(`could not reach step ${id}`);
 };
 
-const encode = (webm: string, stem: string) => {
+/**
+ * The modal's box in video pixels, padded, or null to fall back.
+ *
+ * A fixed crop cannot work: the tour modal is `max-w-lg` centred but its HEIGHT
+ * is whatever the step needs, and the steps differ by a factor of two. One crop
+ * guillotined the view-preview off the bottom of the tallest step AND left the
+ * shortest one as a small card adrift in a field of empty page — which reads as
+ * a screenshot of a screenshot, the exact thing cropping is for.
+ */
+const modalCrop = async (page: Page, scale: number): Promise<string | null> => {
+  // The CARD, not the overlay: `data-testid="onboarding"` is on the full-screen
+  // backdrop, so measuring it yields the whole viewport and crops nothing.
+  const box = await page.getByTestId('onboarding').locator('> div').first().boundingBox();
+  if (!box) return null;
+  const pad = 16;
+  const even = (n: number) => Math.max(2, Math.round(n / 2) * 2);
+  const x = Math.max(0, Math.floor((box.x - pad) * scale));
+  const y = Math.max(0, Math.floor((box.y - pad) * scale));
+  const w = even(Math.min((box.width + pad * 2) * scale, VIEWPORT.width * scale - x));
+  const h = even(Math.min((box.height + pad * 2) * scale, VIEWPORT.height * scale - y));
+  return `crop=${w}:${h}:${even(x)}:${even(y)}`;
+};
+
+const encode = (webm: string, stem: string, crop: string) => {
   if (!ffmpegSetup?.full) {
     console.log(`    → ${path.relative(ROOT, webm)} (webm only — run scripts/stage-ffmpeg.sh for gif/mp4)`);
     return;
@@ -137,11 +179,6 @@ const encode = (webm: string, stem: string) => {
   const mp4 = path.join(OUT, `${stem}.mp4`);
   const gif = path.join(OUT, `${stem}.gif`);
   const palette = path.join(RAW, `${stem}-palette.png`);
-  // Crop to the modal: the tour sits centred on a mostly-empty page, and a clip
-  // of a dialog surrounded by dead space reads as a screenshot of a screenshot.
-  // Generous: the modal is max-w-lg centred, but its height changes per step,
-  // and a crop tuned to the shortest one guillotines the title on the tallest.
-  const crop = 'crop=iw*0.44:ih*0.94:iw*0.28:ih*0.03';
   try {
     execFileSync(ffmpeg, ['-y', '-i', webm, '-vf', `${crop},fps=24`,
       '-c:v', 'libx264', '-crf', '20', '-preset', 'slow',
@@ -158,6 +195,7 @@ const encode = (webm: string, stem: string) => {
 
 const main = async () => {
   mkdirSync(OUT, { recursive: true });
+  rmSync(RAW, { recursive: true, force: true });   // an aborted run leaves clips here
   mkdirSync(RAW, { recursive: true });
   console.log(`Recording ${wanted.length} clip(s) from ${BASE}`);
   if (!ffmpegSetup?.full) console.log('(no full ffmpeg — writing .webm only; see scripts/stage-ffmpeg.sh)');
@@ -166,12 +204,13 @@ const main = async () => {
   for (const clip of wanted) {
     process.stdout.write(`  ${clip.id.padEnd(11)} ${clip.title}\n`);
     const context = await browser.newContext({
-      viewport: { width: 1280, height: 800 },
+      viewport: VIEWPORT,
       deviceScaleFactor: 2,
-      recordVideo: { dir: RAW, size: { width: 1280, height: 800 } },
+      recordVideo: { dir: RAW, size: VIEWPORT },
       reducedMotion: 'no-preference',
     });
     const page = await context.newPage();
+    const video = page.video();
     // A fresh reader, so the tour is the first thing on screen.
     await page.addInitScript(() => {
       localStorage.setItem('aura-reader-settings',
@@ -181,18 +220,29 @@ const main = async () => {
     await page.getByTestId('onboarding').waitFor({ timeout: 20_000 });
     await goToStep(page, clip.id);
     await page.waitForTimeout(700);          // let the step settle before rolling
+    // Measured once the step has settled and BEFORE any acting: hovering a view
+    // can grow the modal, and a crop that changes mid-clip is not a crop.
+    const crop = await modalCrop(page, 1) ?? 'crop=iw*0.44:ih*0.94:iw*0.28:ih*0.03';
     if (clip.act) await clip.act(page);
     else await page.waitForTimeout(clip.ms);
     await page.waitForTimeout(400);
     await context.close();                    // flushes the video
 
-    const raw = readdirSync(RAW).filter(f => f.endsWith('.webm'));
-    const newest = raw.map(f => path.join(RAW, f))
-      .sort((a, b) => Number(existsSync(b)) - Number(existsSync(a)))[raw.length - 1];
-    if (!newest) { console.log('    (no video written)'); continue; }
+    /*
+     * Playwright names the file, so ASK Playwright which one it is.
+     *
+     * This used to scan the directory and take "the newest", by a comparator
+     * that compared `existsSync` of two files that both existed — always 0, so
+     * nothing sorted and it took whatever readdir returned last. It survived
+     * only because a clean run leaves exactly one file there. Abort a run and
+     * the leftovers poison the next: a clip recorded for `welcome` was
+     * published as welcome.mp4 with the Director step inside it.
+     */
+    const src = await video?.path();
+    if (!src || !existsSync(src)) { console.log('    (no video written)'); continue; }
     const webm = path.join(OUT, `${clip.id}.webm`);
-    renameSync(newest, webm);
-    encode(webm, clip.id);
+    renameSync(src, webm);
+    encode(webm, clip.id, crop);
   }
   await browser.close();
   rmSync(RAW, { recursive: true, force: true });

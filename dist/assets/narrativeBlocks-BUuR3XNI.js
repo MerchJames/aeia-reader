@@ -1,0 +1,7 @@
+import{al as x,am as $}from"./index-2IO-6UyR.js";import{s as B}from"./screenplay-BdFEGV9f.js";const N=s=>s.replace(/```[\s\S]*?```/g," ").replace(/<[^>]+>/g," ").replace(/^\s{0,3}#{1,6}\s+/gm,"").replace(/!\[[^\]]*\]\([^)]*\)/g,"").replace(/\[([^\]]*)\]\([^)]*\)/g,"$1").replace(/&nbsp;/g," ").replace(/[ \t]+/g," ").replace(/\n{3,}/g,`
+
+`).trim(),_=/@@NB(\d+)@@/g,p=s=>`@@NB${s}@@`,A=(s,e,g={})=>{const m=[...new Set((g.cast??[]).map(r=>r.trim()).filter(Boolean))],a=[];let t=N(s);if(!t)return[];t=t.replace(/\*\*\*\*([^*]+)\*\*\*\*/g,(r,n)=>(a.push({kind:"shout",speaker:e,text:n.trim()}),p(a.length-1))),t=t.replace(/\*\*([^*]+)\*\*/g,(r,n)=>(a.push({kind:"beat",speaker:e,text:n.trim()}),p(a.length-1)));const u=r=>r.trim().replace(/,\s*$/,"");t=t.replace(/(["“])([^"“”\n]+)(["”])/g,(r,n,o,l,i)=>{const h=t.slice(Math.max(0,i-160),i),k=t.slice(i+r.length,i+r.length+160),d=x(o,g.dialogue)??$(h,k,m)??e;return a.push({kind:"dialogue",speaker:d,text:u(o)}),p(a.length-1)}),t=t.replace(/(^|[\s({[—–-])'([^'\n]+)'(?=[\s.,!?;:)}\]—–-]|$)/g,(r,n,o)=>(a.push({kind:"thought",speaker:e,text:u(o)}),`${n}${p(a.length-1)}`));const c=[];return t.split(_).forEach((r,n)=>{if(n%2===1){c.push(a[Number(r)]);return}for(const o of r.split(/\n{2,}/)){const l=B(o).trim();l&&c.push({kind:"narration",speaker:e,text:l})}}),c},f={dialogue:"Dialogue",thought:"Thought",beat:"Beat",shout:"Shout",narration:"Narration"},D=s=>s.filter(e=>e.text).map(e=>e.kind==="narration"?`[Narration]
+${e.text}`:`[${f[e.kind]} - ${e.speaker}]
+${e.text}`).join(`
+
+`);export{A as n,D as r};
