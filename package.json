@@ -2,6 +2,9 @@
   "name": "aura-reader",
   "private": true,
   "version": "0.1.0",
+  "description": "A local-first reader for SillyTavern and KoboldAI stories — import your chat logs and read them back as something made.",
+  "author": "MerchJames",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
@@ -10,6 +13,8 @@
     "mobile": "npm run build && (npx vite preview --port 4173 & sleep 5 && npx tsx scripts/mobile-audit.ts; kill %1)",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
+    "test:unit": "node scripts/run-unit-tests.mjs",
+    "test": "npm run lint && npm run test:unit && npm run test:e2e",
     "e2e:libs": "bash scripts/stage-browser-libs.sh || true",
     "media": "bash scripts/stage-ffmpeg.sh || true && npm run build && (npx vite preview --port 4173 & sleep 4 && npx tsx scripts/record-tour.ts; kill %1)",
     "test:e2e": "npm run e2e:libs && npm run build && playwright test",
@@ -41,11 +46,13 @@
     "zustand": "^5.0.14"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
     "@playwright/test": "^1.61.1",
     "@tailwindcss/vite": "^4.1.14",
     "@tauri-apps/cli": "^2",
     "@types/node": "^22.14.0",
     "@vitejs/plugin-react": "^5.0.4",
+    "axe-core": "^4.13.0",
     "tailwindcss": "^4.1.14",
     "typescript": "~5.8.2",
     "vite": "^6.2.3"

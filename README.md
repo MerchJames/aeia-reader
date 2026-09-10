@@ -17,20 +17,43 @@ every prompt and reply passes through your own material on the way. See
 
 ---
 
+<p align="center">
+  <img src="media/welcome.gif" alt="Words arriving at reading speed" width="420">
+  <img src="media/views.gif" alt="Fourteen ways to read the same story" width="420">
+</p>
+<p align="center">
+  <img src="media/company.gif" alt="A character reading it with you, reacting as it lands" width="420">
+  <img src="media/autofocus.gif" alt="Autofocus, with the magnifier following the words" width="420">
+</p>
+
+<sub>Recorded from the first-run tour itself with
+<code>scripts/record-tour.ts</code> — no staging and no editing, so a demo that
+breaks shows itself breaking. The rest are in <a href="media/">media/</a>:
+<code>customize</code>, <code>kinetic</code>, <code>sound</code>,
+<code>sandbox</code>, <code>markup</code>, <code>branches</code>.</sub>
+
+---
+
 ## What it does
 
 ### Read
 
 - **A library that scales.** Search by title, character or tag; sort by last
   read, date added, title or progress; filter by tag and format. Tags are yours
-  to edit. A deeper search reads the text inside every story on request.
-- **Thirteen views of the same story.** Storybook (prose), Chat (bubbles), Book
+  to edit, and **folders** filter the shelf once there are enough stories to
+  need them (a story sits in one at a time, and folders never travel in an
+  export). A deeper search reads the text inside every story on request and
+  tells you which passage it found.
+- **Previously** — reopen a story after a while and a card says where you were.
+  Once per story, then it gets out of the way.
+- **Fourteen views of the same story.** Storybook (prose), Chat (bubbles), Book
   (real two-page spreads with page-flips), Stage (RPG dialogue box with
   portraits), VN (visual-novel staging with sprites, backdrops and camera
   moves), **RPG** (the whole game interface — HUD, party panel, command row,
   and text that waits for you to press on), Sandbox (AI-designed presentation),
-  plus Overview, Highlights and Branches. Only the views you pin sit on the bar;
-  the rest live under "…".
+  Script, Panels and Atlas (below), Workspace (for working on the text rather
+  than reading it), plus Overview, Highlights and Branches. Only the views you
+  pin sit on the bar; the rest live under "…".
 - **Three of them show the story's SHAPE** rather than its words — the others
   are all timelines, and a long log needs a map as much as it needs a page.
   **Script** lays it out as a screenplay: real sluglines, character cues,
@@ -54,6 +77,8 @@ every prompt and reply passes through your own material on the way. See
   they arrive. Five looks: a **light**, a frosted **glass** lens, a floating
   **card**, a **ruler** (the reading guide, with everything above and below the
   line covered), and a cinema **iris**.
+- **Autoreader** — it moves on by itself at the end of a passage, with a pause
+  you set, and stops dead the moment you touch anything.
 - **Book pagination**, chapter openings, drop caps, running heads, bookmarks.
 
 ### Mark it up
@@ -78,17 +103,29 @@ every prompt and reply passes through your own material on the way. See
 - **Branches / What-Ifs** — SillyTavern swipes and Kobold alternates are
   readable as alternate takes. Multi-file branch exports are detected on import
   and attached to the story they forked from instead of landing as duplicates.
+- **Perform marks** — the same popover directs how a span *lands* as it streams:
+  hold it, rush it, put weight on one word, or cut speech off dead. **Sound
+  marks** fire one noise at one exact word rather than somewhere in the passage.
+  Both are stored beside the story and both are reversible.
 - **Pins & Sheets** — pin a passage, an AI table or a chart to a side dock;
   keep trackers as editable tables.
-- **Codex** — people, places and things are extracted as you read, with hover
-  tooltips on their mentions.
+- **Codex** — people, places and things gathered as you read, with hover
+  tooltips, a mention count, a jump to each one, and a character card's lorebook
+  folded in at import. Lock an entry and a rebuild keeps it.
 - **Lens** — a per-message override layer for rewrites and formatting. The
   source JSON is never touched; exporting with your edits is an explicit choice.
+- **Chatter Blend** — chat has a shape prose does not: you do four things and
+  the character answers all four at once, in order, like a form. Blend rewrites
+  the pair as one woven passage, shows you the diff, and keeps it as an
+  alternate with the original one click away.
+- **Zones, pockets and tasks** — a zone is a saved selection of messages you can
+  hand over as context; a pocket is a zone with a job attached; a task is that
+  aimed at one piece of work and re-runnable over the zones you choose.
 
 ### Make it yours
 
-- **40+ themes**, from Light/Dark/Sepia to Terminal (CRT), Windows 98, Aero
-  Glass, Synthwave, Grimoire, Cyberpunk, E-Ink, Game Boy, RPG Quest, Pixel Chat
+- **36 themes** plus your own, from Light/Dark/Sepia to Terminal (CRT),
+  Windows 98, Aero Glass, Synthwave, Grimoire, Cyberpunk, E-Ink, Game Boy, RPG Quest, Pixel Chat
   and MGS-style Codec — each with fitting fonts and optional ambient effects.
   Four of them are a *material* rather than a palette: **Risograph** (spot inks
   on toothy paper, printed a hair out of register), **Foil** (iridescence that
@@ -104,6 +141,8 @@ every prompt and reply passes through your own material on the way. See
   accent and cools into the prose, so the streaming tail reads as heat over
   settled text and nothing is ever hidden waiting to arrive. A view or a theme
   with a signature reveal uses it unless you turn theme effects off.
+- **A colour per speaker** — assigned automatically and overridden where two
+  clash, so you can follow a group chat without reading the names.
 - **Custom fonts** (upload your own), accent colours, font size, content width,
   paragraph spacing, dialogue styling and `[OOC: …]` handling.
 - **Auto-formatter** — regex find/replace with per-role targeting, live preview,
@@ -125,6 +164,8 @@ every prompt and reply passes through your own material on the way. See
   into one continuity. Nothing is copied between stories and neither is
   modified; a link is an observation held outside both, and it is never included
   in a Cut.
+- **Saved configurations** — keep a whole look, down to the reveal and the
+  markup rules, and come back to it by name.
 - **Workspaces** — a chip at the top of the reader narrows the whole app to one
   kind of work. **Read** keeps every way of reading and drops the writing tools;
   **Cowrite** keeps the assistant, the lists and the text, and stands the
@@ -158,6 +199,24 @@ every prompt and reply passes through your own material on the way. See
   point, so they cannot spoil what you have not reached. In group chats the
   subject follows whoever is on screen, and characters can see and react to what
   the others said. Nothing said in an interview is canon.
+- **Read with someone** — up to five characters watch the story with you and
+  react as it lands, mid-passage rather than at the end: the model is asked
+  first for the *moments* each of them would break in on, and only then for the
+  line. They hear each other and can answer, agree, talk over one another or
+  stay with the page, and you can reply to any of them. Two clamps, not one —
+  between messages they know only what has happened by that beat, and *within*
+  the message they see only what you have uncovered, so they genuinely do not
+  know how the sentence ends. Four settings for how much they say, including a
+  **dynamic** one that notices you turning back or re-reading a passage.
+  Nothing they say is canon, and none of it reaches the Lens, an export, or any
+  context assembled for the assistant.
+- **Write with someone** — the same character reading as a *writer*. One note
+  per passage once it finishes, on what is working, what is slack and what the
+  story just walked past — and, unlike the companion above, they read the
+  passage whole, because a note about a scene needs its ending. Highlight any
+  span and **Editor's view** shows the rewrite they would make as a diff
+  against what is there. It becomes real only when you accept it, and lands in
+  the Lens, so your imported text is untouched either way.
 - **Assistant, Cowrite, The long read** — scoped Q&A over the story, alternate-beat
   ranking and fusion, and a reader that walks a story no context could hold and
   builds one designed document from it: a running account, a timeline, a cast
@@ -182,6 +241,14 @@ every prompt and reply passes through your own material on the way. See
   asking for. Small local models otherwise answer with advice about rewriting
   instead of rewriting. The choice is spent when the message sends, so the next
   question is an ordinary question again.
+- **Scene art** — a picture generated from the passage itself and kept *beside*
+  it, never in it. You choose which beats get one, because a story with four
+  pictures in the right places reads better than one with forty. Any
+  OpenAI-compatible `/v1/images` endpoint, or **ComfyUI** — export your own
+  graph as an API workflow and point Aeia at the nodes.
+- **It can show you around** — with the AI Tour Guide on, the assistant can look
+  up how the app works, take you to the right view and change your display
+  settings. It cannot touch your stories, your endpoint or your data.
 - **Narrative Refinery** — extract and restyle prose with a fidelity check.
 - **Bring in a visitor** — a character from another chat, brought over as a
   short brief you read and correct before it is ever sent. They can be
@@ -228,6 +295,10 @@ optional and off until you turn it on.
   punctuation. Each step says what it costs, and the two that call a model are
   off by default.
 
+- **Your prompting comes across too** — import SillyTavern chat completion
+  presets and Aeia reads their prompts, their order and their samplers. Import
+  several and build one out of parts of each, including the prompts an author
+  shipped switched off.
 - **Shape the prompt in a browser** — a browser tab cannot be an endpoint
   (SillyTavern's *server* makes that call), so the extension does the same
   request-side work through the bridge instead. Same pipeline, same settings.
@@ -240,6 +311,9 @@ every change first.
 
 ### Share it
 
+- **Smart Export** — pick the speakers, the chapters and the asides *before*
+  anything is written, because "all of it, as markdown" is the special case
+  rather than the general one.
 - **Export as a readable page** — one self-contained `.html` file with the
   theme, dialogue styling, chapter structure, your highlights and the Director's
   per-scene mood baked in. It loads nothing from the network, so handing someone
@@ -347,16 +421,91 @@ without a Mac.
 ## Development
 
 ```bash
-npx tsc --noEmit                      # typecheck
-npx tsx src/utils/<name>.test.ts      # a unit suite (pure modules, no runner)
+npm test                              # typecheck + every unit suite + Playwright
+npm run test:unit                     # just the unit suites
+npx tsx src/utils/<name>.test.ts      # one of them, while working on it
 npm run test:e2e                      # build + Playwright
 npm run mobile                        # render at 390px and report what breaks
+cd src-tauri && cargo test            # the listener and the proxy wire
 ```
+
+### Tests
 
 Unit tests are plain `tsx` scripts over the pure modules in `src/utils` — no
 test framework. End-to-end tests run Playwright against `vite preview`, which
-serves the **last build**, so run `npm run build` before an E2E run or you are
-testing a stale bundle.
+serves the **last build**, so use `npm test` / `npm run test:e2e` (both build
+first) rather than calling `playwright` directly — against a stale `dist` a
+change appears to do nothing at all, which is a very convincing way to waste an
+afternoon.
+
+### Recording the demos
+
+```bash
+npm run media                            # stage ffmpeg, build, serve, record every clip
+npx tsx scripts/record-tour.ts company   # or just one, against a server you already run
+```
+
+The clips in `media/` are the **tour's own demo steps**, recorded as they run.
+They are already curated, self-contained and animated, which makes them the
+cheapest honest demo there is: nothing is staged, and a demo that breaks shows
+itself breaking. Each clip is cropped to the modal it measures at record time,
+because the steps differ in height by a factor of two.
+
+Playwright ships an ffmpeg, but it is a recording-only build with no GIF encoder
+and no libx264, which is what `stage-ffmpeg.sh` is for. It verifies itself with
+a real encode rather than `ffmpeg -version` — `-version` links a fraction of
+what a transcode does, so a half-staged tree reports success and then fails on
+the first clip.
+
+Upload the `.mp4`s anywhere that re-encodes GIFs to video anyway (Reddit does);
+use the `.gif`s in this README, which does not play mp4 inline.
+
+### Accessibility and a big library
+
+`e2e/a11y.spec.ts` runs axe over the library, the reader, Settings and the view
+menu, scoped to WCAG 2.1 A/AA, and **fails** on a violation. Its first run found
+four faults that had been shipping for months and that no checklist would have
+caught: seven `<select>` elements in Settings with no accessible name, three
+unlabelled sliders, and white-on-accent text at 2.54:1 against a 4.5 bar.
+
+That last one is why `readableInk` exists (`src/themes.ts`): the accent is
+themeable, so no fixed pairing works — white is right on Crimson and unreadable
+on Emerald. It measures the contrast and hands the answer to CSS as
+`--app-accent-ink`, and `index.css` applies it to every `bg-accent text-white`
+surface at once. Two shipped accents (`#e5341f`, `#8b5cf6`) sit just under 4.5:1
+against *any* ink; `themes.test.ts` names them and fails if a third appears.
+
+axe finds mechanical faults — a missing name, an unreachable contrast. It cannot
+tell you whether the reading order makes sense or whether a keyboard user can
+finish a task. Those still need a person.
+
+`e2e/large-library.spec.ts` seeds 400 stories and checks the library still
+opens. Measured 2026-09-08: 400 → 344 ms, 1,000 → 535 ms, 2,500 → 1,354 ms, with
+every card in the DOM and no virtualization. That only holds because the list
+reads the `metas` store (a story minus its messages); read the stories instead
+and the same screen goes from ~200 KB to ~200 MB. The spec's bounds are loose on
+purpose — they catch that, not a hundred milliseconds.
+
+### Driving the SillyTavern endpoint without SillyTavern
+
+Two scripts stand in for the halves that are hard to have in the room. Run them
+against the **desktop** app with its endpoint switched on:
+
+```bash
+python3 scripts/mock_model.py --port 8000      # a model that answers, and prints the prompt
+python3 scripts/st_probe.py --token <api key>  # SillyTavern's side of the conversation
+```
+
+Point *Where Aeia sends it* at `http://127.0.0.1:8000/v1`, and the API key the
+probe wants is the one on Aeia's endpoint panel — not your model's.
+
+`mock_model.py` prints every prompt it is handed, which is the only way to see
+what the request pipeline actually did. `st_probe.py` checks the answer against
+what SillyTavern requires rather than just printing it: that choice 0 arrives in
+pieces (a proxy that buffers looks identical to a working one until you time
+it), that a second choice comes back only when `n > 1`, that the two versions
+differ, and that the stream is closed with `[DONE]`. Add `--no-stream` or
+`--n 1` for the other two shapes.
 
 Visual features are screenshot-verified. If you are changing anything that
 paints — a theme, a scene effect, the reading spotlight — look at the render
@@ -396,6 +545,39 @@ Three rules worth knowing before you add anything:
   mark, an edit, a visitor, a Cut being opened — calls `flushV2()` instead of
   leaving the save to the 400ms debounce. An IndexedDB write cannot hold up a
   page unload, and this trap has cost four features so far.
+
+## Where your stories live
+
+Everything is in the browser's own storage — IndexedDB for the stories,
+`localStorage` for the settings — so on the web it belongs to whichever browser
+and origin you opened Aeia in. The desktop app keeps its own copy, under the
+app identifier:
+
+| | |
+|---|---|
+| Windows | `%LOCALAPPDATA%\com.aeia.reader` |
+| Linux | `~/.local/share/com.aeia.reader` |
+| macOS | `~/Library/Application Support/com.aeia.reader` |
+
+**Upgrading from a build before 0.1.0?** The identifier was
+`com.aurareader.reader` and is now `com.aeia.reader`, which renames that folder
+— so the app starts on an empty library and your stories are still sitting in
+the old one. Copy the old directory over the new one (with the app closed), or
+export from the old build and import into the new one. This is the only time it
+will move.
+
+Nothing is uploaded anywhere at any point, which is also why **you** are the
+backup: Settings → Your Library → *Back up & restore* writes every story with
+its notes, pins, sheets, marks and settings to one file. Restoring can **fill
+in** what is missing or **replace** what is there, and it tells you which, with
+counts, before it does anything.
+
+Browsers also cap how much a site may keep, and a story with generated art in
+it is not small. Aeia asks the browser to make its storage persistent, watches
+the headroom and says so at 80% and again at 95% — while there is still room to
+act, rather than after a write has already failed.
+
+---
 
 ## Which build am I running?
 
