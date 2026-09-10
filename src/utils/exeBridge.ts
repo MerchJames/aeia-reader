@@ -95,15 +95,27 @@ export interface BridgeAddress {
   token: string;
 }
 
+/**
+ * Who is asking for the socket.
+ *
+ * The listener is shared and named-holder based — it lives while ANYONE still
+ * wants it — because the sync panel wants it for the minute it is open and the
+ * proxy wants it for a whole evening. Rust requires the name; a call without
+ * one is rejected before it reaches the listener at all, which is how this
+ * whole path was silently dead: `bridge_start` grew the argument when the proxy
+ * was added and only the proxy's caller was updated.
+ */
+const SYNC_HOLDER = 'sync';
+
 /** Start listening. Resolves with where SillyTavern should call. */
 export const startListener = async (): Promise<BridgeAddress> => {
   const token = bridgeToken();
-  const port = await call<number>('bridge_start', { token });
+  const port = await call<number>('bridge_start', { token, holder: SYNC_HOLDER });
   return { port, token };
 };
 
 export const stopListener = async (): Promise<void> => {
-  await call<void>('bridge_stop');
+  await call<void>('bridge_stop', { holder: SYNC_HOLDER });
 };
 
 /** The port, or null when nothing is listening — including after a timeout. */

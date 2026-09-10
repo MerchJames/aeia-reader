@@ -9,8 +9,11 @@
  */
 import {
   HISTORY_BUDGET, THREAD_TURNS, AskTurn, askSamplers, askSystem, buildAskMessages,
-  castOf, clampHistory, hasAside, historyBlock, parseAnswer, readThread, spokenOnly, splitAnswer,
+  castOf, clampHistory, hasAside, historyBlock, parseAnswer, readThread, readingCast,
+  spokenOnly, splitAnswer, storyCast,
+  type HistoryMessage,
 } from './askCharacter';
+import type { Story } from '../types';
 
 let pass = 0, fail = 0;
 const ok = (cond: boolean, msg: string) => { if (cond) { pass++; } else { fail++; console.error('✗', msg); } };
@@ -272,6 +275,177 @@ ok((local.temperature ?? 0) > 0.5,
   'a voice task samples warm — asking twice and getting the same sentence breaks the illusion');
 ok(remote.repetition_penalty === undefined, 'non-OpenAI samplers are not sent to a remote endpoint');
 ok(local.repetition_penalty !== undefined, 'but they are sent locally');
+
+
+/* --- a group transcript needs turn boundaries ----------------------------- */
+
+/*
+ * "Name: content" stops being unambiguous once a passage is three paragraphs
+ * long and contains quoted speech of its own: the next "Bram:" reads as a line
+ * inside Mara's narration rather than as Bram taking a turn. From the outside
+ * that looks like the model ignoring the other character — the words were in
+ * the payload and the turn boundary was not.
+ */
+{
+  const group: HistoryMessage[] = [
+    { id: '1', name: 'Mara', content: 'She turned away.\n\n"Bram: he never listens," she muttered.' },
+    { id: '2', name: 'Bram', content: 'I heard that.' },
+    { id: '3', name: 'Elara', content: 'Both of you, quiet.' },
+  ];
+  const block = historyBlock(group);
+  ok(block.includes('--- Bram ---'), 'each turn in a group chat gets a rule of its own');
+  ok(block.includes('--- Elara ---'), 'for every speaker');
+  ok(block.indexOf('--- Bram ---') > block.indexOf('Bram: he never listens'),
+    'so a name inside the prose cannot be mistaken for the next turn');
+}
+
+// A two-hander keeps the compact form — rules between every line of a
+// back-and-forth are noise, not clarity.
+{
+  const pair: HistoryMessage[] = [
+    { id: '1', name: 'Mara', content: 'one' },
+    { id: '2', name: 'You', content: 'two' },
+  ];
+  ok(historyBlock(pair) === 'Mara: one\n\nYou: two', 'two voices stay compact');
+}
+
+/* --- every voice survives the window ------------------------------------- */
+
+/*
+ * A pure recency window is right for a two-hander and quietly wrong for a group
+ * chat. Measured before the fix: 42 messages in, the window kept 16 — all of
+ * them Mara — so the system prompt named Bram in the cast while the transcript
+ * held not one word he had ever said. The interviewee could not be asked about
+ * him, which reads as the model being stupid and was the payload being empty.
+ */
+{
+  const many: HistoryMessage[] = [
+    { id: 'b1', name: 'Bram', content: 'I buried the key under the third stone.' },
+  ];
+  for (let i = 0; i < 40; i++) {
+    many.push({ id: `m${i}`, name: 'Mara', content: 'Mara talks at length. '.repeat(14) });
+  }
+  many.push({ id: 'anchor', name: 'Mara', content: 'She looked at the stones.' });
+
+  const kept = clampHistory(many, 'anchor');
+  ok(kept.some(m => m.name === 'Bram'), 'a voice from early in the chat is not dropped entirely');
+  ok(kept[0].name === 'Bram', 'and comes back in reading order, not bolted on the end');
+  ok(kept.filter(m => m.name === 'Bram').length === 1,
+    'one turn each — this is proof they exist, not a second transcript');
+  ok(kept[kept.length - 1].id === 'anchor', 'the anchor is still the last thing they know');
+  ok(!kept.some(m => many.indexOf(m) > many.findIndex(x => x.id === 'anchor')),
+    'and nothing past it ever gets in');
+}
+
+// A long-winded rescued turn is trimmed, not skipped.
+{
+  const long = 'x'.repeat(2000);
+  const msgs: HistoryMessage[] = [{ id: 'e1', name: 'Bram', content: long }];
+  for (let i = 0; i < 40; i++) msgs.push({ id: `m${i}`, name: 'Mara', content: 'talk. '.repeat(40) });
+  msgs.push({ id: 'anchor', name: 'Mara', content: 'end' });
+  const bram = clampHistory(msgs, 'anchor').find(m => m.name === 'Bram');
+  ok(!!bram && bram.content.length < 600, 'a rescued turn is clipped to a recognisable size');
+}
+
+// The two-hander case must be untouched — this is the common one.
+{
+  const pair: HistoryMessage[] = [
+    { id: 'a', name: 'Mara', content: 'one' },
+    { id: 'b', name: 'You', content: 'two' },
+    { id: 'c', name: 'Mara', content: 'three' },
+  ];
+  ok(clampHistory(pair, 'c').length === 3, 'a short two-hander is unchanged');
+}
+
+ok(clampHistory([{ id: 'a', name: 'Mara', content: 'x' }], 'nope').length === 0,
+  'and it still fails closed on an unknown anchor');
+
+
+/* ── Who is in a story, branches included ────────────────────────────────── */
+{
+  /*
+   * A branch's messages live on the TIMELINE, not on the story. So a group chat
+   * attached as a what-if to a solo story is, as far as `story.messages` goes,
+   * still a story with one character in it — and everything keyed off that
+   * count behaves as though it were solo, while the reader can plainly see
+   * several people talking.
+   */
+  const solo = {
+    userName: 'You',
+    messages: [
+      { name: 'Mara', role: 'assistant' },
+      { name: 'You', role: 'user' },
+    ],
+    timelines: [{
+      messages: [
+        { name: 'Elara', role: 'assistant' },
+        { name: 'You', role: 'user' },
+        { name: 'Rook', role: 'assistant' },
+      ],
+    }],
+  };
+
+  const cast = storyCast(solo);
+  ok(cast.includes('Mara'), 'the main timeline is in the cast');
+  ok(cast.includes('Elara') && cast.includes('Rook'),
+    'and so is everyone who only ever speaks inside an attached branch');
+  ok(!cast.includes('You'), 'the reader is not a character');
+  ok(cast.length === 3, 'three speakers, so this story is not solo');
+
+  ok(storyCast({ messages: [{ name: 'Mara', role: 'assistant' }] }).length === 1,
+    'a story with no branches is unchanged');
+  ok(storyCast({}).length === 0, 'and an empty story has nobody in it');
+
+  // Same name in the trunk and a branch is one person.
+  ok(storyCast({
+    messages: [{ name: 'Mara', role: 'assistant' }],
+    timelines: [{ messages: [{ name: 'mara', role: 'assistant' }] }],
+  }).length === 1, 'and a speaker who appears in both is counted once');
+}
+
+/* ── Who is in the story the reader is LOOKING AT ────────────────────────── */
+{
+  /*
+   * The over-correction of the block above: sweeping every branch is the right
+   * answer to "does this story have more than one voice" and the wrong one for
+   * a list of faces, which put a group chat's whole cast into the settings of a
+   * trunk where none of them ever speak.
+   */
+  const story = {
+    userName: 'You',
+    messages: [
+      { id: 'a', role: 'assistant', name: 'Mara', content: 'one' },
+      { id: 'b', role: 'user', name: 'You', content: 'two' },
+      { id: 'c', role: 'assistant', name: 'Mara', content: 'three' },
+    ],
+    timelines: [{
+      id: 'tl-1', name: 'what if', forkIndex: 2, addedAt: 0,
+      messages: [
+        { id: 'd', role: 'assistant', name: 'Elara', content: 'four' },
+        { id: 'e', role: 'assistant', name: 'Rook', content: 'five' },
+      ],
+    }],
+  } as unknown as Story;
+
+  const trunk = readingCast(story);
+  ok(trunk.length === 1 && trunk[0] === 'Mara',
+    'on the trunk, only the people who actually speak on the trunk');
+
+  const branch = readingCast({ ...story, activeTimeline: 'tl-1' } as Story);
+  ok(branch.includes('Elara') && branch.includes('Rook'),
+    'opening the branch is what introduces its cast');
+  ok(branch.includes('Mara'), 'along with everyone shared up to the fork');
+
+  // A face given on a branch must not become unreachable on the trunk — no row
+  // to change it, no × to clear it, still in use inside the branch.
+  const kept = readingCast(story, ['Elara']);
+  ok(kept.includes('Elara') && !kept.includes('Rook'),
+    'someone who already has a picture is kept wherever they speak, and nobody else');
+  ok(kept[0] === 'Mara', 'the people on the page come first');
+
+  ok(readingCast(story, ['  ELARA  ']).includes('Elara'),
+    'and the name is matched the way every other name in this file is');
+}
 
 console.log(`${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);

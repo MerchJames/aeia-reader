@@ -429,6 +429,222 @@ export const GUIDE_DOCS: readonly DocEntry[] = [
     where: { panel: 'sync' },
   },
   {
+    id: 'blend',
+    title: 'The character answers everything I did in one lump — can that be fixed?',
+    body:
+      'Chatter Blend rewrites a turn and its reply as one woven passage, so the '
+      + 'answers land next to the things they answer instead of all at the end. It '
+      + 'shows you the diff first and keeps the result as an alternate you switch to '
+      + 'in the Overview — your original passage is never touched.',
+    keywords: [
+      'blend', 'chatter', 'merge', 'combine', 'weave', 'interleave', 'one message',
+      'responds to everything', 'prose', 'rearrange', 'novelise',
+    ],
+    where: { view: 'overview' },
+    see: ['lens', 'views'],
+  },
+  {
+    id: 'presets',
+    title: 'Can I use my SillyTavern chat completion presets?',
+    body:
+      'Yes — import the .json and Aeia reads its prompts, their order and its '
+      + 'sampler settings. You can import several and build a Lens Completion from '
+      + 'parts of each: the system prompt from one, the style rules from another. '
+      + 'Prompts an author left switched off are still there to pick from.',
+    keywords: [
+      'preset', 'chat completion', 'cc preset', 'prompt manager', 'import preset',
+      'lucid loom', 'prompts', 'system prompt', 'jailbreak', 'sampler', 'lens completion',
+    ],
+    where: { panel: 'settings', settingsSection: 'ai' },
+    see: ['ai-connect'],
+  },
+  {
+    id: 'form-assist',
+    title: 'Can something write the document form for me?',
+    body:
+      'Describe it, or paste a rough draft, and the assistant turns it into a blank '
+      + 'form you can use — headings and placeholders, no content. You see it before '
+      + 'it is used, and can edit it like anything you had pasted yourself.',
+    keywords: [
+      'form', 'format', 'template', 'shape', 'document format', 'draft', 'help me write',
+      'long read format', 'structure',
+    ],
+    see: ['summarize'],
+  },
+  {
+    id: 'tours',
+    title: 'Is there a walkthrough of a feature?',
+    body:
+      'Guided tours are in the Tour, one per part of the app. Each takes you through '
+      + 'the live screen, switching views and opening panels as it goes, and dims '
+      + 'everything except the thing it is talking about. They can be left at any '
+      + 'point and picked up again later.',
+    keywords: [
+      'tour', 'guide', 'walkthrough', 'tutorial', 'how do i use', 'show me', 'spotlight',
+      'onboarding', 'help', 'lost', 'confused',
+    ],
+    where: { panel: 'tour' },
+    see: ['privacy'],
+  },
+  {
+    id: 'marks',
+    title: 'Can I change how one line performs as it streams?',
+    body:
+      'Select any span and the popover offers colour, underline, strike-through, '
+      + 'emphasis, and direction — hold a line, rush it, cut it off dead. Sound '
+      + 'marks put a noise at an exact word. All of it is stored beside the story, '
+      + 'so turning it off restores the plain text.',
+    keywords: [
+      'mark', 'marks', 'emphasis', 'perform', 'direction', 'pacing', 'pause', 'hold',
+      'underline', 'strike', 'sound effect', 'sfx', 'timing', 'stress',
+    ],
+    see: ['highlights', 'reading-modes'],
+  },
+  {
+    id: 'director',
+    title: 'What does the Scene Director do?',
+    body:
+      'It reads a passage and decides how it should be presented: the mood of the '
+      + 'page, the weather, which words land hard, where a silence goes. In Cinema '
+      + 'and Performance modes that read drives the reveal itself. Optional, off by '
+      + 'default, and its read is stored so it is paid for once.',
+    keywords: [
+      'director', 'scene director', 'cinema', 'mood', 'atmosphere', 'weather',
+      'presentation', 'automatic', 'kinetic', 'pacing',
+    ],
+    where: { panel: 'settings', settingsSection: 'director' },
+    see: ['reading-modes', 'marks'],
+  },
+  {
+    id: 'sandbox',
+    title: 'What is the Sandbox view?',
+    body:
+      'The one view with no fixed layout: the AI designs each beat as it arrives — '
+      + 'a full-bleed image here, a tight column of dialogue there, a stat card '
+      + 'when the story turns to numbers. The Studio is where you set its palette '
+      + 'and house rules so it stays your book rather than a demo reel.',
+    keywords: [
+      'sandbox', 'ai layout', 'designed', 'per message', 'studio', 'palette',
+      'presentation', 'generated layout',
+    ],
+    where: { view: 'sandbox' },
+    see: ['views', 'scene-art'],
+  },
+  {
+    id: 'audio',
+    title: 'Can it make sound as well as read aloud?',
+    body:
+      'Soundscapes run under a scene — rain, a tavern, a road at night — and sound '
+      + 'marks fire one noise at an exact word. Both are separate from the voice, '
+      + 'so you can have a room tone with no narration or a narrator in silence. '
+      + 'The mixer sets how loud each layer sits.',
+    keywords: [
+      'sound', 'audio', 'soundscape', 'ambience', 'ambient', 'music', 'sfx',
+      'noise', 'rain', 'mixer', 'volume', 'atmosphere',
+    ],
+    see: ['tts', 'marks'],
+  },
+  {
+    id: 'audiobook',
+    title: 'Can I turn a story into an audio file?',
+    body:
+      'Yes — the audiobook renderer reads the whole story with the voices you have '
+      + 'cast and writes one file. It uses the Lens text, so your rewrites are what '
+      + 'gets read, and it can skip the passages you have hidden.',
+    keywords: [
+      'audiobook', 'audio file', 'mp3', 'wav', 'render', 'narration', 'export audio',
+      'listen', 'podcast',
+    ],
+    see: ['tts', 'export'],
+  },
+  {
+    id: 'visitors',
+    title: 'Can a character from another chat show up in this one?',
+    body:
+      'A visitor is a brief written from one of your other stories — who they are, '
+      + 'how they speak, what they would notice here. Invite one and the assistant '
+      + 'can answer as them. The brief stays with the story you invited them into '
+      + 'and never travels in an export.',
+    keywords: [
+      'visitor', 'guest', 'crossover', 'another chat', 'other story', 'cameo',
+      'invite', 'character from', 'cross over',
+    ],
+    see: ['ask-character', 'crossings'],
+  },
+  {
+    id: 'crossings',
+    title: 'Can I link two of my stories together?',
+    body:
+      'Branching draws the connections between chats — a shared character, a place '
+      + 'both stories use, an event one of them remembers. It is a map of your own '
+      + 'library rather than anything inside one story, so it lives across all of '
+      + 'them and never travels in a Cut.',
+    keywords: [
+      'branching', 'crossing', 'link stories', 'connect', 'shared', 'multiverse',
+      'between chats', 'same character', 'universe',
+    ],
+    where: { panel: 'branching' },
+    see: ['visitors', 'branches'],
+  },
+  {
+    id: 'cowrite',
+    title: 'Can it help me write the next bit?',
+    body:
+      'The Chat view is a working conversation about the story rather than a rewrite '
+      + 'of it: ask for a continuation, a different angle, a line that lands better. '
+      + 'Anything it suggests for the text itself arrives as a proposal you accept '
+      + 'or reject — nothing is written behind you.',
+    keywords: [
+      'cowrite', 'co-write', 'write with', 'continue', 'draft', 'suggest', 'help me write',
+      'next scene', 'assistant', 'collaborate',
+    ],
+    where: { view: 'chat' },
+    see: ['ai-lens', 'workspace'],
+  },
+  {
+    id: 'throughline',
+    title: 'Does it remember the character I play across chats?',
+    body:
+      'A throughline is the record of the person you play — how they act, what they '
+      + 'refuse, the shape they hold across every story rather than one. It is '
+      + 'yours, not any chat’s, so it is kept globally and left out of anything you '
+      + 'share.',
+    keywords: [
+      'throughline', 'my character', 'persona', 'across stories', 'who i play',
+      'arc', 'consistency', 'record',
+    ],
+    see: ['pins', 'crossings'],
+  },
+  {
+    id: 'pockets',
+    title: 'What is a context pocket?',
+    body:
+      'A zone with a job attached. Where a zone is a saved selection of the story, '
+      + 'a pocket is that selection plus what you want done with it — “all of my own '
+      + 'lines, so you can write as me”, “every scene in the mill, for a summary”. '
+      + 'Reusable, so a job you do often becomes one click.',
+    keywords: [
+      'pocket', 'context pocket', 'reusable', 'job', 'recipe', 'saved task',
+      'selection', 'preset context',
+    ],
+    see: ['zones', 'tasks'],
+  },
+  {
+    id: 'appearance',
+    title: 'How do I change how it looks?',
+    body:
+      'Themes, accent, font and text size are in Appearance, and there are thirty-odd '
+      + 'themes. Character colours give each speaker their own, dialogue styling sets '
+      + 'how speech is drawn, and a Saved Configuration keeps a whole look you can '
+      + 'come back to.',
+    keywords: [
+      'theme', 'appearance', 'font', 'colour', 'color', 'dark', 'light', 'text size',
+      'look', 'style', 'typography', 'accent',
+    ],
+    where: { panel: 'settings', settingsSection: 'appearance' },
+    see: ['reading-modes', 'views'],
+  },
+  {
     id: 'privacy',
     title: 'Where does my data go?',
     body:
@@ -452,6 +668,66 @@ const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
 const words = (s: string) => normalize(s).split(/\s+/).filter(w => w.length > 1);
 
 /**
+ * Question furniture, which must not score.
+ *
+ * This was a real failure, and an invisible one. "where are the highlights"
+ * returned `views, backup, ui-modes, branches, codex` — everything except the
+ * entry called Highlights. The word `highlights` scored 6 on the right entry,
+ * and `where`, `are` and `the` scored one or two apiece on every entry whose
+ * body happened to contain them, which is nearly all of them. Enough noise
+ * outvoted the one real signal.
+ *
+ * The reason it matters more here than in most search boxes: the assistant asks
+ * this in the reader's own words — whole questions, not keywords — so the
+ * furniture is always present and always drowning the term that carries the
+ * meaning. An answer of "I don't see a feature called that" from an app that
+ * has the feature is the worst thing this manual can produce.
+ *
+ * Only words that discriminate nothing are in here. "read", "voice", "show" are
+ * not furniture; they are what somebody is asking about.
+ */
+const STOPWORDS = new Set([
+  'a', 'an', 'and', 'any', 'are', 'as', 'at', 'be', 'been', 'but', 'by', 'can',
+  'did', 'do', 'does', 'for', 'from', 'get', 'got', 'has', 'have', 'how', 'in',
+  'into', 'is', 'it', 'its', 'me', 'my', 'no', 'not', 'of', 'on', 'or', 'so',
+  'that', 'the', 'their', 'them', 'then', 'there', 'these', 'they', 'this',
+  'to', 'was', 'were', 'what', 'when', 'where', 'which', 'who', 'why', 'will',
+  'with', 'would', 'you', 'your',
+]);
+
+/**
+ * The words in a query that carry meaning.
+ *
+ * Falls back to the whole list when a query is nothing BUT furniture, so that
+ * "what is this" scores something rather than silently scoring zero — but that
+ * is a query with no signal in it, and what it deserves is the index.
+ */
+/**
+ * Crude singular/plural folding.
+ *
+ * The failure this fixes: the Highlights entry lists the keyword `highlight`,
+ * and every reader on earth types `highlights`. Neither `k === term` nor
+ * `k.includes(term)` is true in that direction, so the one entry actually about
+ * the feature scored NOTHING for the word naming it, and lost to entries that
+ * happened to mention it in passing.
+ *
+ * Deliberately not a real stemmer. A keyword list written by hand does not need
+ * Porter; it needs plurals to stop being a different word.
+ */
+const stem = (w: string): string => {
+  if (w.length > 4 && w.endsWith('ies')) return `${w.slice(0, -3)}y`;
+  if (w.length > 4 && w.endsWith('es')) return w.slice(0, -2);
+  if (w.length > 3 && w.endsWith('s') && !w.endsWith('ss')) return w.slice(0, -1);
+  return w;
+};
+
+const meaningful = (query: string): string[] => {
+  const all = words(query);
+  const kept = all.filter(w => !STOPWORDS.has(w));
+  return kept.length ? kept : all;
+};
+
+/**
  * Score one entry against a query.
  *
  * Keywords are weighted far above body text because they are the reader's
@@ -463,20 +739,38 @@ const words = (s: string) => normalize(s).split(/\s+/).filter(w => w.length > 1)
 const score = (entry: DocEntry, query: string): number => {
   const q = normalize(query).trim();
   if (!q) return 0;
-  const terms = words(q);
+  const terms = meaningful(q);
   if (!terms.length) return 0;
 
   let total = 0;
   const keywords = entry.keywords.map(k => normalize(k));
+  const keyStems = new Set(keywords.flatMap(k => k.split(' ').map(stem)));
+  const idStems = new Set(entry.id.split('-').map(stem));
   const title = normalize(entry.title);
   const body = normalize(entry.body);
 
-  // A whole-phrase keyword hit is the strongest signal there is: the reader
-  // typed the exact thing somebody anticipated them typing.
-  if (keywords.some(k => k === q || q.includes(k) && k.includes(' '))) total += 12;
+  /*
+   * A whole-PHRASE keyword hit is the strongest signal there is: the reader
+   * typed the exact thing somebody anticipated them typing.
+   *
+   * Multi-word only, and that is the whole point of the condition. `k === q` on
+   * a single word was worth twelve — double what the same match earns below —
+   * so any entry listing "highlights" among its keywords beat the entry
+   * actually called Highlights, whose own keyword list says "highlight". One
+   * tangential mention outranked the subject, and only for a one-word query:
+   * ask "highlights" and it was wrong, ask "where are the highlights" and it
+   * was right, which is not a bug anyone would think to look for.
+   */
+  if (keywords.some(k => k.includes(' ') && (k === q || q.includes(k)))) total += 12;
 
   for (const term of terms) {
-    if (keywords.some(k => k === term)) total += 6;
+    const root = stem(term);
+    // The entry whose SUBJECT is the word asked about beats every entry that
+    // merely mentions it. Without this, "highlights" ranked the views entry —
+    // which lists Highlights among eleven other views — above the entry
+    // actually about them, because a long body has more words in it to hit.
+    if (idStems.has(root)) total += 8;
+    if (keyStems.has(root)) total += 6;
     else if (keywords.some(k => k.includes(term))) total += 3;
     if (title.includes(term)) total += 2;
     if (body.includes(term)) total += 1;
